@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+
+{% block title %}Import preview — {{ app_name }}{% endblock %}
+{% block page_title %}Import preview{% endblock %}
+{% block page_subtitle %}
+    {{ pending.filename }} → {{ pending.account_name }}
+{% endblock %}
+
+{% block content %}
+
+{# Summary banner #}
+<div class="flex gap-3 mb-5 flex-wrap">
+    <div class="badge badge-lg badge-success gap-1">
+        <i class="ti ti-plus text-xs" aria-hidden="true"></i>
+        {{ pending.new_count }} new
+    </div>
+    {% if pending.match_count %}
+    <div class="badge badge-lg badge-warning gap-1">
+        <i class="ti ti-link text-xs" aria-hidden="true"></i>
+        {{ pending.match_count }} possible match{{ 'es' if pending.match_count != 1 }}
+    </div>
+    {% endif %}
+    {% if pending.duplicate_count %}
+    <div class="badge badge-lg badge-ghost gap-1">
+        <i class="ti ti-copy-off text-xs" aria-hidden="true"></i>
+        {{ pending.duplicate_count }} duplicate{{ 's' if pending.duplicate_count != 1 }} skipped
+    </div>
+    {% endif %}
+</div>
+
+<form method="post" action="/import/confirm/{{ token }}">
+
+    {# ── Import status choice ────────────────────────────────────────── #}
+    <div class="card bg-base-100 shadow-sm mb-5">
+        <div class="card-body py-4 px-5">
+            <h3 class="font-medium text-sm mb-3">Import status</h3>
+
+            {% if pending.has_status_override %}
+            {# Banktivity and other apps with per-transaction status #}
+            <div class="flex items-center gap-3">
+                <div class="badge badge-success gap-1">
+                    <i class="ti ti-check text-xs" aria-hidden="true"></i>
+                    Status imported from source
+                </div>
+                <p class="text-xs text-base-content/50">
+                    Transaction statuses (Cleared, Reconciled) are preserved
+                    from {{ pending.file_format }}.
+                </p>
+            </div>
+            {# Hidden field so the form still submits #}
+            <input type="hidden" name="import_status" value="cleared">
+
+            {% else %}
+            {# OFX, generic CSV — user chooses global status #}
+            <div class="flex gap-4 flex-wrap">
+
+                <label class="flex items-start gap-3 cursor-pointer group">
+                    <input type="radio"
+                           name="import_status"
+                           value="uncleared"
+                           class="radio radio-sm mt-0.5"
+                           {% if pending.suggested_status == 'uncleared' %}checked{% endif %}>
+                    <div>
+                        <div class="text-sm font-medium">Uncleared</div>
+                        <div class="text-xs text-base-content/50">
+                            Transactions need your review before being confirmed.
+                            Recommended for ongoing imports.
+                        </div>
+                        {% if pending.suggested_status == 'uncleared' %}
+                        <div class="badge badge-xs badge-primary mt-1">Recommended</div>
+                        {% endif %}
+                    </div>
+                </label>
+
+                <label class="flex items-start gap-3 cursor-pointer group">
+                    <input type="radio"
+                           name="import_status"
+                           value="cleared"
+                           class="radio radio-sm mt-0.5"
+                           {% if pending.suggested_status == 'cleared' %}checked{% endif %}>
+                    <div>
+                        <div class="text-sm font-medium">Cleared</div>
+                        <div class="text-xs text-base-content/50">
+                            All transactions marked as verified immediately.
+                            Recommended for initial setup or historical imports.
+                        </div>
+                        {% if pending.suggested_status == 'cleared' %}
+                        <div class="badge badge-xs badge-primary mt-1">Recommended</div>
+                        {% endif %}
+                    </div>
+                </label>
+
+            </div>
+            {% endif %}
+
+        </div>
+    </div>
+
+    {# ── Potential matches ───────────────────────────────────────────── #}
+    {% if matches %}
+    <div class="card bg-base-100 shadow-sm mb-5 border border-warning/30">
+        <div class="card-body py-4 px-5">
+            <h3 class="font-medium text-sm mb-1">
+                <i class="ti ti-link text-warning" aria-hidden="true"></i>
+                Possible matches with manual entries
+            </h3>
+            <p class="text-xs text-base-content/50 mb-4">
+                These imported transactions may match transactions you already
+                entered manually. Accept to merge them (no duplicate created),
+                or reject to import as a new transaction.
+            </p>
+
+            <div class="divide-y divide-base-200">
+            {% for tx in matches %}
+            <div class="py-3">
+                <div class="grid grid-cols-2 gap-4 mb-2">
+
+                    {# OFX side #}
+                    <div class="text-xs">
+                        <div class="text-base-content/40 mb-1 uppercase tracking-wide">
+                            From bank file
+                        </div>
+                        <div class="font-medium">{{ tx.payee_raw or tx.memo or '—' }}</div>
+                        <div class="text-base-content/50">
+                            {{ tx.date_display }}
+                        </div>
+                        <div class="{{ tx.amount_color }} font-medium tabular-nums">
+                            {{ tx.amount_display }}
+                        </div>
+                    </div>
+
+                    {# Manual entry side #}
+                    <div class="text-xs">
+                        <div class="text-base-content/40 mb-1 uppercase tracking-wide">
+                            Manual entry
+                        </div>
+                        <div class="font-medium">
+                            {{ tx.match_tx_payee or '—' }}
+                        </div>
+                        <div class="text-base-content/50">
+                            {{ tx.match_tx_date }}
+                        </div>
+                        <div class="{{ tx.amount_color }} font-medium tabular-nums">
+                            {{ tx.amount_display }}
+                        </div>
+                    </div>
+
+                </div>
+
+                {# Accept/reject toggle #}
+                <div class="flex items-center gap-3">
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox"
+                               name="accept_match"
+                               value="{{ tx.fitid }}"
+                               class="checkbox checkbox-sm checkbox-warning"
+                               checked>
+                        <span class="text-xs">Accept match — merge, don't create duplicate</span>
+                    </label>
+                </div>
+            </div>
+            {% endfor %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── New transactions table ──────────────────────────────────────── #}
+    {% if new_txns %}
+    <div class="card bg-base-100 shadow-sm mb-5">
+        <div class="card-body py-4 px-5">
+            <h3 class="font-medium text-sm mb-3">
+                New transactions
+                <span class="text-base-content/40 font-normal">({{ new_txns | length }})</span>
+            </h3>
+            <div class="overflow-x-auto">
+                <table class="table table-sm w-full">
+                    <thead>
+                        <tr class="text-xs text-base-content/50 border-b border-base-200">
+                            <th class="px-2 w-24">Date</th>
+                            <th class="px-2">Payee</th>
+                            <th class="px-2">Memo</th>
+                            <th class="px-2 text-right w-28">Amount</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for tx in new_txns %}
+                        <tr class="border-b border-base-100 hover:bg-base-50 text-sm">
+                            <td class="px-2 py-1.5 text-xs text-base-content/60 whitespace-nowrap">
+                                {{ tx.date_display }}
+                            </td>
+                            <td class="px-2 py-1.5 max-w-[180px] truncate">
+                                {{ tx.payee_raw or '—' }}
+                            </td>
+                            <td class="px-2 py-1.5 max-w-[180px] truncate
+                                       text-base-content/50 text-xs italic">
+                                {{ tx.memo or '' }}
+                            </td>
+                            <td class="px-2 py-1.5 text-right tabular-nums
+                                       font-medium {{ tx.amount_color }}">
+                                {{ tx.amount_display }}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── Nothing to import ───────────────────────────────────────────── #}
+    {% if not new_txns and not matches %}
+    <div class="card bg-base-100 shadow-sm mb-5">
+        <div class="card-body py-8 text-center">
+            <i class="ti ti-circle-check text-3xl text-success block mb-2"
+               aria-hidden="true"></i>
+            <p class="text-sm font-medium">All transactions already imported</p>
+            <p class="text-xs text-base-content/50 mt-1">
+                {{ pending.duplicate_count }} duplicate{{ 's' if pending.duplicate_count != 1 }}
+                were found and will be skipped.
+            </p>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── Confirm / Cancel ────────────────────────────────────────────── #}
+    <div class="flex gap-3">
+        <a href="/import" class="btn btn-ghost flex-1">Cancel</a>
+        <button type="submit" class="btn btn-primary flex-1 gap-2"
+            {% if not new_txns and not matches %}disabled{% endif %}>
+            <i class="ti ti-file-import" aria-hidden="true"></i>
+            {% if new_txns or matches %}
+                Import {{ (new_txns | length) + (matches | length) }} transaction{{ 's' if (new_txns | length) + (matches | length) != 1 }}
+            {% else %}
+                Nothing to import
+            {% endif %}
+        </button>
+    </div>
+
+</form>
+
+{% endblock %}

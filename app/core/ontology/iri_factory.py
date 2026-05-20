@@ -50,6 +50,11 @@ def new_valuation_iri() -> NamedNode:
     return NamedNode(MFL + "ValuationEvent_" + uuid.uuid4().hex[:8])
 
 
+def new_import_batch_iri() -> NamedNode:
+    """Return a new unique IRI for an ImportBatch instance."""
+    return NamedNode(MFL + "ImportBatch_" + uuid.uuid4().hex[:8])
+
+
 def iri_key(iri: NamedNode) -> str:
     """
     Return the local name of an IRI for use in URLs.

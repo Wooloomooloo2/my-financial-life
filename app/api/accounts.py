@@ -30,6 +30,7 @@ from app.core.transactions.transactions import (
     get_transactions_for_account,
     get_categories_for_select,
     STATUS_OPTIONS,
+    create_manual_transaction,
 )
 
 router = APIRouter()

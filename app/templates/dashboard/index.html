@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — {{ app_name }}{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+{% block page_subtitle %}{{ data.timescale_label }} · {{ data.period_start }} – {{ data.period_end }}{% endblock %}
+
+{% block content %}
+
+{# ── Timescale selector ───────────────────────────────────────────────── #}
+<div class="flex justify-end mb-5">
+    <div class="join">
+        {% for code, label in timescale_options %}
+        <a href="/?ts={{ code }}"
+           class="join-item btn btn-sm
+               {% if data.timescale == code %}btn-primary{% else %}btn-ghost border border-base-300{% endif %}">
+            {{ label }}
+        </a>
+        {% endfor %}
+    </div>
+</div>
+
+{# ── Summary stat cards ───────────────────────────────────────────────── #}
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+
+    {# Net worth #}
+    <div class="card bg-base-100 shadow-sm col-span-2 lg:col-span-1">
+        <div class="card-body py-4 px-5">
+            <div class="text-xs text-base-content/50 uppercase tracking-wide">
+                Net worth
+            </div>
+            <div class="text-2xl font-semibold tabular-nums mt-1
+                {% if data.net_worth < 0 %}text-error{% endif %}">
+                {% if data.net_worth < 0 %}
+                    −{{ data.currency_symbol }}{{ "%.2f"|format(data.net_worth|abs) }}
+                {% else %}
+                    {{ data.currency_symbol }}{{ "%.2f"|format(data.net_worth) }}
+                {% endif %}
+            </div>
+            <div class="text-xs text-base-content/40 mt-1">
+                Assets {{ data.currency_symbol }}{{ "%.2f"|format(data.total_assets) }}
+                {% if data.total_liabilities > 0 %}
+                · Liabilities −{{ data.currency_symbol }}{{ "%.2f"|format(data.total_liabilities) }}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    {# Income #}
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body py-4 px-5">
+            <div class="text-xs text-base-content/50 uppercase tracking-wide">
+                Income
+            </div>
+            <div class="text-2xl font-semibold tabular-nums text-success mt-1">
+                {{ data.currency_symbol }}{{ "%.2f"|format(data.income) }}
+            </div>
+            <div class="text-xs text-base-content/40 mt-1">{{ data.timescale_label }}</div>
+        </div>
+    </div>
+
+    {# Expenditure #}
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body py-4 px-5">
+            <div class="text-xs text-base-content/50 uppercase tracking-wide">
+                Expenditure
+            </div>
+            <div class="text-2xl font-semibold tabular-nums text-error mt-1">
+                {{ data.currency_symbol }}{{ "%.2f"|format(data.expenditure) }}
+            </div>
+            <div class="text-xs text-base-content/40 mt-1">{{ data.timescale_label }}</div>
+        </div>
+    </div>
+
+    {# Net cashflow #}
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body py-4 px-5">
+            <div class="text-xs text-base-content/50 uppercase tracking-wide">
+                Net cashflow
+            </div>
+            <div class="text-2xl font-semibold tabular-nums mt-1
+                {% if data.net_cashflow < 0 %}text-error
+                {% elif data.net_cashflow > 0 %}text-success
+                {% endif %}">
+                {% if data.net_cashflow > 0 %}+{% endif %}
+                {% if data.net_cashflow < 0 %}
+                    −{{ data.currency_symbol }}{{ "%.2f"|format(data.net_cashflow|abs) }}
+                {% else %}
+                    {{ data.currency_symbol }}{{ "%.2f"|format(data.net_cashflow) }}
+                {% endif %}
+            </div>
+            <div class="text-xs text-base-content/40 mt-1">{{ data.timescale_label }}</div>
+        </div>
+    </div>
+
+</div>
+
+{# ── Spending by category chart ──────────────────────────────────────── #}
+<div class="card bg-base-100 shadow-sm mb-6">
+    <div class="card-body py-4 px-5">
+        <h3 class="font-medium text-sm text-base-content/70 mb-3">
+            Spending by category
+            <span class="text-base-content/40 font-normal">— {{ data.timescale_label }}</span>
+        </h3>
+
+        {% if data.category_spending %}
+        <div style="max-height: 280px;">
+            <canvas id="spendingChart"></canvas>
+        </div>
+        {% else %}
+        <div class="py-8 text-center">
+            <i class="ti ti-chart-bar text-3xl text-base-content/20 block mb-2"
+               aria-hidden="true"></i>
+            <p class="text-sm text-base-content/40">
+                No spending recorded for this period.
+            </p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{# ── Bottom row: accounts + recent transactions ──────────────────────── #}
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+    {# Account balances #}
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body py-4 px-5">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="font-medium text-sm text-base-content/70">
+                    Account balances
+                </h3>
+                <a href="/accounts"
+                   class="text-xs text-primary hover:underline">View all</a>
+            </div>
+
+            {% set has_accounts = namespace(value=false) %}
+            {% for family_id, accounts in [
+                ('cash',       data_accounts.cash),
+                ('credit',     data_accounts.credit),
+                ('investment', data_accounts.investment),
+                ('property',   data_accounts.property),
+            ] %}
+            {% if accounts %}
+                {% set has_accounts.value = true %}
+                <div class="mb-3">
+                    <p class="text-xs text-base-content/40 uppercase tracking-wide mb-1">
+                        {{ family_id | title }}
+                    </p>
+                    {% for account in accounts %}
+                    <a href="/accounts/{{ account.iri_key }}"
+                       class="flex items-center justify-between py-1.5
+                              hover:bg-base-50 rounded px-1 -mx-1 group">
+                        <span class="text-sm truncate">{{ account.name }}</span>
+                        <span class="text-sm tabular-nums font-medium ml-4
+                            {% if account.is_liability and account.balance > 0 %}text-error
+                            {% elif account.balance < 0 %}text-error{% endif %}">
+                            {% if account.balance < 0 %}
+                                −{{ account.currency_symbol }}{{ "%.2f"|format(account.balance|abs) }}
+                            {% else %}
+                                {{ account.currency_symbol }}{{ "%.2f"|format(account.balance) }}
+                            {% endif %}
+                        </span>
+                    </a>
+                    {% endfor %}
+                </div>
+            {% endif %}
+            {% endfor %}
+
+            {% if not has_accounts.value %}
+            <div class="py-6 text-center">
+                <p class="text-sm text-base-content/40">No accounts yet.</p>
+                <a href="/accounts/new"
+                   class="btn btn-ghost btn-xs text-primary mt-2">
+                    Add your first account
+                </a>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {# Recent transactions #}
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body py-4 px-5">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="font-medium text-sm text-base-content/70">
+                    Recent transactions
+                </h3>
+            </div>
+
+            {% if data.recent %}
+            <div class="divide-y divide-base-200">
+                {% for tx in data.recent %}
+                <div class="flex items-start gap-3 py-2">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm font-medium truncate">
+                            {{ tx.payee }}
+                        </div>
+                        <div class="text-xs text-base-content/40 flex gap-2 mt-0.5">
+                            <span>{{ tx.date_display }}</span>
+                            {% if tx.account_name %}
+                            <span>·</span>
+                            <span>{{ tx.account_name }}</span>
+                            {% endif %}
+                            {% if tx.category_label and tx.category_label != '—' %}
+                            <span>·</span>
+                            <span>{{ tx.category_label }}</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="text-sm tabular-nums font-medium whitespace-nowrap
+                                {{ tx.amount_color }}">
+                        {{ tx.amount_display }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="py-6 text-center">
+                <p class="text-sm text-base-content/40">No transactions yet.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{% if data.category_spending %}
+<script>
+(function () {
+    const labels  = {{ chart_labels  | tojson }};
+    const amounts = {{ chart_amounts | tojson }};
+    const colors  = {{ chart_colors  | tojson }};
+
+    const ctx = document.getElementById('spendingChart');
+    if (!ctx) return;
+
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                data:            amounts,
+                backgroundColor: colors,
+                borderRadius:    4,
+                borderSkipped:   false,
+            }]
+        },
+        options: {
+            indexAxis:   'y',
+            responsive:  true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => ' {{ data.currency_symbol }}' +
+                            ctx.parsed.x.toFixed(2)
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    grid:  { display: false },
+                    ticks: {
+                        callback: (v) =>
+                            '{{ data.currency_symbol }}' + v.toFixed(0)
+                    }
+                },
+                y: {
+                    grid: { display: false },
+                }
+            }
+        }
+    });
+})();
+</script>
+{% endif %}
+{% endblock %}

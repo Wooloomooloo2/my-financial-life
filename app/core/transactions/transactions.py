@@ -25,6 +25,8 @@ from app.core.ontology.namespaces import (
     MFL_TRANSACTION_TYPE, MFL_TRANSACTION_STATUS,
     MFL_PAYEE_RAW, MFL_MEMO, MFL_NOTES, MFL_CATEGORY,
     MFL_IS_MANUAL_ENTRY,
+    MFLX_TYPE_CREDIT, MFLX_TYPE_DEBIT,
+    MFLX_STATUS_CLEARED,
 )
 from app.core.ontology.iri_factory import iri_from_key, mfl_iri_from_key
 from app.core.accounts.accounts import (
@@ -416,3 +418,38 @@ def bulk_update_transactions(tx_keys: list[str], field: str, value: str) -> int:
     for key in tx_keys:
         update_transaction_field(key, field, value)
     return len(tx_keys)
+
+
+def create_manual_transaction(
+    account_iri: NamedNode,
+    date_str:    str,
+    payee_raw:   str,
+    amount:      Decimal,
+    tx_type:     str,          # "debit" or "credit"
+) -> NamedNode:
+    """
+    Create a single manually-entered transaction.
+    Status defaults to Cleared for manual entries.
+    Returns the new transaction IRI.
+    """
+    from app.core.ontology.iri_factory import new_transaction_iri
+
+    tx_iri   = new_transaction_iri()
+    type_iri = MFLX_TYPE_CREDIT if tx_type == "credit" else MFLX_TYPE_DEBIT
+    esc      = payee_raw.replace("\\", "\\\\").replace('"', '\\"')
+
+    store.update(f"""
+        INSERT DATA {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                <{tx_iri.value}> a <{MFL_TRANSACTION.value}> ;
+                    <{MFL_ON_ACCOUNT.value}>         <{account_iri.value}> ;
+                    <{MFL}transactionDate>            "{date_str}"^^<http://www.w3.org/2001/XMLSchema#date> ;
+                    <{MFL_AMOUNT.value}>              "{amount}"^^<http://www.w3.org/2001/XMLSchema#decimal> ;
+                    <{MFL_TRANSACTION_TYPE.value}>    <{type_iri.value}> ;
+                    <{MFL_TRANSACTION_STATUS.value}>  <{MFLX_STATUS_CLEARED.value}> ;
+                    <{MFL_PAYEE_RAW.value}>           "{esc}"^^<http://www.w3.org/2001/XMLSchema#string> ;
+                    <{MFL_IS_MANUAL_ENTRY.value}>     "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+            }}
+        }}
+    """)
+    return tx_iri

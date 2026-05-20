@@ -28,6 +28,8 @@ from app.core.templates import templates
 from app.api.settings import router as settings_router
 from app.api.accounts import router as accounts_router
 from app.api.transactions import router as transactions_router
+from app.api.dashboard import router as dashboard_router
+from app.api.import_routes import router as import_router
 from app.api.transactions import router as transactions_router
 
 # ---------------------------------------------------------------------------
@@ -72,40 +74,12 @@ app = FastAPI(
 # Serve static files (CSS, JS) from /static
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Routers
+# Routers — dashboard first so GET / is handled by it
+app.include_router(dashboard_router)
 app.include_router(settings_router)
 app.include_router(accounts_router)
 app.include_router(transactions_router)
-
-
-# ---------------------------------------------------------------------------
-# Root route
-# ---------------------------------------------------------------------------
-
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>My Financial Life</title>
-        <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet">
-        <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-base-200 min-h-screen flex items-center justify-center">
-        <div class="card bg-base-100 shadow-xl w-full max-w-md">
-            <div class="card-body items-center text-center gap-4">
-                <h1 class="card-title text-3xl font-bold">My Financial Life</h1>
-                <p class="text-base-content/70">Application is running.</p>
-                <div class="badge badge-success badge-lg">v0.1.0</div>
-                <a href="/accounts" class="btn btn-primary btn-sm mt-2">Go to accounts</a>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+app.include_router(import_router)
 
 
 # ---------------------------------------------------------------------------

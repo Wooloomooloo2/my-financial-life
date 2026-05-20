@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}Import complete — {{ app_name }}{% endblock %}
+{% block page_title %}Import complete{% endblock %}
+{% block page_subtitle %}{{ filename }}{% endblock %}
+
+{% block content %}
+<div class="max-w-lg">
+
+    {# Success card #}
+    <div class="card bg-base-100 shadow-sm mb-5">
+        <div class="card-body py-6 items-center text-center gap-4">
+
+            <div class="w-14 h-14 rounded-full bg-success/10 flex items-center
+                        justify-center">
+                <i class="ti ti-circle-check text-3xl text-success"
+                   aria-hidden="true"></i>
+            </div>
+
+            <div>
+                <h3 class="font-semibold text-base-content text-lg">
+                    Import successful
+                </h3>
+                <p class="text-sm text-base-content/50 mt-1">
+                    {{ filename }}
+                </p>
+            </div>
+
+            {# Stats #}
+            <div class="stats stats-vertical sm:stats-horizontal shadow-none
+                        border border-base-200 w-full">
+
+                <div class="stat py-3">
+                    <div class="stat-title text-xs">Imported</div>
+                    <div class="stat-value text-2xl text-success">
+                        {{ imported }}
+                    </div>
+                    <div class="stat-desc">new transactions</div>
+                </div>
+
+                {% if matched %}
+                <div class="stat py-3">
+                    <div class="stat-title text-xs">Matched</div>
+                    <div class="stat-value text-2xl text-warning">
+                        {{ matched }}
+                    </div>
+                    <div class="stat-desc">merged with manual entries</div>
+                </div>
+                {% endif %}
+
+                {% if skipped %}
+                <div class="stat py-3">
+                    <div class="stat-title text-xs">Skipped</div>
+                    <div class="stat-value text-2xl text-base-content/40">
+                        {{ skipped }}
+                    </div>
+                    <div class="stat-desc">duplicates</div>
+                </div>
+                {% endif %}
+
+            </div>
+
+        </div>
+    </div>
+
+    {# Actions #}
+    <div class="flex flex-col gap-3">
+
+        {% if account_key %}
+        <a href="/accounts/{{ account_key }}"
+           class="btn btn-primary w-full gap-2">
+            <i class="ti ti-list" aria-hidden="true"></i>
+            View in register
+        </a>
+        {% endif %}
+
+        <a href="/import?account={{ account_key }}"
+           class="btn btn-ghost w-full gap-2">
+            <i class="ti ti-file-import" aria-hidden="true"></i>
+            Import another file
+        </a>
+
+        <a href="/" class="btn btn-ghost w-full gap-2">
+            <i class="ti ti-layout-dashboard" aria-hidden="true"></i>
+            Go to dashboard
+        </a>
+
+    </div>
+
+</div>
+{% endblock %}

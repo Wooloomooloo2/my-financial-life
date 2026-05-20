@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block title %}Import — {{ app_name }}{% endblock %}
+{% block page_title %}Import transactions{% endblock %}
+{% block page_subtitle %}OFX and QFX bank file import{% endblock %}
+
+{% block content %}
+<div class="max-w-lg">
+
+    {% if error %}
+    <div class="alert alert-error mb-5">
+        <i class="ti ti-alert-circle text-lg" aria-hidden="true"></i>
+        <span>{{ error }}</span>
+    </div>
+    {% endif %}
+
+    {% if request.query_params.get('error') == 'expired' %}
+    <div class="alert alert-warning mb-5">
+        <i class="ti ti-clock text-lg" aria-hidden="true"></i>
+        <span>Your import session expired. Please upload the file again.</span>
+    </div>
+    {% endif %}
+
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body gap-5">
+
+            <div>
+                <h3 class="font-medium text-base-content">Upload a bank file</h3>
+                <p class="text-xs text-base-content/50 mt-0.5">
+                    Supported formats: OFX, QFX, CSV. OFX/QFX files give the
+                    most reliable import. CSV is supported for Banktivity exports
+                    and most bank website downloads.
+                </p>
+            </div>
+
+            <form method="post"
+                  action="/import/parse"
+                  enctype="multipart/form-data"
+                  class="flex flex-col gap-4">
+
+                {# Account selector #}
+                <div class="form-control">
+                    <label class="label" for="account_key">
+                        <span class="label-text">Import into account</span>
+                    </label>
+                    <select id="account_key"
+                            name="account_key"
+                            class="select select-bordered w-full"
+                            required>
+                        <option value="" disabled
+                            {% if not preselect %}selected{% endif %}>
+                            Select account…
+                        </option>
+                        {% for account in accounts %}
+                        <option value="{{ account.iri_key }}"
+                            {% if account.iri_key == preselect %}selected{% endif %}>
+                            {{ account.name }}
+                            ({{ account.type_label }} · {{ account.currency_code }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                {# File upload #}
+                <div class="form-control">
+                    <label class="label" for="file">
+                        <span class="label-text">Bank file</span>
+                        <span class="label-text-alt text-base-content/40">
+                            .ofx or .qfx
+                        </span>
+                    </label>
+                    <input id="file"
+                           name="file"
+                           type="file"
+                           accept=".ofx,.qfx,.csv,.OFX,.QFX,.CSV"
+                           class="file-input file-input-bordered w-full"
+                           required>
+                </div>
+
+                <div class="divider my-0"></div>
+
+                {# Tips #}
+                <div class="text-xs text-base-content/50 space-y-1">
+                    <p><span class="font-medium">HSBC:</span>
+                        Online Banking → Statements → Download → OFX</p>
+                    <p><span class="font-medium">Barclays:</span>
+                        Online Banking → Account details → Download transactions → OFX</p>
+                    <p><span class="font-medium">Lloyds / Halifax / BOS:</span>
+                        Internet Banking → Recent transactions → Export → Money Manager</p>
+                    <p><span class="font-medium">Nationwide:</span>
+                        Online Banking → Statements → Export → Quicken (OFX)</p>
+                </div>
+
+                <button type="submit" class="btn btn-primary w-full gap-2">
+                    <i class="ti ti-upload" aria-hidden="true"></i>
+                    Upload and preview
+                </button>
+
+            </form>
+        </div>
+    </div>
+
+</div>
+{% endblock %}
