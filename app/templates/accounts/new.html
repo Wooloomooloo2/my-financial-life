@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block title %}Add account — {{ app_name }}{% endblock %}
+{% block page_title %}Add account{% endblock %}
+{% block page_subtitle %}Set up a new account{% endblock %}
+
+{% block content %}
+
+<div class="max-w-lg">
+
+    {% if error %}
+    <div class="alert alert-error mb-6">
+        <i class="ti ti-alert-circle text-lg" aria-hidden="true"></i>
+        <span>{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body gap-5">
+
+            <form method="post" action="/accounts/new" class="flex flex-col gap-4">
+
+                <!-- Account type selector -->
+                <div class="form-control">
+                    <label class="label" for="account_type_key">
+                        <span class="label-text font-medium">Account type</span>
+                    </label>
+                    <select
+                        id="account_type_key"
+                        name="account_type_key"
+                        class="select select-bordered w-full"
+                        required
+                        hx-get="/accounts/type-fields"
+                        hx-trigger="change"
+                        hx-target="#type-specific-fields"
+                        hx-include="[name='account_type_key']"
+                    >
+                        <option value="" disabled selected>Select account type…</option>
+
+                        <optgroup label="Cash accounts">
+                        {% for opt in type_options if opt.family == 'cash' %}
+                            <option value="{{ opt.key }}"
+                                {% if preselect_family == 'cash' and loop.first %}selected{% endif %}>
+                                {{ opt.label }}
+                            </option>
+                        {% endfor %}
+                        </optgroup>
+
+                        <optgroup label="Credit cards">
+                        {% for opt in type_options if opt.family == 'credit' %}
+                            <option value="{{ opt.key }}"
+                                {% if preselect_family == 'credit' and loop.first %}selected{% endif %}>
+                                {{ opt.label }}
+                            </option>
+                        {% endfor %}
+                        </optgroup>
+
+                        <optgroup label="Investments">
+                        {% for opt in type_options if opt.family == 'investment' %}
+                            <option value="{{ opt.key }}"
+                                {% if preselect_family == 'investment' and loop.first %}selected{% endif %}>
+                                {{ opt.label }}
+                            </option>
+                        {% endfor %}
+                        </optgroup>
+
+                        <optgroup label="Property">
+                        {% for opt in type_options if opt.family == 'property' %}
+                            <option value="{{ opt.key }}"
+                                {% if preselect_family == 'property' and loop.first %}selected{% endif %}>
+                                {{ opt.label }}
+                            </option>
+                        {% endfor %}
+                        </optgroup>
+                    </select>
+                </div>
+
+                <!-- Account name -->
+                <div class="form-control">
+                    <label class="label" for="account_name">
+                        <span class="label-text">Account name</span>
+                    </label>
+                    <input
+                        id="account_name"
+                        name="account_name"
+                        type="text"
+                        class="input input-bordered w-full"
+                        placeholder="e.g. Barclays Current Account"
+                        required
+                    />
+                </div>
+
+                <!-- Currency -->
+                <div class="form-control">
+                    <label class="label" for="currency_iri">
+                        <span class="label-text">Currency</span>
+                    </label>
+                    <select
+                        id="currency_iri"
+                        name="currency_iri"
+                        class="select select-bordered w-full"
+                        required
+                    >
+                        {% for c in currencies %}
+                        <option value="{{ c.iri.value }}"
+                            {% if c.code == 'GBP' %}selected{% endif %}>
+                            {{ c.code }}{% if c.symbol %} — {{ c.symbol }}{% endif %}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Type-specific fields — loaded by HTMX on type change -->
+                <div id="type-specific-fields">
+                    <!-- Default: show cash fields since current account is most common -->
+                    {% if preselect_family %}
+                        {# HTMX will load these on page load via the pre-selected option #}
+                    {% else %}
+                        <!-- Opening balance fields shown by default -->
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Opening balance</span>
+                                <span class="label-text-alt text-base-content/40">Leave as 0.00 if importing all history</span>
+                            </label>
+                            <input
+                                name="opening_balance"
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                class="input input-bordered w-full"
+                                value="0.00"
+                            />
+                        </div>
+                        <div class="form-control">
+                            <label class="label">
+                                <span class="label-text">Opening balance date</span>
+                            </label>
+                            <input
+                                name="opening_date"
+                                type="date"
+                                class="input input-bordered w-full"
+                                value="{{ today }}"
+                                required
+                            />
+                        </div>
+                    {% endif %}
+                </div>
+
+                <!-- Notes -->
+                <div class="form-control">
+                    <label class="label" for="notes">
+                        <span class="label-text">Notes</span>
+                        <span class="label-text-alt text-base-content/40">Optional</span>
+                    </label>
+                    <textarea
+                        id="notes"
+                        name="notes"
+                        class="textarea textarea-bordered w-full"
+                        rows="2"
+                        placeholder="Any notes about this account…"
+                    ></textarea>
+                </div>
+
+                <div class="divider my-0"></div>
+
+                <!-- Submit -->
+                <div class="flex gap-3">
+                    <a href="/accounts" class="btn btn-ghost flex-1">Cancel</a>
+                    <button type="submit" class="btn btn-primary flex-1">
+                        <i class="ti ti-device-floppy" aria-hidden="true"></i>
+                        Create account
+                    </button>
+                </div>
+
+            </form>
+
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // If a family was pre-selected, trigger the HTMX load on page ready
+    // so the type-specific fields appear immediately
+    document.addEventListener('DOMContentLoaded', function () {
+        const sel = document.getElementById('account_type_key');
+        if (sel && sel.value) {
+            htmx.trigger(sel, 'change');
+        }
+    });
+</script>
+{% endblock %}

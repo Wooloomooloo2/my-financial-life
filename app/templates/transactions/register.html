@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+
+{% block title %}{{ account.name }} — {{ app_name }}{% endblock %}
+{% block page_title %}{{ account.name }}{% endblock %}
+{% block page_subtitle %}{{ account.type_label }} · {{ account.currency_code }}{% endblock %}
+
+{% block content %}
+
+{# Account header card #}
+<div class="card bg-base-100 shadow-sm mb-4">
+    <div class="card-body py-4 flex flex-row items-center gap-6">
+        <div class="flex-1">
+            <div class="text-2xl font-semibold tabular-nums
+                {% if (account.is_liability and account.balance > 0) or account.balance < 0 %}text-error{% endif %}">
+                {% if account.balance < 0 %}
+                    −{{ account.currency_symbol }}{{ "%.2f"|format(account.balance|abs) }}
+                {% else %}
+                    {{ account.currency_symbol }}{{ "%.2f"|format(account.balance) }}
+                {% endif %}
+            </div>
+            <div class="text-xs text-base-content/50 mt-0.5">Current balance</div>
+        </div>
+        <div class="flex gap-2">
+            <a href="/import?account={{ account.iri_key }}"
+               class="btn btn-outline btn-sm gap-1">
+                <i class="ti ti-file-import" aria-hidden="true"></i> Import
+            </a>
+            <button onclick="toggleAddForm()"
+                    class="btn btn-primary btn-sm gap-1">
+                <i class="ti ti-plus" aria-hidden="true"></i> Add transaction
+            </button>
+        </div>
+    </div>
+</div>
+
+{# Add transaction form — hidden by default #}
+<div id="add-form-panel" class="hidden mb-4">
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body py-4">
+            <h3 class="font-medium text-sm mb-3">Add transaction</h3>
+            <form method="post"
+                  action="/accounts/{{ account.iri_key }}/add-transaction"
+                  class="grid grid-cols-6 gap-3 items-end">
+                <div class="form-control col-span-1">
+                    <label class="label py-0.5">
+                        <span class="label-text text-xs">Date</span>
+                    </label>
+                    <input name="date" type="date"
+                           class="input input-bordered input-sm"
+                           value="{{ today }}" required>
+                </div>
+                <div class="form-control col-span-2">
+                    <label class="label py-0.5">
+                        <span class="label-text text-xs">Payee</span>
+                    </label>
+                    <input name="payee_raw" type="text"
+                           class="input input-bordered input-sm"
+                           placeholder="e.g. Tesco" required>
+                </div>
+                <div class="form-control col-span-1">
+                    <label class="label py-0.5">
+                        <span class="label-text text-xs">Amount</span>
+                    </label>
+                    <input name="amount" type="number" step="0.01" min="0"
+                           class="input input-bordered input-sm"
+                           placeholder="0.00" required>
+                </div>
+                <div class="form-control col-span-1">
+                    <label class="label py-0.5">
+                        <span class="label-text text-xs">Type</span>
+                    </label>
+                    <select name="tx_type"
+                            class="select select-bordered select-sm">
+                        <option value="debit">Debit (money out)</option>
+                        <option value="credit">Credit (money in)</option>
+                    </select>
+                </div>
+                <div class="col-span-1 flex gap-2">
+                    <button type="submit"
+                            class="btn btn-primary btn-sm flex-1">Add</button>
+                    <button type="button" onclick="toggleAddForm()"
+                            class="btn btn-ghost btn-sm">✕</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+{# Bulk action bar — slides in when rows are checked #}
+<div id="bulk-bar"
+     class="hidden sticky top-0 z-20 card bg-base-100 shadow-md
+            border border-primary/20 mb-3">
+    <div class="card-body py-3 flex flex-row items-center gap-3 flex-wrap">
+        <span id="bulk-count"
+              class="text-sm font-medium text-primary whitespace-nowrap">
+            0 selected
+        </span>
+        <div class="flex flex-1 gap-2 flex-wrap items-center">
+            <select id="bulk-category-sel"
+                    class="select select-bordered select-xs min-w-[160px]">
+                <option value="">Set category…</option>
+                <option value="">— Uncategorised —</option>
+                {% for group in categories %}
+                <optgroup label="{{ group.label }}">
+                    {% for item in group.items %}
+                    <option value="{{ item.iri }}">{{ item.label }}</option>
+                    {% endfor %}
+                </optgroup>
+                {% endfor %}
+            </select>
+            <select id="bulk-status-sel"
+                    class="select select-bordered select-xs min-w-[130px]">
+                <option value="">Set status…</option>
+                {% for iri, label in status_options %}
+                <option value="{{ iri }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+            <input id="bulk-payee-inp" type="text"
+                   class="input input-bordered input-xs min-w-[130px]"
+                   placeholder="Set payee…">
+            <input id="bulk-memo-inp" type="text"
+                   class="input input-bordered input-xs min-w-[130px]"
+                   placeholder="Set memo…">
+        </div>
+        <button onclick="submitBulkUpdate()"
+                class="btn btn-primary btn-xs whitespace-nowrap">
+            Apply to selected
+        </button>
+        <button onclick="clearBulkSelection()"
+                class="btn btn-ghost btn-xs">Cancel</button>
+    </div>
+</div>
+
+{# Hidden form for bulk submit #}
+<form id="bulk-form" hx-post="/transactions/bulk-update" hx-trigger="submit">
+    <input type="hidden" name="redirect_to"
+           value="/accounts/{{ account.iri_key }}">
+    <input type="hidden" id="bulk-category-val" name="bulk_category" value="">
+    <input type="hidden" id="bulk-status-val"   name="bulk_status"   value="">
+    <input type="hidden" id="bulk-payee-val"    name="bulk_payee"    value="">
+    <input type="hidden" id="bulk-memo-val"     name="bulk_memo"     value="">
+</form>
+
+{# Transaction table #}
+<div class="card bg-base-100 shadow-sm overflow-hidden">
+    {% if transactions %}
+    <div class="overflow-x-auto">
+        <table class="table table-sm w-full">
+            <thead>
+                <tr class="text-xs text-base-content/50 border-b border-base-200
+                            bg-base-50">
+                    <th class="w-8 px-3">
+                        <input type="checkbox" class="checkbox checkbox-xs"
+                               id="select-all" onchange="selectAll(this)">
+                    </th>
+                    <th class="px-3 w-24">Date</th>
+                    <th class="px-3">Payee</th>
+                    <th class="px-3">Memo / notes</th>
+                    <th class="px-3">Category</th>
+                    <th class="px-3 w-28">Status</th>
+                    <th class="px-3 text-right w-28">Amount</th>
+                    <th class="px-3 text-right w-28">Balance</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for tx in transactions %}
+                    {% include "transactions/_row.html" %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="px-6 py-12 text-center">
+        <i class="ti ti-list text-4xl text-base-content/20 block mb-3"
+           aria-hidden="true"></i>
+        <p class="text-sm text-base-content/40">No transactions yet.</p>
+        <p class="text-xs text-base-content/30 mt-1">
+            Import a bank file or add a transaction manually.
+        </p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="mt-4">
+    <a href="/accounts"
+       class="text-xs text-base-content/40 hover:text-base-content/70
+              flex items-center gap-1">
+        <i class="ti ti-arrow-left text-xs" aria-hidden="true"></i>
+        All accounts
+    </a>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleAddForm() {
+    const p = document.getElementById('add-form-panel');
+    p.classList.toggle('hidden');
+    if (!p.classList.contains('hidden'))
+        p.querySelector('input[name="payee_raw"]').focus();
+}
+
+function updateBulkBar() {
+    const checked = document.querySelectorAll('.tx-checkbox:checked');
+    const bar     = document.getElementById('bulk-bar');
+    const count   = document.getElementById('bulk-count');
+    if (checked.length > 0) {
+        bar.classList.remove('hidden');
+        count.textContent = checked.length + ' selected';
+    } else {
+        bar.classList.add('hidden');
+    }
+}
+
+function selectAll(master) {
+    document.querySelectorAll('.tx-checkbox')
+            .forEach(cb => cb.checked = master.checked);
+    updateBulkBar();
+}
+
+function clearBulkSelection() {
+    document.querySelectorAll('.tx-checkbox, #select-all')
+            .forEach(cb => cb.checked = false);
+    document.getElementById('bulk-bar').classList.add('hidden');
+}
+
+function submitBulkUpdate() {
+    const checked = document.querySelectorAll('.tx-checkbox:checked');
+    if (!checked.length) return;
+
+    const form = document.getElementById('bulk-form');
+    document.getElementById('bulk-category-val').value =
+        document.getElementById('bulk-category-sel').value;
+    document.getElementById('bulk-status-val').value =
+        document.getElementById('bulk-status-sel').value;
+    document.getElementById('bulk-payee-val').value =
+        document.getElementById('bulk-payee-inp').value;
+    document.getElementById('bulk-memo-val').value =
+        document.getElementById('bulk-memo-inp').value;
+
+    form.querySelectorAll('[name="tx_keys"]').forEach(e => e.remove());
+    checked.forEach(cb => {
+        const inp = document.createElement('input');
+        inp.type  = 'hidden';
+        inp.name  = 'tx_keys';
+        inp.value = cb.value;
+        form.appendChild(inp);
+    });
+    htmx.trigger(form, 'submit');
+}
+</script>
+{% endblock %}

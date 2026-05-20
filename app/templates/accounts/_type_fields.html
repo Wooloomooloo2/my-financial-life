@@ -1,0 +1,298 @@
+{#
+  HTMX partial — type-specific form fields.
+  Rendered by GET /accounts/type-fields?account_type_key=<key>
+  Injected into #type-specific-fields in the add account form.
+  No layout wrapper — just the fields.
+#}
+
+{% if option %}
+
+    {% if option.family in ('cash', 'credit') %}
+
+        <!-- Opening balance (transaction) -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Opening balance</span>
+                <span class="label-text-alt text-base-content/40">
+                    Leave as 0.00 if importing all history
+                </span>
+            </label>
+            <input
+                name="opening_balance"
+                type="number"
+                step="0.01"
+                min="0"
+                class="input input-bordered w-full"
+                value="0.00"
+                placeholder="0.00"
+            />
+        </div>
+
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Opening balance date</span>
+            </label>
+            <input
+                name="opening_date"
+                type="date"
+                class="input input-bordered w-full"
+                value="{{ today }}"
+                required
+            />
+        </div>
+
+    {% endif %}
+
+    {% if option.family == 'cash' %}
+
+        <!-- Interest rate -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Annual interest rate %</span>
+                <span class="label-text-alt text-base-content/40">Optional</span>
+            </label>
+            <input
+                name="interest_rate"
+                type="number"
+                step="0.01"
+                min="0"
+                max="100"
+                class="input input-bordered w-full"
+                placeholder="e.g. 4.50"
+            />
+        </div>
+
+    {% elif option.family == 'credit' %}
+
+        <!-- Credit limit -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Credit limit</span>
+                <span class="label-text-alt text-base-content/40">Optional</span>
+            </label>
+            <input
+                name="credit_limit"
+                type="number"
+                step="0.01"
+                min="0"
+                class="input input-bordered w-full"
+                placeholder="e.g. 5000.00"
+            />
+        </div>
+
+        <!-- Statement day -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Statement day</span>
+                <span class="label-text-alt text-base-content/40">Day of month (1–31), optional</span>
+            </label>
+            <input
+                name="statement_day"
+                type="number"
+                step="1"
+                min="1"
+                max="31"
+                class="input input-bordered w-full"
+                placeholder="e.g. 15"
+            />
+        </div>
+
+    {% elif option.family == 'investment' %}
+
+        <!-- Opening valuation -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Opening value</span>
+                <span class="label-text-alt text-base-content/40">
+                    Current portfolio value
+                </span>
+            </label>
+            <input
+                name="opening_balance"
+                type="number"
+                step="0.01"
+                min="0"
+                class="input input-bordered w-full"
+                value="0.00"
+                placeholder="0.00"
+            />
+        </div>
+
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Valuation date</span>
+            </label>
+            <input
+                name="opening_date"
+                type="date"
+                class="input input-bordered w-full"
+                value="{{ today }}"
+                required
+            />
+        </div>
+
+        <!-- Growth rate -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Expected annual growth rate %</span>
+            </label>
+            <input
+                name="growth_rate"
+                type="number"
+                step="0.1"
+                min="0"
+                max="100"
+                class="input input-bordered w-full"
+                value="0"
+                placeholder="e.g. 7.0"
+            />
+        </div>
+
+        <!-- Dividend rate -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Expected annual dividend yield %</span>
+            </label>
+            <input
+                name="dividend_rate"
+                type="number"
+                step="0.1"
+                min="0"
+                max="100"
+                class="input input-bordered w-full"
+                value="0"
+                placeholder="e.g. 2.5"
+            />
+        </div>
+
+        <!-- Reinvest dividends -->
+        <div class="form-control">
+            <label class="label cursor-pointer justify-start gap-3">
+                <input
+                    name="reinvest_dividends"
+                    type="checkbox"
+                    value="1"
+                    class="checkbox checkbox-sm"
+                />
+                <span class="label-text">Reinvest dividends</span>
+            </label>
+        </div>
+
+    {% elif option.family == 'property' %}
+
+        <!-- Opening valuation -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Current estimated value</span>
+            </label>
+            <input
+                name="opening_balance"
+                type="number"
+                step="0.01"
+                min="0"
+                class="input input-bordered w-full"
+                value="0.00"
+                placeholder="0.00"
+            />
+        </div>
+
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Valuation date</span>
+            </label>
+            <input
+                name="opening_date"
+                type="date"
+                class="input input-bordered w-full"
+                value="{{ today }}"
+                required
+            />
+        </div>
+
+        <!-- Address -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Property address</span>
+                <span class="label-text-alt text-base-content/40">Optional</span>
+            </label>
+            <input
+                name="property_address"
+                type="text"
+                class="input input-bordered w-full"
+                placeholder="e.g. 12 High Street, London"
+            />
+        </div>
+
+        <!-- Purchase price -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Purchase price</span>
+                <span class="label-text-alt text-base-content/40">Optional</span>
+            </label>
+            <input
+                name="purchase_price"
+                type="number"
+                step="0.01"
+                min="0"
+                class="input input-bordered w-full"
+                placeholder="e.g. 250000.00"
+            />
+        </div>
+
+        <!-- Purchase date -->
+        <div class="form-control">
+            <label class="label">
+                <span class="label-text">Purchase date</span>
+                <span class="label-text-alt text-base-content/40">Optional</span>
+            </label>
+            <input
+                name="purchase_date"
+                type="date"
+                class="input input-bordered w-full"
+            />
+        </div>
+
+        <!-- Mortgaged -->
+        <div class="form-control">
+            <label class="label cursor-pointer justify-start gap-3">
+                <input
+                    name="is_mortgaged"
+                    type="checkbox"
+                    value="1"
+                    class="checkbox checkbox-sm"
+                />
+                <span class="label-text">This property has an outstanding mortgage</span>
+            </label>
+        </div>
+
+    {% endif %}
+
+{% else %}
+    <!-- No type selected yet — show placeholder opening balance fields -->
+    <div class="form-control">
+        <label class="label">
+            <span class="label-text">Opening balance</span>
+            <span class="label-text-alt text-base-content/40">Leave as 0.00 if importing all history</span>
+        </label>
+        <input
+            name="opening_balance"
+            type="number"
+            step="0.01"
+            min="0"
+            class="input input-bordered w-full"
+            value="0.00"
+        />
+    </div>
+    <div class="form-control">
+        <label class="label">
+            <span class="label-text">Opening balance date</span>
+        </label>
+        <input
+            name="opening_date"
+            type="date"
+            class="input input-bordered w-full"
+            value="{{ today }}"
+            required
+        />
+    </div>
+{% endif %}

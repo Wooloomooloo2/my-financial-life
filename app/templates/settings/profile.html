@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block title %}Profile — {{ app_name }}{% endblock %}
+
+{% block page_title %}Profile{% endblock %}
+{% block page_subtitle %}Your name and base currency{% endblock %}
+
+{% block content %}
+
+<div class="max-w-lg">
+
+    {% if saved %}
+    <div class="alert alert-success mb-6">
+        <i class="ti ti-circle-check text-lg" aria-hidden="true"></i>
+        <span>Profile saved successfully.</span>
+    </div>
+    {% endif %}
+
+    {% if error %}
+    <div class="alert alert-error mb-6">
+        <i class="ti ti-alert-circle text-lg" aria-hidden="true"></i>
+        <span>{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body gap-5">
+
+            <div>
+                <h3 class="font-medium text-base-content">Personal details</h3>
+                <p class="text-xs text-base-content/50 mt-0.5">
+                    Your name is shown in the app header. It is stored locally and never shared.
+                </p>
+            </div>
+
+            <form method="post" action="/settings/profile" class="flex flex-col gap-4">
+
+                <!-- First name -->
+                <div class="form-control">
+                    <label class="label" for="first_name">
+                        <span class="label-text">First name</span>
+                    </label>
+                    <input
+                        id="first_name"
+                        name="first_name"
+                        type="text"
+                        class="input input-bordered w-full"
+                        placeholder="e.g. Jane"
+                        value="{{ person.first_name if person else '' }}"
+                        required
+                        autofocus
+                    />
+                </div>
+
+                <!-- Last name -->
+                <div class="form-control">
+                    <label class="label" for="last_name">
+                        <span class="label-text">Last name</span>
+                    </label>
+                    <input
+                        id="last_name"
+                        name="last_name"
+                        type="text"
+                        class="input input-bordered w-full"
+                        placeholder="e.g. Smith"
+                        value="{{ person.last_name if person else '' }}"
+                        required
+                    />
+                </div>
+
+                <div class="divider my-1"></div>
+
+                <!-- Base currency -->
+                <div class="form-control">
+                    <label class="label" for="base_currency_iri">
+                        <span class="label-text">Base currency</span>
+                        <span class="label-text-alt text-base-content/40">
+                            All balances shown in this currency
+                        </span>
+                    </label>
+                    <select
+                        id="base_currency_iri"
+                        name="base_currency_iri"
+                        class="select select-bordered w-full"
+                        required
+                    >
+                        <option value="" disabled {% if not person %}selected{% endif %}>
+                            Select a currency…
+                        </option>
+                        {% for c in currencies %}
+                        <option
+                            value="{{ c.iri.value }}"
+                            {% if person and person.base_currency_iri and person.base_currency_iri.value == c.iri.value %}
+                                selected
+                            {% elif not person and c.code == 'GBP' %}
+                                selected
+                            {% endif %}
+                        >
+                            {{ c.code }}{% if c.symbol %} — {{ c.symbol }}{% endif %}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <label class="label">
+                        <span class="label-text-alt text-base-content/40">
+                            You can change this later in settings. Exchange rates for
+                            other currencies are set per account.
+                        </span>
+                    </label>
+                </div>
+
+                <!-- Submit -->
+                <div class="form-control mt-2">
+                    <button type="submit" class="btn btn-primary w-full">
+                        <i class="ti ti-device-floppy" aria-hidden="true"></i>
+                        Save profile
+                    </button>
+                </div>
+
+            </form>
+
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}

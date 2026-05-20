@@ -1,0 +1,831 @@
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:  <http://www.w3.org/2004/02/skos/core#> .
+@prefix mrl:   <https://myretirementlife.app/ontology#> .
+@prefix mrlx:  <https://myretirementlife.app/ontology/ext#> .
+@prefix mfl:   <https://myfinanciallife.app/ontology#> .
+@prefix mflx:  <https://myfinanciallife.app/ontology/ext#> .
+
+
+# ===========================================================================
+# ONTOLOGY DECLARATION
+#
+# My Finance Life ontology — finance-specific extension of the MRL ontology.
+#
+# This file defines classes and properties unique to My Finance Life.
+# It does NOT redefine any mrl: or mrlx: concept. All shared concepts
+# (Currency, Jurisdiction, Person, Account hierarchy, AccountTypeScheme,
+# FrequencyTypeScheme) are used directly from mrl-ontology.ttl, which is
+# loaded alongside this file on startup.
+#
+# Dependency: mrl-ontology.ttl v1.0.1 or later.
+# ===========================================================================
+
+mfl:Ontology a owl:Ontology ;
+    rdfs:label "My Finance Life Ontology"@en ;
+    rdfs:comment "Finance-specific ontology extension for the My Finance Life application. Extends mrl-ontology.ttl and shares its account hierarchy, currency, jurisdiction, and person model."@en ;
+    owl:versionInfo "0.1.0" .
+
+
+# ===========================================================================
+# CONTROLLED VOCABULARIES  (mflx: prefix)
+# Pattern: mflx:ClassName_Value
+# Follows the same conventions as mrlx: in the MRL ontology.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# SECTION 1 — mflx:TransactionStatusScheme
+#
+# The lifecycle of a transaction from import/entry through to reconciliation.
+# States progress in one direction: Pending → Uncleared → Cleared → Reconciled.
+# Reconciled is the terminal state; a reconciled transaction should not be
+# edited without deliberate user action.
+# ---------------------------------------------------------------------------
+
+mflx:TransactionStatusScheme a skos:ConceptScheme ;
+    rdfs:label "Transaction Status Scheme"@en ;
+    skos:prefLabel "Transaction Status Scheme"@en ;
+    skos:definition "A controlled vocabulary representing the lifecycle state of a transaction, from initial entry or import through to reconciliation against an official statement."@en ;
+    skos:hasTopConcept
+        mflx:TransactionStatus_Pending ,
+        mflx:TransactionStatus_Uncleared ,
+        mflx:TransactionStatus_Cleared ,
+        mflx:TransactionStatus_Reconciled .
+
+mflx:TransactionStatus_Pending a skos:Concept ;
+    skos:inScheme     mflx:TransactionStatusScheme ;
+    skos:topConceptOf mflx:TransactionStatusScheme ;
+    skos:prefLabel    "Pending"@en ;
+    skos:definition   "Transaction has been entered manually or imported but has not yet appeared on an official bank or card statement. Typical for card transactions in the 1–3 day settlement window."@en ;
+    skos:notation     "PENDING" ;
+    skos:scopeNote    "Pending transactions are included in the running balance but flagged visually. They should not be included in reconciliation totals."@en .
+
+mflx:TransactionStatus_Uncleared a skos:Concept ;
+    skos:inScheme     mflx:TransactionStatusScheme ;
+    skos:topConceptOf mflx:TransactionStatusScheme ;
+    skos:prefLabel    "Uncleared"@en ;
+    skos:definition   "Transaction has appeared on a statement or been confirmed as settled but has not yet been reviewed and approved by the user."@en ;
+    skos:notation     "UNCLEARED" ;
+    skos:scopeNote    "Default status for transactions imported via CSV or OFX. The user reviews uncleared transactions to verify category and payee before clearing."@en .
+
+mflx:TransactionStatus_Cleared a skos:Concept ;
+    skos:inScheme     mflx:TransactionStatusScheme ;
+    skos:topConceptOf mflx:TransactionStatusScheme ;
+    skos:prefLabel    "Cleared"@en ;
+    skos:definition   "User has reviewed and confirmed this transaction is correct. Category, payee, and amount have been verified."@en ;
+    skos:notation     "CLEARED" ;
+    skos:scopeNote    "Cleared transactions are included in all balance and reporting calculations. They can still be edited by the user."@en .
+
+mflx:TransactionStatus_Reconciled a skos:Concept ;
+    skos:inScheme     mflx:TransactionStatusScheme ;
+    skos:topConceptOf mflx:TransactionStatusScheme ;
+    skos:prefLabel    "Reconciled"@en ;
+    skos:definition   "Transaction has been matched against a closing balance from an official statement during a formal reconciliation. Terminal state."@en ;
+    skos:notation     "RECONCILED" ;
+    skos:scopeNote    "Reconciled transactions are locked by default. The reconciliation workflow that sets this status is post-MVP. The status is defined now so that data imported before the feature is built can be retrospectively reconciled without migration."@en .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 2 — mflx:TransactionTypeScheme
+#
+# Classifies the direction and nature of a transaction.
+# Amount is always stored as a positive decimal; direction is determined by
+# this type in combination with mrl:isLiability on the parent account.
+#
+# For asset accounts (isLiability=false):
+#   Debit  = money leaves the account (spending, withdrawal, transfer out)
+#   Credit = money enters the account (income, deposit, transfer in)
+#
+# For liability accounts (isLiability=true, e.g. credit cards):
+#   Debit  = balance increases (charge, purchase)
+#   Credit = balance decreases (payment, refund)
+#
+# Transfer transactions appear on both accounts: as a Debit on the source
+# and a Credit on the destination. mfl:transferCounterpart links the pair.
+# ---------------------------------------------------------------------------
+
+mflx:TransactionTypeScheme a skos:ConceptScheme ;
+    rdfs:label "Transaction Type Scheme"@en ;
+    skos:prefLabel "Transaction Type Scheme"@en ;
+    skos:definition "A controlled vocabulary for the direction and nature of a transaction. Amount is always a positive decimal; this type determines whether it increases or decreases the account balance."@en ;
+    skos:hasTopConcept
+        mflx:TransactionType_Debit ,
+        mflx:TransactionType_Credit ,
+        mflx:TransactionType_Transfer .
+
+mflx:TransactionType_Debit a skos:Concept ;
+    skos:inScheme     mflx:TransactionTypeScheme ;
+    skos:topConceptOf mflx:TransactionTypeScheme ;
+    skos:prefLabel    "Debit"@en ;
+    skos:definition   "A transaction that reduces the value of an asset account or increases the balance of a liability account."@en ;
+    skos:notation     "DEBIT" ;
+    skos:scopeNote    "Examples on asset accounts: grocery purchase, utility bill, ATM withdrawal. Examples on credit card accounts: any purchase or charge."@en .
+
+mflx:TransactionType_Credit a skos:Concept ;
+    skos:inScheme     mflx:TransactionTypeScheme ;
+    skos:topConceptOf mflx:TransactionTypeScheme ;
+    skos:prefLabel    "Credit"@en ;
+    skos:definition   "A transaction that increases the value of an asset account or decreases the balance of a liability account."@en ;
+    skos:notation     "CREDIT" ;
+    skos:scopeNote    "Examples on asset accounts: salary payment, interest received, refund. Examples on credit card accounts: payment received, refund from merchant."@en .
+
+mflx:TransactionType_Transfer a skos:Concept ;
+    skos:inScheme     mflx:TransactionTypeScheme ;
+    skos:topConceptOf mflx:TransactionTypeScheme ;
+    skos:prefLabel    "Transfer"@en ;
+    skos:definition   "A movement of funds between two accounts held by the same person. Creates a matched pair of transactions: a Debit on the source account and a Credit on the destination account. Linked via mfl:transferCounterpart."@en ;
+    skos:notation     "TRANSFER" ;
+    skos:scopeNote    "Transfers are excluded from income and expenditure totals to avoid double-counting. A credit card payment is modelled as a Transfer from the cash account to the credit card account."@en .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 3 — mflx:ImportFormatScheme
+#
+# Identifies the file format of an import batch.
+# Used to select the correct parser at import time.
+# ---------------------------------------------------------------------------
+
+mflx:ImportFormatScheme a skos:ConceptScheme ;
+    rdfs:label "Import Format Scheme"@en ;
+    skos:prefLabel "Import Format Scheme"@en ;
+    skos:definition "A controlled vocabulary of file formats supported for transaction import."@en ;
+    skos:hasTopConcept
+        mflx:ImportFormat_CSV ,
+        mflx:ImportFormat_OFX ,
+        mflx:ImportFormat_QFX .
+
+mflx:ImportFormat_CSV a skos:Concept ;
+    skos:inScheme     mflx:ImportFormatScheme ;
+    skos:topConceptOf mflx:ImportFormatScheme ;
+    skos:prefLabel    "CSV"@en ;
+    skos:definition   "Comma-separated values file. Column mapping is user-configured per institution since no standard CSV layout exists for financial data."@en ;
+    skos:notation     "CSV" .
+
+mflx:ImportFormat_OFX a skos:Concept ;
+    skos:inScheme     mflx:ImportFormatScheme ;
+    skos:topConceptOf mflx:ImportFormatScheme ;
+    skos:prefLabel    "OFX"@en ;
+    skos:definition   "Open Financial Exchange format. A structured SGML/XML format with consistent field names across institutions. Preferred over CSV when available."@en ;
+    skos:notation     "OFX" ;
+    skos:scopeNote    "OFX 1.x files use SGML syntax; OFX 2.x use XML. Both are supported. Most UK and US banks that offer file export use OFX 1.x."@en .
+
+mflx:ImportFormat_QFX a skos:Concept ;
+    skos:inScheme     mflx:ImportFormatScheme ;
+    skos:topConceptOf mflx:ImportFormatScheme ;
+    skos:prefLabel    "QFX"@en ;
+    skos:definition   "Quicken Financial Exchange format. A proprietary variant of OFX 1.x used by Intuit. Structurally identical to OFX for transaction data purposes."@en ;
+    skos:notation     "QFX" ;
+    skos:scopeNote    "QFX files are parsed by the same parser as OFX. The format is recorded separately on ImportBatch for provenance."@en .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 4 — mflx:TransactionCategoryScheme
+#
+# Hierarchical taxonomy of transaction categories.
+# Two top-level branches: Income and Expense.
+# Users may add their own concepts as children of any existing concept.
+# User-defined concepts follow the same mflx:TransactionCategory_Name pattern.
+#
+# This scheme provides a default seed taxonomy. It is intentionally broad
+# at the top level; users are expected to customise subcategories to match
+# their spending patterns.
+#
+# Design note: categories apply to Debit and Credit transactions only.
+# Transfer transactions are not categorised — they are excluded from
+# income/expenditure reporting by type.
+# ---------------------------------------------------------------------------
+
+mflx:TransactionCategoryScheme a skos:ConceptScheme ;
+    rdfs:label "Transaction Category Scheme"@en ;
+    skos:prefLabel "Transaction Category Scheme"@en ;
+    skos:definition "A hierarchical taxonomy of transaction categories. Two top-level branches: Income and Expense. Users may add custom subcategories. The scheme is seeded with a default taxonomy on first startup."@en ;
+    skos:hasTopConcept
+        mflx:TransactionCategory_Income ,
+        mflx:TransactionCategory_Expense .
+
+
+# --- Income top concept and subtypes ---
+
+mflx:TransactionCategory_Income a skos:Concept ;
+    skos:inScheme     mflx:TransactionCategoryScheme ;
+    skos:topConceptOf mflx:TransactionCategoryScheme ;
+    skos:prefLabel    "Income"@en ;
+    skos:definition   "Money received into an account from an external source."@en ;
+    skos:notation     "INCOME" .
+
+mflx:TransactionCategory_Income_Salary a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Income ;
+    skos:prefLabel "Salary"@en ;
+    skos:definition "Regular employment income paid by an employer."@en ;
+    skos:notation  "INCOME_SALARY" .
+
+mflx:TransactionCategory_Income_Freelance a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Income ;
+    skos:prefLabel "Freelance / self-employment"@en ;
+    skos:definition "Income from self-employment, freelance work, or business activity."@en ;
+    skos:notation  "INCOME_FREELANCE" .
+
+mflx:TransactionCategory_Income_Rental a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Income ;
+    skos:prefLabel "Rental income"@en ;
+    skos:definition "Income received from letting a property."@en ;
+    skos:notation  "INCOME_RENTAL" .
+
+mflx:TransactionCategory_Income_Investment a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Income ;
+    skos:prefLabel "Investment income"@en ;
+    skos:definition "Dividends, interest, or distributions received from investment accounts."@en ;
+    skos:notation  "INCOME_INVESTMENT" .
+
+mflx:TransactionCategory_Income_Benefits a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Income ;
+    skos:prefLabel "Benefits / state payments"@en ;
+    skos:definition "Government benefits, tax credits, state pension, or other state-administered payments."@en ;
+    skos:notation  "INCOME_BENEFITS" .
+
+mflx:TransactionCategory_Income_Other a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Income ;
+    skos:prefLabel "Other income"@en ;
+    skos:definition "Income that does not fit any other income subcategory."@en ;
+    skos:notation  "INCOME_OTHER" .
+
+
+# --- Expense top concept and subtypes ---
+
+mflx:TransactionCategory_Expense a skos:Concept ;
+    skos:inScheme     mflx:TransactionCategoryScheme ;
+    skos:topConceptOf mflx:TransactionCategoryScheme ;
+    skos:prefLabel    "Expense"@en ;
+    skos:definition   "Money leaving an account for goods, services, or obligations."@en ;
+    skos:notation     "EXPENSE" .
+
+mflx:TransactionCategory_Expense_Housing a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Housing"@en ;
+    skos:definition "Rent, mortgage payments, service charges, and ground rent."@en ;
+    skos:notation  "EXP_HOUSING" .
+
+mflx:TransactionCategory_Expense_Utilities a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Utilities"@en ;
+    skos:definition "Gas, electricity, water, and broadband."@en ;
+    skos:notation  "EXP_UTILITIES" .
+
+mflx:TransactionCategory_Expense_Groceries a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Groceries"@en ;
+    skos:definition "Supermarket and food shop spending."@en ;
+    skos:notation  "EXP_GROCERIES" .
+
+mflx:TransactionCategory_Expense_DiningOut a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Dining out"@en ;
+    skos:definition "Restaurants, cafes, takeaways, and coffee shops."@en ;
+    skos:notation  "EXP_DINING" .
+
+mflx:TransactionCategory_Expense_Transport a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Transport"@en ;
+    skos:definition "Public transport, fuel, parking, and vehicle costs."@en ;
+    skos:notation  "EXP_TRANSPORT" .
+
+mflx:TransactionCategory_Expense_Healthcare a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Healthcare"@en ;
+    skos:definition "Medical appointments, prescriptions, dental, and optical."@en ;
+    skos:notation  "EXP_HEALTH" .
+
+mflx:TransactionCategory_Expense_Insurance a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Insurance"@en ;
+    skos:definition "Home, car, life, health, and travel insurance premiums."@en ;
+    skos:notation  "EXP_INSURANCE" .
+
+mflx:TransactionCategory_Expense_Subscriptions a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Subscriptions"@en ;
+    skos:definition "Streaming services, software, magazines, gym memberships, and other recurring subscriptions."@en ;
+    skos:notation  "EXP_SUBS" .
+
+mflx:TransactionCategory_Expense_Shopping a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Shopping"@en ;
+    skos:definition "Clothing, electronics, household goods, and general retail purchases."@en ;
+    skos:notation  "EXP_SHOPPING" .
+
+mflx:TransactionCategory_Expense_Holidays a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Holidays and travel"@en ;
+    skos:definition "Holiday bookings, hotels, flights, and travel abroad."@en ;
+    skos:notation  "EXP_HOLIDAYS" .
+
+mflx:TransactionCategory_Expense_Education a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Education"@en ;
+    skos:definition "School fees, university costs, courses, and learning materials."@en ;
+    skos:notation  "EXP_EDUCATION" .
+
+mflx:TransactionCategory_Expense_Childcare a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Childcare"@en ;
+    skos:definition "Nursery, childminder, after-school clubs, and child-related costs."@en ;
+    skos:notation  "EXP_CHILDCARE" .
+
+mflx:TransactionCategory_Expense_Savings a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Savings and investments"@en ;
+    skos:definition "Transfers into savings accounts, ISA contributions, or investment deposits that are not modelled as inter-account transfers."@en ;
+    skos:notation  "EXP_SAVINGS" ;
+    skos:scopeNote "Use this category for saving activity that is treated as outgoing expenditure rather than an account-to-account Transfer. For example, a standing order to a savings account at a different institution where both accounts are tracked in MFL should be modelled as a Transfer, not categorised here."@en .
+
+mflx:TransactionCategory_Expense_Taxes a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Taxes"@en ;
+    skos:definition "Income tax self-assessment payments, council tax, and other direct tax payments."@en ;
+    skos:notation  "EXP_TAXES" .
+
+mflx:TransactionCategory_Expense_Charity a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Charity and gifts"@en ;
+    skos:definition "Charitable donations, gift aid payments, and monetary gifts to individuals."@en ;
+    skos:notation  "EXP_CHARITY" .
+
+mflx:TransactionCategory_Expense_Other a skos:Concept ;
+    skos:inScheme  mflx:TransactionCategoryScheme ;
+    skos:broader   mflx:TransactionCategory_Expense ;
+    skos:prefLabel "Other expense"@en ;
+    skos:definition "Expenditure that does not fit any other expense subcategory."@en ;
+    skos:notation  "EXP_OTHER" .
+
+mflx:TransactionCategory_Uncategorised a skos:Concept ;
+    skos:inScheme     mflx:TransactionCategoryScheme ;
+    skos:topConceptOf mflx:TransactionCategoryScheme ;
+    skos:prefLabel    "Uncategorised"@en ;
+    skos:definition   "Default category assigned to imported transactions where no matching category rule exists. Should be reviewed and reassigned by the user."@en ;
+    skos:notation     "UNCAT" ;
+    skos:scopeNote    "Uncategorised is a top concept rather than a child of Income or Expense because it is direction-neutral — the correct branch is not yet known. It is excluded from income and expenditure totals in reporting."@en .
+
+
+# ===========================================================================
+# CLASSES AND PROPERTIES  (mfl: prefix)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# SECTION 5 — mfl:Payee
+#
+# A named entity representing the counterparty in a transaction: a merchant,
+# employer, utility company, or individual. Named individuals rather than
+# string literals, following the MRL design principle.
+#
+# Each Payee has a canonical name (used in the UI) and a set of raw name
+# patterns (from import files) that are matched to it by the import engine.
+# The category rule engine uses Payee instances as the primary matching key.
+#
+# Instance pattern: mfl:Payee_<uuid>
+# ---------------------------------------------------------------------------
+
+mfl:Payee a owl:Class ;
+    rdfs:label   "Payee"@en ;
+    rdfs:comment "A named counterparty in a transaction. Covers merchants, employers, utility providers, and any other entity that sends or receives money. Named individuals allow category rules, notes, and display preferences to be attached once and shared across all transactions with that payee."@en .
+
+mfl:payeeName a owl:DatatypeProperty ;
+    rdfs:label   "payee name"@en ;
+    rdfs:comment "The canonical display name for this payee, as shown in the UI. Set by the user or derived from the most common import string."@en ;
+    rdfs:domain  mfl:Payee ;
+    rdfs:range   xsd:string .
+
+mfl:payeeNotes a owl:DatatypeProperty ;
+    rdfs:label  "payee notes"@en ;
+    rdfs:comment "Optional free-text notes about this payee."@en ;
+    rdfs:domain  mfl:Payee ;
+    rdfs:range   xsd:string .
+
+mfl:defaultCategory a owl:ObjectProperty ;
+    rdfs:label   "default category"@en ;
+    rdfs:comment "The category automatically applied to new transactions from this payee when no more specific CategoryRule matches. Points to a skos:Concept in mflx:TransactionCategoryScheme."@en ;
+    rdfs:domain  mfl:Payee ;
+    rdfs:range   skos:Concept .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 6 — mfl:CategoryRule
+#
+# Auto-categorisation rules applied during import and manual entry.
+# A rule matches a raw payee string pattern to a canonical Payee and/or
+# category. Rules are evaluated in priority order; the first match wins.
+#
+# MVP matching is case-insensitive substring match on mfl:rulePattern
+# against mfl:payeeRaw. Post-MVP will support regex matching.
+#
+# Instance pattern: mfl:CategoryRule_<uuid>
+# ---------------------------------------------------------------------------
+
+mfl:CategoryRule a owl:Class ;
+    rdfs:label   "Category rule"@en ;
+    rdfs:comment "An auto-categorisation rule that matches a raw payee string pattern to a canonical Payee and/or category. Applied during import and when editing transactions. Rules are evaluated in ascending mfl:rulePriority order; the first match wins."@en .
+
+mfl:rulePattern a owl:DatatypeProperty ;
+    rdfs:label   "rule pattern"@en ;
+    rdfs:comment "The string pattern matched against the raw payee name on incoming transactions. MVP: case-insensitive substring match. Post-MVP: optional regex flag."@en ;
+    rdfs:domain  mfl:CategoryRule ;
+    rdfs:range   xsd:string .
+
+mfl:rulePriority a owl:DatatypeProperty ;
+    rdfs:label   "rule priority"@en ;
+    rdfs:comment "Integer controlling evaluation order. Lower number = evaluated first. User-defined rules should use lower priority numbers than system-generated rules to take precedence."@en ;
+    rdfs:domain  mfl:CategoryRule ;
+    rdfs:range   xsd:integer .
+
+mfl:ruleAssignsPayee a owl:ObjectProperty ;
+    rdfs:label   "rule assigns payee"@en ;
+    rdfs:comment "The Payee instance assigned to matching transactions. Optional — a rule may assign a category without assigning a payee."@en ;
+    rdfs:domain  mfl:CategoryRule ;
+    rdfs:range   mfl:Payee .
+
+mfl:ruleAssignsCategory a owl:ObjectProperty ;
+    rdfs:label   "rule assigns category"@en ;
+    rdfs:comment "The category concept assigned to matching transactions. Points to a skos:Concept in mflx:TransactionCategoryScheme. Optional — a rule may assign a payee without assigning a category (in which case the payee's defaultCategory is used)."@en ;
+    rdfs:domain  mfl:CategoryRule ;
+    rdfs:range   skos:Concept .
+
+mfl:ruleIsActive a owl:DatatypeProperty ;
+    rdfs:label   "rule is active"@en ;
+    rdfs:comment "False if this rule has been disabled by the user without deleting it. Inactive rules are not evaluated during import."@en ;
+    rdfs:domain  mfl:CategoryRule ;
+    rdfs:range   xsd:boolean .
+
+mfl:ruleOwnedBy a owl:ObjectProperty ;
+    rdfs:label   "rule owned by"@en ;
+    rdfs:comment "The person whose transactions this rule applies to."@en ;
+    rdfs:domain  mfl:CategoryRule ;
+    rdfs:range   mrl:Person .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 7 — mfl:ImportBatch
+#
+# Records each import event for audit, duplicate detection, and re-import.
+# Every transaction created via import is linked back to its ImportBatch.
+# Manual transactions have no ImportBatch link.
+#
+# Instance pattern: mfl:ImportBatch_<uuid>
+# ---------------------------------------------------------------------------
+
+mfl:ImportBatch a owl:Class ;
+    rdfs:label   "Import batch"@en ;
+    rdfs:comment "A single import event: one file, one account, one point in time. Provides an audit trail for all imported transactions and the reference point for duplicate detection on subsequent imports of the same account."@en .
+
+mfl:importDate a owl:DatatypeProperty ;
+    rdfs:label   "import date"@en ;
+    rdfs:comment "The date and time at which this import was performed (ISO 8601 datetime)."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   xsd:dateTime .
+
+mfl:importFormat a owl:ObjectProperty ;
+    rdfs:label   "import format"@en ;
+    rdfs:comment "The file format used for this import. Points to a skos:Concept in mflx:ImportFormatScheme."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   skos:Concept .
+
+mfl:importFileName a owl:DatatypeProperty ;
+    rdfs:label   "import file name"@en ;
+    rdfs:comment "The original filename of the imported file, preserved for reference."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   xsd:string .
+
+mfl:importTargetAccount a owl:ObjectProperty ;
+    rdfs:label   "import target account"@en ;
+    rdfs:comment "The account into which transactions from this batch were imported. Points to a mrl:Account individual."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   mrl:Account .
+
+mfl:importTransactionCount a owl:DatatypeProperty ;
+    rdfs:label   "import transaction count"@en ;
+    rdfs:comment "Total number of transactions in the import file."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   xsd:integer .
+
+mfl:importNewCount a owl:DatatypeProperty ;
+    rdfs:label   "import new count"@en ;
+    rdfs:comment "Number of transactions created as new records (not identified as duplicates)."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   xsd:integer .
+
+mfl:importDuplicateCount a owl:DatatypeProperty ;
+    rdfs:label   "import duplicate count"@en ;
+    rdfs:comment "Number of transactions skipped because they matched existing records via the duplicate detection hash."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   xsd:integer .
+
+mfl:importColumnMap a owl:DatatypeProperty ;
+    rdfs:label   "import column map"@en ;
+    rdfs:comment "JSON string recording the column mapping configuration used for a CSV import. Preserved so the same mapping can be offered as a default on the next import from the same institution. Not used for OFX/QFX imports."@en ;
+    rdfs:domain  mfl:ImportBatch ;
+    rdfs:range   xsd:string .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 8 — mfl:Transaction
+#
+# The core class of the My Finance Life application. A single financial
+# event on an account: a debit, credit, or transfer.
+#
+# Key design decisions recorded here:
+#
+# 1. Amount is always a positive decimal. Direction is determined by
+#    mfl:transactionType (Debit/Credit/Transfer) in combination with
+#    mrl:isLiability on the parent account. See mflx:TransactionTypeScheme
+#    for the full sign convention.
+#
+# 2. Two date fields: mfl:transactionDate (when it happened) and
+#    mfl:postDate (when it settled on the account). These differ for card
+#    transactions. Queries should filter on transactionDate for the user-
+#    facing register view; postDate for reconciliation matching.
+#
+# 3. Two text fields: mfl:memo (bank/import text, never edited) and
+#    mfl:notes (user text, freely editable). Kept separate so import
+#    re-runs cannot overwrite user annotations.
+#
+# 4. mfl:payeeRaw preserves the verbatim import string; mfl:payee points
+#    to the canonical Payee entity after rule matching.
+#
+# 5. Currency is at the account level (mrl:accountCurrency). Transaction-
+#    level currency for foreign charges is a post-MVP feature — see the
+#    post-MVP stub properties below.
+#
+# Instance pattern: mfl:Transaction_<uuid>
+# ---------------------------------------------------------------------------
+
+mfl:Transaction a owl:Class ;
+    rdfs:label   "Transaction"@en ;
+    rdfs:comment "A single financial event on an account. Covers debits (money out / liability increase), credits (money in / liability decrease), and transfers between accounts. The core unit of record in My Finance Life."@en .
+
+mfl:transactionDate a owl:DatatypeProperty ;
+    rdfs:label   "transaction date"@en ;
+    rdfs:comment "The date on which the transaction occurred, as reported by the bank or entered by the user. This is the primary date shown in the account register."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:date .
+
+mfl:postDate a owl:DatatypeProperty ;
+    rdfs:label   "post date"@en ;
+    rdfs:comment "The date on which the transaction settled and appeared on the account statement. May differ from transactionDate by 1–3 days, particularly for card transactions. Used for statement reconciliation. If absent, assumed equal to transactionDate."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:date .
+
+mfl:amount a owl:DatatypeProperty ;
+    rdfs:label   "amount"@en ;
+    rdfs:comment "The transaction amount in the account's currency. Always stored as a positive decimal. Direction is determined by mfl:transactionType in combination with mrl:isLiability on the parent account."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:decimal .
+
+mfl:transactionType a owl:ObjectProperty ;
+    rdfs:label   "transaction type"@en ;
+    rdfs:comment "Points to a skos:Concept in mflx:TransactionTypeScheme (Debit, Credit, or Transfer)."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   skos:Concept .
+
+mfl:transactionStatus a owl:ObjectProperty ;
+    rdfs:label   "transaction status"@en ;
+    rdfs:comment "Points to a skos:Concept in mflx:TransactionStatusScheme. Defaults to Uncleared for imported transactions; Cleared for manually entered transactions."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   skos:Concept .
+
+mfl:onAccount a owl:ObjectProperty ;
+    rdfs:label   "on account"@en ;
+    rdfs:comment "The account on which this transaction appears. Points to a mrl:Account individual."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   mrl:Account .
+
+mfl:payee a owl:ObjectProperty ;
+    rdfs:label   "payee"@en ;
+    rdfs:comment "The canonical counterparty entity for this transaction after rule matching. Points to a mfl:Payee individual. May be absent if no matching rule has been applied and the user has not manually assigned one."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   mfl:Payee .
+
+mfl:payeeRaw a owl:DatatypeProperty ;
+    rdfs:label   "payee raw"@en ;
+    rdfs:comment "The verbatim payee description string from the import file or bank statement. Never edited after import. Used by the rule engine for pattern matching and preserved for debugging rule behaviour."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:string .
+
+mfl:category a owl:ObjectProperty ;
+    rdfs:label   "category"@en ;
+    rdfs:comment "The transaction category. Points to a skos:Concept in mflx:TransactionCategoryScheme. Defaults to mflx:TransactionCategory_Uncategorised if no rule matches and no manual category has been set."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   skos:Concept .
+
+mfl:memo a owl:DatatypeProperty ;
+    rdfs:label   "memo"@en ;
+    rdfs:comment "The transaction description as supplied by the bank or import file. Never edited by the user — preserved verbatim for reference and rule debugging."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:string .
+
+mfl:notes a owl:DatatypeProperty ;
+    rdfs:label   "notes"@en ;
+    rdfs:comment "Free-text annotation added or edited by the user. Independent of mfl:memo — import re-runs do not affect this field."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:string .
+
+mfl:reference a owl:DatatypeProperty ;
+    rdfs:label   "reference"@en ;
+    rdfs:comment "A reference number associated with the transaction, such as a cheque number, payment reference, or bank-assigned transaction ID. Optional."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:string .
+
+mfl:importHash a owl:DatatypeProperty ;
+    rdfs:label   "import hash"@en ;
+    rdfs:comment "A fingerprint used for duplicate detection during import. Computed as a hash of (account IRI + transactionDate + amount + payeeRaw). Transactions with a matching hash in the same account are skipped on re-import."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:string .
+
+mfl:importBatch a owl:ObjectProperty ;
+    rdfs:label   "import batch"@en ;
+    rdfs:comment "The ImportBatch event that created this transaction. Absent for manually entered transactions."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   mfl:ImportBatch .
+
+mfl:transferCounterpart a owl:ObjectProperty ;
+    rdfs:label   "transfer counterpart"@en ;
+    rdfs:comment "For Transfer transactions: points to the paired transaction on the other account. A transfer always creates two Transaction instances — a Debit on the source account and a Credit on the destination account. This property links them bidirectionally."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   mfl:Transaction .
+
+mfl:isManualEntry a owl:DatatypeProperty ;
+    rdfs:label   "is manual entry"@en ;
+    rdfs:comment "True if this transaction was entered manually by the user rather than imported from a file. Affects default status (Cleared for manual, Uncleared for imported) and controls whether it is included in duplicate detection."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:boolean .
+
+
+# ---------------------------------------------------------------------------
+# POST-MVP STUB — foreign currency transactions
+#
+# When a transaction occurs in a currency different from the account's base
+# currency (e.g. a USD charge on a GBP credit card), the original amount and
+# currency should be preserved alongside the converted amount.
+#
+# These properties are declared here so the data model is forward-compatible.
+# They are not used by MVP application code.
+#
+# mfl:originalAmount   xsd:decimal   — amount in the foreign currency
+# mfl:originalCurrency mrl:Currency  — the foreign currency individual
+#
+# ---------------------------------------------------------------------------
+
+mfl:originalAmount a owl:DatatypeProperty ;
+    rdfs:label   "original amount"@en ;
+    rdfs:comment "POST-MVP. The transaction amount in its original foreign currency, before conversion to the account currency. Stored when a transaction is made in a different currency from the account (e.g. a USD purchase on a GBP card). mfl:amount always holds the account-currency equivalent."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   xsd:decimal .
+
+mfl:originalCurrency a owl:ObjectProperty ;
+    rdfs:label   "original currency"@en ;
+    rdfs:comment "POST-MVP. The currency in which the transaction was originally made, when different from the account currency. Points to a mrl:Currency individual. Absent if the transaction is in the account's own currency."@en ;
+    rdfs:domain  mfl:Transaction ;
+    rdfs:range   mrl:Currency .
+
+
+# ---------------------------------------------------------------------------
+# POST-MVP STUB — split transactions
+#
+# A split transaction assigns portions of a single transaction amount to
+# different categories (e.g. a supermarket visit split across Groceries
+# and Household). The parent Transaction holds the total amount; each
+# TransactionSplit holds a portion and its own category.
+#
+# This class is declared here so its IRI is reserved. It is not used by
+# MVP application code.
+# ---------------------------------------------------------------------------
+
+mfl:TransactionSplit a owl:Class ;
+    rdfs:label   "Transaction split"@en ;
+    rdfs:comment "POST-MVP. A portion of a split transaction assigned to a specific category. The parent mfl:Transaction holds the total amount; TransactionSplit instances subdivide it. The sum of all split amounts must equal the parent transaction amount."@en .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 9 — mfl:ValuationEvent
+#
+# A point-in-time value snapshot for accounts whose balance is not derived
+# from transaction aggregation. Used for:
+#   - mrl:PropertyAsset    (estimated current market value)
+#   - mrl:InvestmentAccount (current portfolio value from a statement)
+#
+# ValuationEvents are ordered by date; the most recent event's value is
+# the current balance displayed for the account. The history of events
+# provides the value trend chart.
+#
+# Instance pattern: mfl:ValuationEvent_<uuid>
+# ---------------------------------------------------------------------------
+
+mfl:ValuationEvent a owl:Class ;
+    rdfs:label   "Valuation event"@en ;
+    rdfs:comment "A point-in-time value record for an account whose balance is maintained by periodic snapshots rather than transaction aggregation. Used for property assets (estimated market value) and investment accounts (portfolio statement value). The sequence of valuation events over time provides the value history."@en .
+
+mfl:valuationDate a owl:DatatypeProperty ;
+    rdfs:label   "valuation date"@en ;
+    rdfs:comment "The date on which this valuation was recorded."@en ;
+    rdfs:domain  mfl:ValuationEvent ;
+    rdfs:range   xsd:date .
+
+mfl:valuationAmount a owl:DatatypeProperty ;
+    rdfs:label   "valuation amount"@en ;
+    rdfs:comment "The estimated or confirmed value of the account on the valuation date, in the account's currency."@en ;
+    rdfs:domain  mfl:ValuationEvent ;
+    rdfs:range   xsd:decimal .
+
+mfl:valuationSource a owl:DatatypeProperty ;
+    rdfs:label   "valuation source"@en ;
+    rdfs:comment "Optional free-text description of how this value was determined, e.g. 'Rightmove estimate', 'Q3 statement', 'Zoopla automated valuation'."@en ;
+    rdfs:domain  mfl:ValuationEvent ;
+    rdfs:range   xsd:string .
+
+mfl:valuationNotes a owl:DatatypeProperty ;
+    rdfs:label   "valuation notes"@en ;
+    rdfs:comment "Optional user notes about this valuation."@en ;
+    rdfs:domain  mfl:ValuationEvent ;
+    rdfs:range   xsd:string .
+
+mfl:valuationForAccount a owl:ObjectProperty ;
+    rdfs:label   "valuation for account"@en ;
+    rdfs:comment "The account this valuation event relates to. Points to a mrl:PropertyAsset or mrl:InvestmentAccount individual."@en ;
+    rdfs:domain  mfl:ValuationEvent ;
+    rdfs:range   mrl:Account .
+
+
+# ---------------------------------------------------------------------------
+# SECTION 10 — mfl:AppSettings
+#
+# Global application settings for the My Finance Life instance.
+# One instance per installation, owned by the single mrl:Person.
+#
+# Instance pattern: mfl:AppSettings_1 (singleton)
+# ---------------------------------------------------------------------------
+
+mfl:AppSettings a owl:Class ;
+    rdfs:label   "App settings"@en ;
+    rdfs:comment "Global settings for the My Finance Life application. A single instance per installation."@en .
+
+mfl:settingsOwner a owl:ObjectProperty ;
+    rdfs:label   "settings owner"@en ;
+    rdfs:comment "Points to the mrl:Person this settings instance belongs to."@en ;
+    rdfs:domain  mfl:AppSettings ;
+    rdfs:range   mrl:Person .
+
+mfl:defaultTimescale a owl:DatatypeProperty ;
+    rdfs:label   "default timescale"@en ;
+    rdfs:comment "The default reporting timescale applied to the dashboard and all views. Stored as a string code: YTD, MTD, LAST_MONTH, ROLLING_3M, ROLLING_6M, ROLLING_12M. The application layer interprets these codes to compute the relevant date range at query time."@en ;
+    rdfs:domain  mfl:AppSettings ;
+    rdfs:range   xsd:string .
+
+mfl:defaultAccounts a owl:DatatypeProperty ;
+    rdfs:label   "default accounts"@en ;
+    rdfs:comment "JSON array of account IRI strings representing the default account selection for dashboard views. If empty, all accounts are included. Stored as a string; the application layer parses it."@en ;
+    rdfs:domain  mfl:AppSettings ;
+    rdfs:range   xsd:string .
+
+
+# ===========================================================================
+# NAMED GRAPHS
+#
+# mfl: ontology and instance data use the following named graph IRIs,
+# consistent with the MRL pattern from ADR-005.
+#
+# Ontology graph: https://myfinanciallife.app/ontology/graph
+#   Contains all triples from mfl-ontology.ttl (this file) AND a copy of
+#   mrl-ontology.ttl. Both are loaded into this single graph on startup.
+#   Rationale: shared concepts and MFL-specific concepts are both part of
+#   the schema; separating them would complicate SPARQL prefix resolution.
+#
+# Data graph:     https://myfinanciallife.app/data/graph
+#   Contains all user instance data created at runtime.
+#
+# When shared-database mode is active (future ADR), both apps point at the
+# same Oxigraph store. The data graph IRI used by MFL in standalone mode
+# must not clash with MRL's data graph IRI. They do not: MRL uses
+# https://myretirementlife.app/data/graph.
+# ===========================================================================

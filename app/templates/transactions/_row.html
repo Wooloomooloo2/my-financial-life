@@ -1,0 +1,73 @@
+{#
+  Transaction row partial.
+  Variable: tx  (TransactionRow dataclass)
+#}
+<tr id="row-{{ tx.iri_key }}"
+    class="border-b border-base-200 hover:bg-base-50 group text-sm">
+
+    <td class="px-3 py-2 w-8">
+        <input type="checkbox"
+               class="checkbox checkbox-xs tx-checkbox"
+               value="{{ tx.iri_key }}"
+               onchange="updateBulkBar()">
+    </td>
+
+    <td class="px-3 py-2 whitespace-nowrap text-xs text-base-content/60 w-24">
+        {{ tx.date_display }}
+    </td>
+
+    <td id="payee-{{ tx.iri_key }}" class="px-3 py-2 max-w-[180px]">
+        <span class="cursor-pointer hover:text-primary truncate block"
+              hx-get="/transactions/{{ tx.iri_key }}/edit/payee?current={{ tx.payee_display | urlencode }}"
+              hx-target="#payee-{{ tx.iri_key }}" hx-swap="innerHTML"
+              hx-trigger="click">
+            {% if tx.payee_display and tx.payee_display != '—' %}
+                {{ tx.payee_display }}
+            {% else %}
+                <span class="text-base-content/30">—</span>
+            {% endif %}
+        </span>
+    </td>
+
+    <td id="memo-{{ tx.iri_key }}" class="px-3 py-2 max-w-[180px]">
+        <span class="cursor-pointer hover:text-primary truncate block text-base-content/50"
+              hx-get="/transactions/{{ tx.iri_key }}/edit/memo?current={{ tx.notes | urlencode }}"
+              hx-target="#memo-{{ tx.iri_key }}" hx-swap="innerHTML"
+              hx-trigger="click">
+            {% if tx.notes %}
+                {{ tx.notes }}
+            {% elif tx.memo %}
+                <span class="italic text-xs text-base-content/30">{{ tx.memo }}</span>
+            {% else %}
+                <span class="text-base-content/20">—</span>
+            {% endif %}
+        </span>
+    </td>
+
+    <td id="cat-{{ tx.iri_key }}" class="px-3 py-2">
+        <span class="{{ tx.category_color }} cursor-pointer hover:underline"
+              hx-get="/transactions/{{ tx.iri_key }}/edit/category?current={{ tx.category_iri | urlencode }}"
+              hx-target="#cat-{{ tx.iri_key }}" hx-swap="innerHTML"
+              hx-trigger="click">
+            {{ tx.category_label }}
+        </span>
+    </td>
+
+    <td id="status-{{ tx.iri_key }}" class="px-3 py-2 w-28">
+        <span class="badge badge-sm {{ tx.status_badge }} cursor-pointer"
+              hx-get="/transactions/{{ tx.iri_key }}/edit/status?current={{ tx.status_iri | urlencode }}"
+              hx-target="#status-{{ tx.iri_key }}" hx-swap="innerHTML"
+              hx-trigger="click">
+            {{ tx.status_label }}
+        </span>
+    </td>
+
+    <td class="px-3 py-2 text-right tabular-nums font-medium w-28 {{ tx.amount_color }}">
+        {{ tx.amount_display }}
+    </td>
+
+    <td class="px-3 py-2 text-right tabular-nums text-xs w-28 {{ tx.running_balance_color }}">
+        {{ tx.running_balance_display }}
+    </td>
+
+</tr>

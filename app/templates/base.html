@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ app_name }}{% endblock %}</title>
+
+    <!-- DaisyUI + Tailwind via CDN — same versions as My Retirement Life -->
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Tailwind config — emerald primary to distinguish MFL from MRL visually -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {}
+            },
+            daisyui: {
+                themes: [
+                    {
+                        light: {
+                            ...require("daisyui/src/theming/themes")["light"],
+                            "primary":         "#059669",
+                            "primary-content": "#ffffff",
+                        }
+                    },
+                    {
+                        dark: {
+                            ...require("daisyui/src/theming/themes")["dark"],
+                            "primary":         "#10b981",
+                            "primary-content": "#ffffff",
+                        }
+                    }
+                ]
+            }
+        }
+    </script>
+
+    <!-- HTMX — same version as My Retirement Life -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Tabler Icons — same as My Retirement Life -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+
+    {% block head %}{% endblock %}
+</head>
+<body class="bg-base-200 min-h-screen">
+
+    <div class="flex h-screen overflow-hidden">
+
+        <!-- Sidebar — identical structure to MRL -->
+        <aside class="w-56 bg-base-100 border-r border-base-300 flex flex-col">
+            <div class="p-4 border-b border-base-300">
+                <h1 class="font-semibold text-base-content text-sm">My Financial Life</h1>
+                <p class="text-xs text-base-content/50 mt-0.5">personal finance</p>
+            </div>
+            <nav class="flex-1 py-3 overflow-y-auto">
+
+                <p class="px-4 py-1 text-xs font-medium uppercase tracking-widest text-base-content/40">Overview</p>
+                <a href="/" class="flex items-center gap-3 px-4 py-2 text-sm hover:bg-base-200 {% if active == 'dashboard' %}bg-base-200 font-medium border-l-2 border-primary{% endif %}">
+                    <i class="ti ti-layout-dashboard text-base" aria-hidden="true"></i> Dashboard
+                </a>
+
+                <p class="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-widest text-base-content/40">Accounts</p>
+                <a href="/accounts" class="flex items-center gap-3 px-4 py-2 text-sm hover:bg-base-200 {% if active == 'accounts' %}bg-base-200 font-medium border-l-2 border-primary{% endif %}">
+                    <i class="ti ti-wallet text-base" aria-hidden="true"></i> Accounts
+                </a>
+                <a href="/transactions" class="flex items-center gap-3 px-4 py-2 text-sm hover:bg-base-200 {% if active == 'transactions' %}bg-base-200 font-medium border-l-2 border-primary{% endif %}">
+                    <i class="ti ti-list text-base" aria-hidden="true"></i> Transactions
+                </a>
+                <a href="/import" class="flex items-center gap-3 px-4 py-2 text-sm hover:bg-base-200 {% if active == 'import' %}bg-base-200 font-medium border-l-2 border-primary{% endif %}">
+                    <i class="ti ti-file-import text-base" aria-hidden="true"></i> Import
+                </a>
+
+                <p class="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-widest text-base-content/40">Analysis</p>
+                <a href="/categories" class="flex items-center gap-3 px-4 py-2 text-sm hover:bg-base-200 {% if active == 'categories' %}bg-base-200 font-medium border-l-2 border-primary{% endif %}">
+                    <i class="ti ti-tag text-base" aria-hidden="true"></i> Categories
+                </a>
+                <a href="/net-worth" class="flex items-center gap-3 px-4 py-2 text-sm hover:bg-base-200 {% if active == 'net-worth' %}bg-base-200 font-medium border-l-2 border-primary{% endif %}">
+                    <i class="ti ti-chart-line text-base" aria-hidden="true"></i> Net worth
+                </a>
+
+                <p class="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-widest text-base-content/40">Coming soon</p>
+                <span class="flex items-center gap-3 px-4 py-2 text-sm text-base-content/30 cursor-not-allowed">
+                    <i class="ti ti-chart-bar text-base" aria-hidden="true"></i> Reports
+                </span>
+                <span class="flex items-center gap-3 px-4 py-2 text-sm text-base-content/30 cursor-not-allowed">
+                    <i class="ti ti-coins text-base" aria-hidden="true"></i> Budgets
+                </span>
+                <span class="flex items-center gap-3 px-4 py-2 text-sm text-base-content/30 cursor-not-allowed">
+                    <i class="ti ti-link text-base" aria-hidden="true"></i> My Retirement Life
+                </span>
+
+            </nav>
+            <div class="p-4 border-t border-base-300">
+                <a href="/settings" class="flex items-center gap-2 text-xs text-base-content/40 hover:text-base-content/70 {% if active == 'settings' %}text-base-content/70{% endif %}">
+                    <i class="ti ti-settings text-sm" aria-hidden="true"></i> Settings &amp; backup
+                </a>
+            </div>
+        </aside>
+
+        <!-- Main content — identical structure to MRL -->
+        <main class="flex-1 flex flex-col overflow-hidden">
+            <header class="bg-base-100 border-b border-base-300 px-6 py-3 flex items-center justify-between">
+                <div>
+                    <h2 class="font-medium text-base-content">{% block page_title %}{% endblock %}</h2>
+                    <p class="text-xs text-base-content/50">{% block page_subtitle %}{% endblock %}</p>
+                </div>
+                <div class="avatar placeholder">
+                    <div class="bg-primary text-primary-content rounded-full w-8">
+                        <span class="text-xs">{{ user_initials() }}</span>
+                    </div>
+                </div>
+            </header>
+
+            <div class="flex-1 overflow-y-auto p-6">
+
+                {% set s = setup_state() %}
+                {% if not s.setup_all_done %}
+                <div class="mb-5 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 flex items-center gap-4">
+                    <div class="flex items-center gap-1.5">
+                        {% for i in range(4) %}
+                        <div class="w-2 h-2 rounded-full
+                            {% if i < s.setup_steps_done %}bg-primary
+                            {% else %}bg-base-300{% endif %}">
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <p class="text-sm text-base-content/70 flex-1">
+                        <span class="font-medium text-primary">{{ s.setup_steps_done }}/4</span>
+                        setup steps complete
+                    </p>
+                    <a href="{{ s.setup_next_url }}"
+                       class="btn btn-primary btn-xs gap-1">
+                        {{ s.setup_next_label }}
+                        <i class="ti ti-arrow-right text-xs" aria-hidden="true"></i>
+                    </a>
+                </div>
+                {% endif %}
+
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+
+    </div>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

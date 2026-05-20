@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}Accounts — {{ app_name }}{% endblock %}
+{% block page_title %}Accounts{% endblock %}
+{% block page_subtitle %}Your accounts and current balances{% endblock %}
+
+{% block content %}
+
+{% if request.query_params.get('added') == '1' %}
+<div class="alert alert-success mb-5">
+    <i class="ti ti-circle-check text-lg" aria-hidden="true"></i>
+    <span>Account created successfully.</span>
+</div>
+{% endif %}
+
+<div class="flex justify-end mb-5">
+    <a href="/accounts/new" class="btn btn-primary btn-sm gap-2">
+        <i class="ti ti-plus" aria-hidden="true"></i>
+        Add account
+    </a>
+</div>
+
+<div class="flex flex-col gap-6">
+{% for family in families %}
+
+    {% set accounts = grouped[family.id] %}
+
+    <div>
+        <!-- Family header -->
+        <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+                <i class="ti {{ family.icon }} text-base text-base-content/50" aria-hidden="true"></i>
+                <h3 class="font-medium text-sm text-base-content/70 uppercase tracking-wide">
+                    {{ family.label }}
+                </h3>
+            </div>
+            <a href="/accounts/new?family={{ family.id }}"
+               class="btn btn-ghost btn-xs gap-1 text-base-content/50 hover:text-primary">
+                <i class="ti ti-plus text-xs" aria-hidden="true"></i>
+                {{ family.add_label }}
+            </a>
+        </div>
+
+        <div class="card bg-base-100 shadow-sm">
+            {% if accounts %}
+            <div class="divide-y divide-base-200">
+                {% for account in accounts %}
+                <div class="flex items-center px-5 py-3 hover:bg-base-50 group">
+
+                    <!-- Account name and type badge -->
+                    <div class="flex-1 min-w-0">
+                        <a href="/accounts/{{ account.iri_key }}"
+                           class="font-medium text-sm text-base-content hover:text-primary truncate block">
+                            {{ account.name }}
+                        </a>
+                        <span class="text-xs text-base-content/40">{{ account.type_label }}</span>
+                    </div>
+
+                    <!-- Currency -->
+                    <div class="text-xs text-base-content/40 w-12 text-right mr-4">
+                        {{ account.currency_code }}
+                    </div>
+
+                    <!-- Balance -->
+                    <div class="text-sm font-medium tabular-nums w-28 text-right
+                        {% if account.is_liability and account.balance > 0 %}text-error
+                        {% elif account.balance < 0 %}text-error
+                        {% else %}text-base-content{% endif %}">
+                        {% if account.is_liability and account.balance > 0 %}
+                            {{ account.currency_symbol }}{{ "%.2f"|format(account.balance) }}
+                        {% elif account.balance < 0 %}
+                            −{{ account.currency_symbol }}{{ "%.2f"|format(account.balance|abs) }}
+                        {% else %}
+                            {{ account.currency_symbol }}{{ "%.2f"|format(account.balance) }}
+                        {% endif %}
+                    </div>
+
+                    <!-- Edit link -->
+                    <div class="ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <a href="/accounts/{{ account.iri_key }}/edit"
+                           class="btn btn-ghost btn-xs text-base-content/40">
+                            <i class="ti ti-pencil text-xs" aria-hidden="true"></i>
+                        </a>
+                    </div>
+
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <!-- Empty state -->
+            <div class="px-5 py-8 text-center">
+                <i class="ti {{ family.icon }} text-3xl text-base-content/20 block mb-2" aria-hidden="true"></i>
+                <p class="text-sm text-base-content/40">No {{ family.label | lower }} yet.</p>
+                <a href="/accounts/new?family={{ family.id }}"
+                   class="btn btn-ghost btn-xs text-primary mt-2">
+                    {{ family.add_label }}
+                </a>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+{% endfor %}
+</div>
+
+{% endblock %}
