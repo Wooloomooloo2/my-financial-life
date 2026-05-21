@@ -112,6 +112,88 @@
     </div>
 </div>
 
+{# ── Filter / sort bar ────────────────────────────────────────────── #}
+<div class="card bg-base-100 shadow-sm mb-3">
+    <div class="card-body py-3 px-4">
+        <form id="filter-form" method="get" action="/accounts/{{ account.iri_key }}"
+              onsubmit="event.preventDefault(); applyFilters()">
+            <div class="flex flex-wrap gap-2 items-center">
+
+                {# Text search #}
+                <div class="join flex-1 min-w-[160px]">
+                    <input id="filter-search" type="search" name="search"
+                           class="input input-bordered input-sm join-item w-full"
+                           placeholder="Search payee or memo…"
+                           value="{{ filters.search | e }}">
+                    <button type="submit"
+                            class="btn btn-sm join-item btn-ghost border border-base-300"
+                            title="Search">
+                        <i class="ti ti-search text-xs" aria-hidden="true"></i>
+                    </button>
+                </div>
+
+                {# Date preset #}
+                <select id="filter-date" name="date"
+                        class="select select-bordered select-sm"
+                        onchange="applyFilters()">
+                    <option value="">Any time</option>
+                    {% for key, label in date_presets %}
+                    <option value="{{ key }}" {{ 'selected' if filters.date_preset == key }}>
+                        {{ label }}
+                    </option>
+                    {% endfor %}
+                </select>
+
+                {# Status #}
+                <select id="filter-status" name="status"
+                        class="select select-bordered select-sm"
+                        onchange="applyFilters()">
+                    <option value="">All statuses</option>
+                    {% for iri, label in status_options %}
+                    <option value="{{ iri }}" {{ 'selected' if filters.status == iri }}>
+                        {{ label }}
+                    </option>
+                    {% endfor %}
+                </select>
+
+                {# Category #}
+                <select id="filter-category" name="category"
+                        class="select select-bordered select-sm min-w-[150px]"
+                        onchange="applyFilters()">
+                    <option value="">All categories</option>
+                    <option value="uncategorised"
+                            {{ 'selected' if filters.category == 'uncategorised' }}>
+                        Uncategorised
+                    </option>
+                    {% for group in categories %}
+                    <optgroup label="{{ group.label }}">
+                        {% for item in group.items %}
+                        <option value="{{ item.iri }}"
+                                {{ 'selected' if filters.category == item.iri }}>
+                            {{ item.label }}
+                        </option>
+                        {% endfor %}
+                    </optgroup>
+                    {% endfor %}
+                </select>
+
+                {# Clear — only shown when at least one filter is active #}
+                {% if filters.is_filtered %}
+                <a href="{{ clear_filters_url }}"
+                   class="btn btn-ghost btn-sm text-error gap-1 shrink-0">
+                    <i class="ti ti-x text-xs" aria-hidden="true"></i>
+                    Clear
+                    {% if filters.active_filter_count > 1 %}
+                    <span class="badge badge-error badge-sm">{{ filters.active_filter_count }}</span>
+                    {% endif %}
+                </a>
+                {% endif %}
+
+            </div>
+        </form>
+    </div>
+</div>
+
 {# ── Bulk action bar ──────────────────────────────────────────────── #}
 <div id="bulk-bar"
      class="hidden sticky top-0 z-20 card bg-base-100 shadow-md
@@ -155,10 +237,9 @@
     </div>
 </div>
 
-{# Hidden form for bulk submit #}
+{# Hidden form for bulk submit — redirect_to uses full current page URL #}
 <form id="bulk-form" hx-post="/transactions/bulk-update" hx-trigger="submit">
-    <input type="hidden" name="redirect_to"
-           value="/accounts/{{ account.iri_key }}?page={{ page }}&per_page={{ per_page }}">
+    <input type="hidden" name="redirect_to" value="{{ current_page_url }}">
     <input type="hidden" id="bulk-category-val" name="bulk_category" value="">
     <input type="hidden" id="bulk-status-val"   name="bulk_status"   value="">
     <input type="hidden" id="bulk-payee-val"    name="bulk_payee"    value="">
@@ -169,27 +250,27 @@
 {% if total > 0 %}
 <div class="flex items-center justify-between mb-3 px-1">
     <span class="text-xs text-base-content/50">
-        Showing {{ page_start }}–{{ page_end }} of {{ total }} transactions
+        Showing {{ page_start }}–{{ page_end }} of {{ total }}
+        {% if filters.is_filtered %}<span class="text-primary">matching</span>{% endif %}
+        transactions
     </span>
     <div class="flex items-center gap-2">
         <select class="select select-xs select-bordered"
-                onchange="window.location='/accounts/{{ account.iri_key }}?page=1&per_page='+this.value">
+                onchange="window.location='{{ perpage_base_url }}page=1&per_page='+this.value">
             {% for n in [25, 50, 100, 250] %}
             <option value="{{ n }}" {% if n == per_page %}selected{% endif %}>
                 {{ n }} per page
             </option>
             {% endfor %}
         </select>
-        {% if page > 1 %}
-        <a href="/accounts/{{ account.iri_key }}?page={{ page - 1 }}&per_page={{ per_page }}"
-           class="btn btn-xs btn-ghost">← Prev</a>
+        {% if prev_page_url %}
+        <a href="{{ prev_page_url }}" class="btn btn-xs btn-ghost">← Prev</a>
         {% endif %}
         <span class="text-xs text-base-content/50 tabular-nums">
             {{ page }} / {{ total_pages }}
         </span>
-        {% if page < total_pages %}
-        <a href="/accounts/{{ account.iri_key }}?page={{ page + 1 }}&per_page={{ per_page }}"
-           class="btn btn-xs btn-ghost">Next →</a>
+        {% if next_page_url %}
+        <a href="{{ next_page_url }}" class="btn btn-xs btn-ghost">Next →</a>
         {% endif %}
     </div>
 </div>
@@ -206,13 +287,67 @@
                         <input type="checkbox" class="checkbox checkbox-xs"
                                id="select-all" onchange="selectAll(this)">
                     </th>
-                    <th class="px-3 w-24">Date</th>
-                    <th class="px-3">Payee</th>
+
+                    <th class="px-3 w-24">
+                        <a href="{{ sort_urls.date }}"
+                           class="flex items-center gap-1 whitespace-nowrap
+                                  {{ 'text-primary' if filters.sort_col == 'date' else 'hover:text-primary' }}">
+                            Date
+                            {% if filters.sort_col == 'date' %}
+                            <i class="ti ti-arrow-{{ 'down' if filters.sort_dir == 'desc' else 'up' }} text-xs"></i>
+                            {% else %}
+                            <i class="ti ti-arrows-sort text-xs opacity-30"></i>
+                            {% endif %}
+                        </a>
+                    </th>
+
+                    <th class="px-3">
+                        <a href="{{ sort_urls.payee }}"
+                           class="flex items-center gap-1
+                                  {{ 'text-primary' if filters.sort_col == 'payee' else 'hover:text-primary' }}">
+                            Payee
+                            {% if filters.sort_col == 'payee' %}
+                            <i class="ti ti-arrow-{{ 'down' if filters.sort_dir == 'desc' else 'up' }} text-xs"></i>
+                            {% else %}
+                            <i class="ti ti-arrows-sort text-xs opacity-30"></i>
+                            {% endif %}
+                        </a>
+                    </th>
+
                     <th class="px-3">Memo / notes</th>
-                    <th class="px-3">Category</th>
+
+                    <th class="px-3">
+                        <a href="{{ sort_urls.category }}"
+                           class="flex items-center gap-1
+                                  {{ 'text-primary' if filters.sort_col == 'category' else 'hover:text-primary' }}">
+                            Category
+                            {% if filters.sort_col == 'category' %}
+                            <i class="ti ti-arrow-{{ 'down' if filters.sort_dir == 'desc' else 'up' }} text-xs"></i>
+                            {% else %}
+                            <i class="ti ti-arrows-sort text-xs opacity-30"></i>
+                            {% endif %}
+                        </a>
+                    </th>
+
                     <th class="px-3 w-28">Status</th>
-                    <th class="px-3 text-right w-28">Amount</th>
+
+                    <th class="px-3 text-right w-28">
+                        <a href="{{ sort_urls.amount }}"
+                           class="flex items-center justify-end gap-1
+                                  {{ 'text-primary' if filters.sort_col == 'amount' else 'hover:text-primary' }}">
+                            Amount
+                            {% if filters.sort_col == 'amount' %}
+                            <i class="ti ti-arrow-{{ 'down' if filters.sort_dir == 'desc' else 'up' }} text-xs"></i>
+                            {% else %}
+                            <i class="ti ti-arrows-sort text-xs opacity-30"></i>
+                            {% endif %}
+                        </a>
+                    </th>
+
+                    {% if filters.show_running_balance %}
                     <th class="px-3 text-right w-28">Balance</th>
+                    {% endif %}
+
                     <th class="w-8 px-2"></th>
                 </tr>
             </thead>
@@ -223,7 +358,21 @@
             </tbody>
         </table>
     </div>
+
+    {% elif filters.is_filtered %}
+    {# Filtered view returned zero results #}
+    <div class="px-6 py-12 text-center">
+        <i class="ti ti-filter-off text-4xl text-base-content/20 block mb-3" aria-hidden="true"></i>
+        <p class="text-sm text-base-content/40">No transactions match the current filters.</p>
+        <a href="{{ clear_filters_url }}"
+           class="btn btn-ghost btn-sm mt-3 gap-1">
+            <i class="ti ti-x text-xs" aria-hidden="true"></i>
+            Clear filters
+        </a>
+    </div>
+
     {% else %}
+    {# Account is genuinely empty #}
     <div class="px-6 py-12 text-center">
         <i class="ti ti-list text-4xl text-base-content/20 block mb-3" aria-hidden="true"></i>
         <p class="text-sm text-base-content/40">No transactions yet.</p>
@@ -237,14 +386,12 @@
 {# ── Pagination bottom ────────────────────────────────────────────── #}
 {% if total_pages > 1 %}
 <div class="flex items-center justify-center gap-2 mt-4">
-    {% if page > 1 %}
-    <a href="/accounts/{{ account.iri_key }}?page={{ page - 1 }}&per_page={{ per_page }}"
-       class="btn btn-sm btn-ghost">← Prev</a>
+    {% if prev_page_url %}
+    <a href="{{ prev_page_url }}" class="btn btn-sm btn-ghost">← Prev</a>
     {% endif %}
     <span class="text-sm text-base-content/50">Page {{ page }} of {{ total_pages }}</span>
-    {% if page < total_pages %}
-    <a href="/accounts/{{ account.iri_key }}?page={{ page + 1 }}&per_page={{ per_page }}"
-       class="btn btn-sm btn-ghost">Next →</a>
+    {% if next_page_url %}
+    <a href="{{ next_page_url }}" class="btn btn-sm btn-ghost">Next →</a>
     {% endif %}
 </div>
 {% endif %}
@@ -261,12 +408,55 @@
 
 {% block scripts %}
 <script>
+// ---------------------------------------------------------------------------
+// Filter bar
+// ---------------------------------------------------------------------------
+
+/**
+ * Navigate to the register with the current filter state.
+ * Reads control values directly, builds a clean URL (no empty params),
+ * and preserves the current sort column + direction.
+ * Called on: form submit (Enter in search), select onchange, and the
+ * search button click.
+ */
+function applyFilters() {
+    const search   = document.getElementById('filter-search').value.trim();
+    const date     = document.getElementById('filter-date').value;
+    const status   = document.getElementById('filter-status').value;
+    const category = document.getElementById('filter-category').value;
+
+    // Preserve current sort state — embedded at render time.
+    const sort    = '{{ filters.sort_col }}';
+    const dir     = '{{ filters.sort_dir }}';
+    const perPage = {{ per_page }};
+
+    const params = new URLSearchParams();
+    if (search)   params.set('search',   search);
+    if (date)     params.set('date',     date);
+    if (status)   params.set('status',   status);
+    if (category) params.set('category', category);
+    if (sort !== 'date') params.set('sort', sort);
+    if (dir !== 'desc')  params.set('dir',  dir);
+    params.set('page',     '1');
+    params.set('per_page', String(perPage));
+
+    window.location.href = '/accounts/{{ account.iri_key }}?' + params.toString();
+}
+
+// ---------------------------------------------------------------------------
+// Add-transaction panel toggle
+// ---------------------------------------------------------------------------
+
 function toggleAddForm() {
     const p = document.getElementById('add-form-panel');
     p.classList.toggle('hidden');
     if (!p.classList.contains('hidden'))
         p.querySelector('input[name="payee_raw"]').focus();
 }
+
+// ---------------------------------------------------------------------------
+// Bulk selection
+// ---------------------------------------------------------------------------
 
 function updateBulkBar() {
     const checked = document.querySelectorAll('.tx-checkbox:checked');

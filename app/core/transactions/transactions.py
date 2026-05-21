@@ -1,14 +1,13 @@
 # ===========================================================================
 # app/core/transactions/transactions.py
-#
-# Data layer for the transaction register.
 # ===========================================================================
 
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -59,11 +58,27 @@ STATUS_OPTIONS = [
     (MFLX + "TransactionStatus_Reconciled", "Reconciled"),
 ]
 
+# Date preset definitions — (url_value, display_label)
+DATE_PRESETS = [
+    ("this_month",  "This month"),
+    ("last_month",  "Last month"),
+    ("this_year",   "This year"),
+    ("last_year",   "Last year"),
+]
+
 _FIELD_PREDICATES = {
     "category": MFL_CATEGORY.value,
     "status":   MFL_TRANSACTION_STATUS.value,
     "payee":    MFL_PAYEE_RAW.value,
     "memo":     MFL_NOTES.value,
+}
+
+# SPARQL ORDER BY expressions per sortable column
+_SORT_EXPR: dict[str, str] = {
+    "date":     "?date",
+    "payee":    "LCASE(COALESCE(STR(?payeeRaw), STR(?memo), ''))",
+    "amount":   "?amount",
+    "category": "LCASE(COALESCE(STR(?category), 'zzzzz'))",
 }
 
 
@@ -94,6 +109,39 @@ class CategoryItem:
 class CategoryGroup:
     label: str
     items: list[CategoryItem]
+
+
+@dataclass
+class FilterParams:
+    """Encapsulates all filter and sort state for the transaction register."""
+    search:      str = ""
+    date_preset: str = ""    # "this_month" | "last_month" | "this_year" | "last_year" | ""
+    status:      str = ""    # full status IRI or ""
+    category:    str = ""    # full category IRI, "uncategorised", or ""
+    sort_col:    str = "date"
+    sort_dir:    str = "desc"
+
+    @property
+    def is_filtered(self) -> bool:
+        return bool(self.search or self.date_preset or self.status or self.category)
+
+    @property
+    def show_running_balance(self) -> bool:
+        """
+        Running balance is only meaningful on the unfiltered, date-descending
+        (newest-first) default view. Any filter or sort change suppresses it.
+        """
+        return (
+            not self.is_filtered
+            and self.sort_col == "date"
+            and self.sort_dir == "desc"
+        )
+
+    @property
+    def active_filter_count(self) -> int:
+        return sum(
+            1 for v in (self.search, self.date_preset, self.status, self.category) if v
+        )
 
 
 @dataclass
@@ -180,7 +228,7 @@ def get_account_detail(iri_key_str: str) -> Optional[AccountDetail]:
 
 
 # ---------------------------------------------------------------------------
-# Transactions
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 def _fmt_date(iso: str) -> str:
@@ -191,103 +239,243 @@ def _fmt_date(iso: str) -> str:
         return iso
 
 
+def _date_range_for_preset(preset: str) -> tuple[str, str] | None:
+    """Return (start_iso, end_iso) for a named date preset, or None if unknown."""
+    today = date.today()
+    if preset == "this_month":
+        start = today.replace(day=1)
+        if today.month < 12:
+            end = date(today.year, today.month + 1, 1) - timedelta(days=1)
+        else:
+            end = date(today.year, 12, 31)
+        return start.isoformat(), end.isoformat()
+    if preset == "last_month":
+        first_this = today.replace(day=1)
+        end   = first_this - timedelta(days=1)
+        start = end.replace(day=1)
+        return start.isoformat(), end.isoformat()
+    if preset == "this_year":
+        return date(today.year, 1, 1).isoformat(), date(today.year, 12, 31).isoformat()
+    if preset == "last_year":
+        return date(today.year - 1, 1, 1).isoformat(), date(today.year - 1, 12, 31).isoformat()
+    return None
+
+
+def _build_sparql_filters(f: FilterParams) -> str:
+    """
+    Build SPARQL FILTER clauses from active FilterParams.
+    All filters reference optional variables with BOUND() / COALESCE() guards.
+    """
+    clauses: list[str] = []
+
+    if f.date_preset:
+        dr = _date_range_for_preset(f.date_preset)
+        if dr:
+            s, e = dr
+            clauses.append(f'FILTER(STR(?date) >= "{s}" && STR(?date) <= "{e}")')
+
+    if f.status:
+        clauses.append(f'FILTER(?status = <{f.status}>)')
+
+    if f.category == "uncategorised":
+        clauses.append(f'FILTER(!BOUND(?category) || ?category = <{UNCAT_IRI}>)')
+    elif f.category:
+        clauses.append(f'FILTER(?category = <{f.category}>)')
+
+    if f.search:
+        esc = f.search.lower().replace("\\", "\\\\").replace('"', '\\"')
+        clauses.append(
+            f'FILTER('
+            f'CONTAINS(LCASE(COALESCE(STR(?payeeRaw), "")), "{esc}") || '
+            f'CONTAINS(LCASE(COALESCE(STR(?memo), "")), "{esc}") || '
+            f'CONTAINS(LCASE(COALESCE(STR(?notes), "")), "{esc}")'
+            f')'
+        )
+
+    return "\n                ".join(clauses)
+
+
+def _build_order_by(f: FilterParams) -> str:
+    """Return a complete SPARQL ORDER BY clause for the given filter state."""
+    expr      = _SORT_EXPR.get(f.sort_col, "?date")
+    direction = "ASC" if f.sort_dir == "asc" else "DESC"
+    # Stable secondary sort: by tx IRI when date-sorted, by date otherwise
+    secondary = (
+        f"{direction}(STR(?tx))"
+        if f.sort_col == "date"
+        else "DESC(?date)"
+    )
+    return f"ORDER BY {direction}({expr}) {secondary}"
+
+
+def _sparql_where_body(account_iri_value: str, extra_filters: str = "") -> str:
+    """
+    Shared GRAPH block used by both the COUNT query and the SELECT query.
+    extra_filters is injected after the OPTIONAL clauses.
+    """
+    return f"""
+        GRAPH <{DATA_GRAPH.value}> {{
+            ?tx a <{MFL_TRANSACTION.value}> ;
+                <{MFL_ON_ACCOUNT.value}>        <{account_iri_value}> ;
+                <{MFL}transactionDate>           ?date ;
+                <{MFL_AMOUNT.value}>             ?amount ;
+                <{MFL_TRANSACTION_TYPE.value}>   ?txType ;
+                <{MFL_TRANSACTION_STATUS.value}> ?status .
+            OPTIONAL {{ ?tx <{MFL_PAYEE_RAW.value}> ?payeeRaw }}
+            OPTIONAL {{ ?tx <{MFL_MEMO.value}>       ?memo }}
+            OPTIONAL {{ ?tx <{MFL_NOTES.value}>      ?notes }}
+            OPTIONAL {{ ?tx <{MFL_CATEGORY.value}>   ?category }}
+            OPTIONAL {{ ?tx <{MFL_IS_MANUAL_ENTRY.value}> ?isManual }}
+            {extra_filters}
+        }}
+    """
+
+
+def _build_tx_row(
+    row,
+    cat_labels:   dict[str, str],
+    cat_families: dict[str, str],
+    sym:          str,
+    running:      Decimal,
+) -> tuple[TransactionRow, Decimal]:
+    """
+    Convert a single SPARQL result row into a TransactionRow.
+    Updates and returns the running balance (caller tracks it across rows).
+    """
+    tx_iri    = row["tx"]
+    key       = tx_iri.value.split("#")[-1]
+    date_iso  = row["date"].value
+    amount    = Decimal(str(row["amount"].value))
+    tx_type   = row["txType"].value.split("#")[-1]
+    status    = row["status"].value
+
+    payee_raw = row["payeeRaw"].value if row["payeeRaw"] else ""
+    memo      = row["memo"].value     if row["memo"]     else ""
+    notes_val = row["notes"].value    if row["notes"]    else ""
+    cat_iri   = row["category"].value if row["category"] else ""
+    is_manual = (row["isManual"] is not None
+                 and row["isManual"].value.lower() == "true")
+
+    is_debit = "Debit" in tx_type
+    if is_debit:
+        running  -= amount
+        amt_str   = f"−{sym}{amount:,.2f}"
+        amt_color = "text-error"
+    else:
+        running  += amount
+        amt_str   = f"{sym}{amount:,.2f}"
+        amt_color = "text-base-content"
+
+    bal_str   = f"−{sym}{abs(running):,.2f}" if running < 0 else f"{sym}{running:,.2f}"
+    bal_color = "text-error" if running < 0 else "text-base-content/60"
+
+    cat_label = cat_labels.get(cat_iri, "Uncategorised") if cat_iri else "Uncategorised"
+    cat_fam   = cat_families.get(cat_iri, "uncat")        if cat_iri else "uncat"
+    cat_color = {
+        "income":  "text-success text-xs",
+        "expense": "text-base-content text-xs",
+        "uncat":   "text-base-content/30 text-xs italic",
+    }.get(cat_fam, "text-base-content/30 text-xs italic")
+
+    s_label, s_badge = STATUS_META.get(status, ("Unknown", "badge-ghost"))
+
+    return TransactionRow(
+        iri=tx_iri, iri_key=key,
+        date_iso=date_iso, date_display=_fmt_date(date_iso),
+        payee_display=payee_raw or memo or "—",
+        memo=memo, notes=notes_val,
+        category_iri=cat_iri, category_label=cat_label, category_color=cat_color,
+        status_iri=status, status_label=s_label, status_badge=s_badge,
+        tx_type=tx_type, amount=amount,
+        amount_display=amt_str, amount_color=amt_color,
+        running_balance=running,
+        running_balance_display=bal_str, running_balance_color=bal_color,
+        is_manual=is_manual,
+    ), running
+
+
+# ---------------------------------------------------------------------------
+# Main query function
+# ---------------------------------------------------------------------------
+
 def get_transactions_for_account(
     account_detail: AccountDetail,
-    page:     int = 1,
-    per_page: int = 50,
+    page:     int          = 1,
+    per_page: int          = 50,
+    filters:  FilterParams | None = None,
 ) -> tuple[list[TransactionRow], int]:
     """
     Return (rows_for_page, total_count).
-    Running balances are computed across ALL transactions so page 3 shows
-    balances that correctly include pages 1 and 2.
+
+    Default view (unfiltered + date DESC):
+        Fetches every transaction oldest-first, computes running balances across
+        the full account history in Python, reverses to newest-first, then slices
+        to the requested page.  Running balance is accurate across page boundaries.
+
+    Filtered / re-sorted view:
+        Runs two SPARQL queries: a COUNT with all active filters (for pagination
+        maths) and a LIMIT/OFFSET SELECT for the visible page.  Running balance
+        is suppressed — it has no meaning on a filtered or re-ordered view.
     """
-    sparql = f"""
-        SELECT ?tx ?date ?amount ?txType ?status
-               ?payeeRaw ?memo ?notes ?category ?isManual
-        WHERE {{
-            GRAPH <{DATA_GRAPH.value}> {{
-                ?tx a <{MFL_TRANSACTION.value}> ;
-                    <{MFL_ON_ACCOUNT.value}>        <{account_detail.iri.value}> ;
-                    <{MFL}transactionDate>           ?date ;
-                    <{MFL_AMOUNT.value}>             ?amount ;
-                    <{MFL_TRANSACTION_TYPE.value}>   ?txType ;
-                    <{MFL_TRANSACTION_STATUS.value}> ?status .
-                OPTIONAL {{ ?tx <{MFL_PAYEE_RAW.value}> ?payeeRaw }}
-                OPTIONAL {{ ?tx <{MFL_MEMO.value}>       ?memo }}
-                OPTIONAL {{ ?tx <{MFL_NOTES.value}>      ?notes }}
-                OPTIONAL {{ ?tx <{MFL_CATEGORY.value}>   ?category }}
-                OPTIONAL {{ ?tx <{MFL_IS_MANUAL_ENTRY.value}> ?isManual }}
-            }}
-        }}
-        ORDER BY ASC(?date) ASC(STR(?tx))
-    """
+    if filters is None:
+        filters = FilterParams()
 
     cat_labels   = _load_category_labels()
     cat_families = _load_category_families()
     sym          = account_detail.currency_symbol
+    acc          = account_detail.iri.value
 
-    running = Decimal("0")
-    rows: list[TransactionRow] = []
+    # ── Default view: full fetch, Python running balance, then slice ─────────
+    if filters.show_running_balance:
+        sparql = (
+            f"SELECT ?tx ?date ?amount ?txType ?status "
+            f"?payeeRaw ?memo ?notes ?category ?isManual\n"
+            f"WHERE {{ {_sparql_where_body(acc)} }}\n"
+            f"ORDER BY ASC(?date) ASC(STR(?tx))"
+        )
+        running = Decimal("0")
+        rows: list[TransactionRow] = []
+        for row in store.query(sparql):
+            tx_row, running = _build_tx_row(row, cat_labels, cat_families, sym, running)
+            rows.append(tx_row)
 
-    for row in store.query(sparql):
-        tx_iri   = row["tx"]
-        key      = tx_iri.value.split("#")[-1]
-        date_iso = row["date"].value
-        amount   = Decimal(str(row["amount"].value))
-        tx_type  = row["txType"].value.split("#")[-1]
-        status   = row["status"].value
+        rows.reverse()          # newest first
+        total = len(rows)
+        start = (page - 1) * per_page
+        return rows[start : start + per_page], total
 
-        payee_raw = row["payeeRaw"].value if row["payeeRaw"] else ""
-        memo      = row["memo"].value     if row["memo"]     else ""
-        notes_val = row["notes"].value    if row["notes"]    else ""
-        cat_iri   = row["category"].value if row["category"] else ""
-        is_manual = (row["isManual"] is not None
-                     and row["isManual"].value.lower() == "true")
+    # ── Filtered / re-sorted: push everything into SPARQL ───────────────────
+    extra  = _build_sparql_filters(filters)
+    order  = _build_order_by(filters)
+    offset = (page - 1) * per_page
 
-        is_debit = "Debit" in tx_type
+    # COUNT query
+    total = 0
+    for row in store.query(
+        f"SELECT (COUNT(?tx) AS ?total) WHERE {{ {_sparql_where_body(acc, extra)} }}"
+    ):
+        total = int(row["total"].value) if row["total"] else 0
 
-        if is_debit:
-            running -= amount
-            amt_str   = f"−{sym}{amount:,.2f}"
-            amt_color = "text-error"
-        else:
-            running += amount
-            amt_str   = f"{sym}{amount:,.2f}"
-            amt_color = "text-base-content"
+    if total == 0:
+        return [], 0
 
-        bal_str   = (f"−{sym}{abs(running):,.2f}" if running < 0
-                     else f"{sym}{running:,.2f}")
-        bal_color = "text-error" if running < 0 else "text-base-content/60"
+    # Page SELECT
+    page_sparql = (
+        f"SELECT ?tx ?date ?amount ?txType ?status "
+        f"?payeeRaw ?memo ?notes ?category ?isManual\n"
+        f"WHERE {{ {_sparql_where_body(acc, extra)} }}\n"
+        f"{order}\nLIMIT {per_page} OFFSET {offset}"
+    )
+    rows = []
+    for row in store.query(page_sparql):
+        tx_row, _ = _build_tx_row(row, cat_labels, cat_families, sym, Decimal("0"))
+        # Running balance is meaningless here — suppress it in the template
+        tx_row.running_balance         = Decimal("0")
+        tx_row.running_balance_display = "—"
+        tx_row.running_balance_color   = "text-base-content/30"
+        rows.append(tx_row)
 
-        cat_label = cat_labels.get(cat_iri, "Uncategorised") if cat_iri else "Uncategorised"
-        cat_fam   = cat_families.get(cat_iri, "uncat")        if cat_iri else "uncat"
-        cat_color = {
-            "income":  "text-success text-xs",
-            "expense": "text-base-content text-xs",
-            "uncat":   "text-base-content/30 text-xs italic",
-        }.get(cat_fam, "text-base-content/30 text-xs italic")
-
-        s_label, s_badge = STATUS_META.get(status, ("Unknown", "badge-ghost"))
-
-        rows.append(TransactionRow(
-            iri=tx_iri, iri_key=key,
-            date_iso=date_iso, date_display=_fmt_date(date_iso),
-            payee_display=payee_raw or memo or "—",
-            memo=memo, notes=notes_val,
-            category_iri=cat_iri, category_label=cat_label, category_color=cat_color,
-            status_iri=status, status_label=s_label, status_badge=s_badge,
-            tx_type=tx_type, amount=amount,
-            amount_display=amt_str, amount_color=amt_color,
-            running_balance=running,
-            running_balance_display=bal_str, running_balance_color=bal_color,
-            is_manual=is_manual,
-        ))
-
-    # Reverse so newest is first, then slice to requested page
-    rows.reverse()
-    total = len(rows)
-    start = (page - 1) * per_page
-    return rows[start : start + per_page], total
+    return rows, total
 
 
 # ---------------------------------------------------------------------------
@@ -348,21 +536,17 @@ def get_categories_for_select() -> list[CategoryGroup]:
         }}
         ORDER BY ?broader ?label
     """
-    # Collect all results, preferring @en labels
     concepts: dict[str, dict] = {}
     for row in store.query(sparql):
         concept = row["concept"].value
         label   = row["label"].value
         lang    = getattr(row["label"], "language", "") or ""
         broader = row["broader"].value if row["broader"] else None
-
-        # Store concept, preferring English labels over others
         if concept not in concepts or lang == "en":
             concepts[concept] = {"label": label, "broader": broader}
 
     income_items:  list[CategoryItem] = []
     expense_items: list[CategoryItem] = []
-
     for concept, data in concepts.items():
         label   = data["label"]
         broader = data["broader"]
@@ -387,10 +571,10 @@ def get_categories_for_select() -> list[CategoryGroup]:
 # ---------------------------------------------------------------------------
 
 def update_transaction_field(tx_key: str, field: str, value: str) -> None:
-    pred   = _FIELD_PREDICATES.get(field)
+    pred = _FIELD_PREDICATES.get(field)
     if not pred:
         raise ValueError(f"Unknown field: {field}")
-    tx_iri = mfl_iri_from_key(tx_key)  # Transactions live in MFL namespace
+    tx_iri = mfl_iri_from_key(tx_key)
 
     store.update(f"""
         DELETE WHERE {{
@@ -457,3 +641,45 @@ def get_transaction_count(account_iri: NamedNode) -> int:
     for row in store.query(sparql):
         return int(row["count"].value) if row["count"] else 0
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Manual transaction creation
+# ---------------------------------------------------------------------------
+# NOTE: This function was NOT present in the file snapshot you shared.
+# The implementation below is inferred from the call site in accounts.py.
+# PLEASE VERIFY it matches your actual implementation before saving,
+# paying particular attention to the type IRI pattern and the status IRI.
+# ---------------------------------------------------------------------------
+
+def create_manual_transaction(
+    account_iri: NamedNode,
+    date_str:    str,
+    payee_raw:   str,
+    amount:      Decimal,
+    tx_type:     str,   # "debit" or "credit"
+) -> None:
+    """Create a manually-entered transaction (not originating from an import)."""
+    key    = f"Transaction_{_uuid.uuid4().hex[:8]}"
+    tx_iri = mfl_iri_from_key(key)
+
+    # The type IRI fragment must contain "Debit" for debits — this drives the
+    # `is_debit = "Debit" in tx_type` check in _build_tx_row.
+    type_iri  = f"{MFL}DebitTransaction" if tx_type == "debit" else f"{MFL}CreditTransaction"
+    esc_payee = payee_raw.replace("\\", "\\\\").replace('"', '\\"')
+
+    store.update(f"""
+        INSERT DATA {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                <{tx_iri.value}> a <{MFL_TRANSACTION.value}> ;
+                    <{MFL_ON_ACCOUNT.value}>        <{account_iri.value}> ;
+                    <{MFL}transactionDate>           "{date_str}"^^<http://www.w3.org/2001/XMLSchema#date> ;
+                    <{MFL_AMOUNT.value}>             "{amount}"^^<http://www.w3.org/2001/XMLSchema#decimal> ;
+                    <{MFL_TRANSACTION_TYPE.value}>   <{type_iri}> ;
+                    <{MFL_TRANSACTION_STATUS.value}> <{MFLX}TransactionStatus_Pending> ;
+                    <{MFL_PAYEE_RAW.value}>          "{esc_payee}"^^<http://www.w3.org/2001/XMLSchema#string> ;
+                    <{MFL_IS_MANUAL_ENTRY.value}>    "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+            }}
+        }}
+    """)
+    logger.info(f"Created manual transaction: {tx_iri.value}")

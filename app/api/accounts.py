@@ -4,6 +4,7 @@
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlencode, quote
 
 from fastapi import APIRouter, Request, Form, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -24,6 +25,8 @@ from app.core.transactions.transactions import (
     get_transaction_count,
     get_categories_for_select,
     STATUS_OPTIONS,
+    FilterParams,
+    DATE_PRESETS,
 )
 
 router = APIRouter()
@@ -140,12 +143,55 @@ async def account_type_fields(
     )
 
 
+# ---------------------------------------------------------------------------
+# URL builder
+# ---------------------------------------------------------------------------
+
+def _make_url(
+    base:     str,
+    filters:  FilterParams,
+    page:     int,
+    per_page: int,
+    sort_col: str | None = None,
+    sort_dir: str | None = None,
+) -> str:
+    """
+    Build a register URL that preserves all active filter state.
+    sort/dir are omitted when they equal the defaults ('date'/'desc') to keep
+    the URL clean. page and per_page are always included.
+    """
+    sc = sort_col if sort_col is not None else filters.sort_col
+    sd = sort_dir if sort_dir is not None else filters.sort_dir
+
+    params: dict[str, str] = {}
+    if filters.search:      params["search"]   = filters.search
+    if filters.date_preset: params["date"]      = filters.date_preset
+    if filters.status:      params["status"]    = filters.status
+    if filters.category:    params["category"]  = filters.category
+    if sc != "date":        params["sort"]      = sc
+    if sd != "desc":        params["dir"]       = sd
+    params["page"]     = str(page)
+    params["per_page"] = str(per_page)
+
+    return base + "?" + urlencode(params)
+
+
+# ---------------------------------------------------------------------------
+# Register
+# ---------------------------------------------------------------------------
+
 @router.get("/accounts/{iri_key}", response_class=HTMLResponse)
 async def account_register(
-    request:  Request,
-    iri_key:  str,
-    page:     int = Query(default=1),
-    per_page: int = Query(default=50),
+    request:     Request,
+    iri_key:     str,
+    page:        int = Query(default=1),
+    per_page:    int = Query(default=50),
+    search:      str = Query(default=""),
+    date_preset: str = Query(default="", alias="date"),
+    status:      str = Query(default=""),
+    category:    str = Query(default=""),
+    sort:        str = Query(default="date"),
+    dir:         str = Query(default="desc"),
 ):
     account = get_account_detail(iri_key)
     if not account:
@@ -155,28 +201,83 @@ async def account_register(
             status_code=404,
         )
 
-    rows, total = get_transactions_for_account(account, page=page, per_page=per_page)
+    _valid_presets = {p for p, _ in DATE_PRESETS}
+
+    filters = FilterParams(
+        search      = search.strip(),
+        date_preset = date_preset if date_preset in _valid_presets else "",
+        status      = status,
+        category    = category,
+        sort_col    = sort if sort in {"date", "payee", "amount", "category"} else "date",
+        sort_dir    = dir  if dir  in {"asc", "desc"}                          else "desc",
+    )
+
+    rows, total = get_transactions_for_account(
+        account, page=page, per_page=per_page, filters=filters
+    )
     total_pages = max(1, (total + per_page - 1) // per_page)
     page        = max(1, min(page, total_pages))
     page_start  = (page - 1) * per_page + 1 if total else 0
     page_end    = min(page * per_page, total)
     categories  = get_categories_for_select()
+    today       = date.today().isoformat()
+
+    base = f"/accounts/{iri_key}"
+
+    # Sort URL for each sortable column: toggles direction if already active,
+    # otherwise uses the natural default for that column.
+    def _sort_url(col: str) -> str:
+        if filters.sort_col == col:
+            new_dir = "asc" if filters.sort_dir == "desc" else "desc"
+        else:
+            new_dir = "desc" if col in ("date", "amount") else "asc"
+        return _make_url(base, filters, 1, per_page, sort_col=col, sort_dir=new_dir)
+
+    # Per-page selector base URL (JS appends 'page=1&per_page=N')
+    pp_params: dict[str, str] = {}
+    if filters.search:             pp_params["search"]   = filters.search
+    if filters.date_preset:        pp_params["date"]      = filters.date_preset
+    if filters.status:             pp_params["status"]    = filters.status
+    if filters.category:           pp_params["category"]  = filters.category
+    if filters.sort_col != "date": pp_params["sort"]      = filters.sort_col
+    if filters.sort_dir != "desc": pp_params["dir"]       = filters.sort_dir
+    pp_qs            = urlencode(pp_params)
+    perpage_base_url = f"{base}?{pp_qs}&" if pp_qs else f"{base}?"
+
+    # URL for clearing all filters while preserving current sort
+    _clear_f          = FilterParams(sort_col=filters.sort_col, sort_dir=filters.sort_dir)
+    clear_filters_url = _make_url(base, _clear_f, 1, per_page)
+
+    # Full URL for the current page (used in bulk redirect and delete return)
+    current_page_url         = _make_url(base, filters, page, per_page)
+    current_page_url_encoded = quote(current_page_url, safe="")
 
     return templates.TemplateResponse(
         request, "transactions/register.html",
         {
-            "active":         "accounts",
-            "account":        account,
-            "transactions":   rows,
-            "total":          total,
-            "page":           page,
-            "per_page":       per_page,
-            "total_pages":    total_pages,
-            "page_start":     page_start,
-            "page_end":       page_end,
-            "categories":     categories,
-            "status_options": STATUS_OPTIONS,
-            "today":          date.today().isoformat(),
+            "active":                    "accounts",
+            "account":                   account,
+            "transactions":              rows,
+            "total":                     total,
+            "page":                      page,
+            "per_page":                  per_page,
+            "total_pages":               total_pages,
+            "page_start":                page_start,
+            "page_end":                  page_end,
+            "categories":                categories,
+            "status_options":            STATUS_OPTIONS,
+            "today":                     today,
+            # filter/sort state
+            "filters":                   filters,
+            "date_presets":              DATE_PRESETS,
+            # precomputed URLs
+            "sort_urls":                 {c: _sort_url(c) for c in ("date", "payee", "amount", "category")},
+            "prev_page_url":             _make_url(base, filters, page - 1, per_page) if page > 1 else None,
+            "next_page_url":             _make_url(base, filters, page + 1, per_page) if page < total_pages else None,
+            "perpage_base_url":          perpage_base_url,
+            "clear_filters_url":         clear_filters_url,
+            "current_page_url":          current_page_url,
+            "current_page_url_encoded":  current_page_url_encoded,
         },
     )
 
@@ -185,10 +286,10 @@ async def account_register(
 async def add_transaction(
     request:   Request,
     iri_key:   str,
-    date_str:  str     = Form(..., alias="date"),
-    payee_raw: str     = Form(...),
-    amount:    str     = Form(...),
-    tx_type:   str     = Form(...),
+    date_str:  str = Form(..., alias="date"),
+    payee_raw: str = Form(...),
+    amount:    str = Form(...),
+    tx_type:   str = Form(...),
 ):
     from decimal import Decimal, InvalidOperation
     from app.core.ontology.iri_factory import iri_from_key

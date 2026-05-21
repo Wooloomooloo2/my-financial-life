@@ -170,12 +170,17 @@ async def delete_transaction_route(
     request:     Request,
     tx_key:      str,
     account_key: str = Query(default=""),
+    return_url:  str = Query(default=""),
     page:        int = Query(default=1),
 ):
-    """Delete a transaction and redirect the register to the same page."""
+    """
+    Delete a transaction and redirect the register.
+    Prefers return_url (which carries full filter state) over the legacy
+    account_key + page fallback.
+    """
     delete_transaction(tx_key)
     r = Response(status_code=200)
-    r.headers["HX-Redirect"] = f"/accounts/{account_key}?page={page}"
+    r.headers["HX-Redirect"] = return_url or f"/accounts/{account_key}?page={page}"
     return r
 
 
