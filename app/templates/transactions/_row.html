@@ -1,6 +1,6 @@
 {#
   Transaction row partial.
-  Variable: tx  (TransactionRow dataclass)
+  Variables: tx (TransactionRow), account (AccountDetail), page (int), per_page (int)
 #}
 <tr id="row-{{ tx.iri_key }}"
     class="border-b border-base-200 hover:bg-base-50 group text-sm">
@@ -68,6 +68,16 @@
 
     <td class="px-3 py-2 text-right tabular-nums text-xs w-28 {{ tx.running_balance_color }}">
         {{ tx.running_balance_display }}
+    </td>
+
+    <td class="px-2 py-2 w-8">
+        <button class="btn btn-ghost btn-xs text-error opacity-0 group-hover:opacity-100
+                       transition-opacity p-0"
+                hx-delete="/transactions/{{ tx.iri_key }}?account_key={{ account.iri_key }}&page={{ page }}"
+                hx-confirm="Delete this transaction? This cannot be undone."
+                title="Delete transaction">
+            <i class="ti ti-trash text-xs" aria-hidden="true"></i>
+        </button>
     </td>
 
 </tr>

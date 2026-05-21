@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -47,12 +49,23 @@ XSD = "http://www.w3.org/2001/XMLSchema#"
 # In-memory staging store  (single-user local app — no TTL needed)
 # ---------------------------------------------------------------------------
 
-_pending_imports: dict[str, "PendingImport"] = {}
+_pending_imports:  dict[str, "PendingImport"]  = {}
+_pending_csv_maps: dict[str, "PendingCsvMap"]  = {}
 
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
+
+@dataclass
+class PendingCsvMap:
+    """Staged CSV file awaiting column mapping from the user."""
+    token:           str
+    account_iri_key: str
+    filename:        str
+    headers:         list[str]
+    preview_rows:    list[list[str]]   # first 5 rows for display
+    file_bytes:      bytes             # original bytes for re-parsing after mapping
 
 @dataclass
 class ClassifiedTransaction:
@@ -103,13 +116,10 @@ class PendingImport:
 def compute_hash(
     account_iri_key: str,
     date_iso:        str,
-    amount:          Decimal,
+    amount:          str,
     payee_raw:       str,
 ) -> str:
-    """
-    Compute a duplicate-detection hash for a CSV transaction.
-    Used when no FITID is available (CSV imports).
-    """
+    """Compute a duplicate-detection hash for CSV transactions (no FITID)."""
     raw = f"{account_iri_key}|{date_iso}|{amount}|{payee_raw}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
@@ -226,60 +236,111 @@ def parse_and_stage(
     file_bytes:      bytes,
     filename:        str,
     account_iri_key: str,
-) -> str:
+) -> tuple[str, str]:
     """
-    Parse an OFX, QFX, or CSV file, classify each transaction, and stage
-    in memory. Returns a token string for use in the preview/confirm steps.
+    Parse an OFX, QFX, or CSV file and stage in memory.
+
+    Returns (token, next_step) where next_step is "preview" or "map".
+    When "map": redirect to /import/map/{token} for column mapping.
+    When "preview": redirect to /import/preview/{token}.
     """
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
     if ext in ("ofx", "qfx"):
         from app.core.import_engine.ofx_parser import parse_ofx
-        raw_txns         = parse_ofx(file_bytes, filename)
-        has_override     = False
-        file_format      = "QFX" if ext == "qfx" else "OFX"
+        raw_txns     = parse_ofx(file_bytes, filename)
+        has_override = False
+        file_format  = "QFX" if ext == "qfx" else "OFX"
+
     elif ext == "csv":
-        from app.core.import_engine.csv_parser import parse_csv
+        from app.core.import_engine.csv_parser import parse_csv, _detect_format, _decode
+        content = _decode(file_bytes)
+        fmt     = _detect_format(content.splitlines())
+
+        if fmt == "generic":
+            map_token = _stage_for_mapping(file_bytes, filename, account_iri_key)
+            return map_token, "map"
+
         raw_txns, has_override, file_format = parse_csv(file_bytes, filename)
+
     else:
         raise ValueError(
             f"Unsupported file format '.{ext}'. "
             "Please upload an OFX, QFX, or CSV file."
         )
 
-    account_iri    = iri_from_key(account_iri_key)
-    account_name   = _get_account_name(account_iri)
-    currency_sym   = _get_currency_symbol(account_iri_key)
-    first_import   = _is_first_import(account_iri)
-    suggested      = "cleared" if first_import else "uncleared"
+    import_token = _classify_and_stage(
+        raw_txns, has_override, file_format, account_iri_key, filename
+    )
+    return import_token, "preview"
+
+
+def _stage_for_mapping(
+    file_bytes:      bytes,
+    filename:        str,
+    account_iri_key: str,
+) -> str:
+    """Stage a generic CSV for user column mapping. Returns a map token."""
+    from app.core.import_engine.csv_parser import _decode
+    content = _decode(file_bytes)
+    reader  = csv.DictReader(io.StringIO(content))
+    headers = list(reader.fieldnames or [])
+
+    preview_rows: list[list[str]] = []
+    for i, row in enumerate(reader):
+        if i >= 5:
+            break
+        preview_rows.append([str(row.get(h, "")) for h in headers])
+
+    token = uuid.uuid4().hex[:16]
+    _pending_csv_maps[token] = PendingCsvMap(
+        token=token,
+        account_iri_key=account_iri_key,
+        filename=filename,
+        headers=headers,
+        preview_rows=preview_rows,
+        file_bytes=file_bytes,
+    )
+    return token
+
+
+def _classify_and_stage(
+    raw_txns:        list[dict],
+    has_override:    bool,
+    file_format:     str,
+    account_iri_key: str,
+    filename:        str,
+) -> str:
+    """Classify parsed transactions and store as PendingImport. Returns token."""
+    account_iri  = iri_from_key(account_iri_key)
+    account_name = _get_account_name(account_iri)
+    currency_sym = _get_currency_symbol(account_iri_key)
+    first_import = _is_first_import(account_iri)
+    suggested    = "cleared" if first_import else "uncleared"
 
     classified: list[ClassifiedTransaction] = []
     new_count = dup_count = match_count = 0
 
     for raw in raw_txns:
-        date_iso    = raw["date"]
-        amount      = raw["amount"]
-        tx_type     = raw["tx_type"]
-        payee_raw   = raw.get("payee_raw", "")
-        memo        = raw.get("memo", "")
-        status_ov   = raw.get("status_override", "")
+        date_iso  = raw["date"]
+        amount    = raw["amount"]
+        tx_type   = raw["tx_type"]
+        payee_raw = raw.get("payee_raw", "")
+        memo      = raw.get("memo", "")
+        status_ov = raw.get("status_override", "")
 
-        # Duplicate key: FITID for OFX, computed hash for CSV
         fitid = raw.get("fitid", "")
         if fitid:
             import_hash = fitid
         else:
-            import_hash = compute_hash(account_iri_key, date_iso,
-                                       str(amount), payee_raw)
+            import_hash = compute_hash(account_iri_key, date_iso, str(amount), payee_raw)
             fitid = import_hash
 
-        # Display strings
-        sym    = currency_sym
-        is_deb = tx_type == "debit"
+        sym       = currency_sym
+        is_deb    = tx_type == "debit"
         amt_str   = f"−{sym}{amount:,.2f}" if is_deb else f"{sym}{amount:,.2f}"
         amt_color = "text-error" if is_deb else "text-base-content"
 
-        # Classify
         if _hash_exists(account_iri, import_hash):
             status = "duplicate"
             dup_count += 1
@@ -293,42 +354,28 @@ def parse_and_stage(
                 match_date  = _fmt_date(manual["date_iso"])
                 match_count += 1
             else:
-                status = "new"
+                status    = "new"
                 new_count += 1
                 match_key = match_payee = match_date = ""
 
         classified.append(ClassifiedTransaction(
-            fitid=fitid,
-            date_iso=date_iso,
-            amount=amount,
-            tx_type=tx_type,
-            payee_raw=payee_raw,
-            memo=memo,
-            import_hash=import_hash,
-            status=status,
-            match_tx_key=match_key,
-            match_tx_payee=match_payee,
-            match_tx_date=match_date,
-            status_override=status_ov,
+            fitid=fitid, date_iso=date_iso, amount=amount,
+            tx_type=tx_type, payee_raw=payee_raw, memo=memo,
+            import_hash=import_hash, status=status,
+            match_tx_key=match_key, match_tx_payee=match_payee,
+            match_tx_date=match_date, status_override=status_ov,
             date_display=_fmt_date(date_iso),
-            amount_display=amt_str,
-            amount_color=amt_color,
+            amount_display=amt_str, amount_color=amt_color,
         ))
 
     token = uuid.uuid4().hex[:16]
     _pending_imports[token] = PendingImport(
-        token=token,
-        account_iri_key=account_iri_key,
-        account_name=account_name,
-        filename=filename,
-        file_format=file_format,
-        transactions=classified,
-        new_count=new_count,
-        duplicate_count=dup_count,
-        match_count=match_count,
-        is_first_import=first_import,
-        suggested_status=suggested,
-        currency_symbol=currency_sym,
+        token=token, account_iri_key=account_iri_key,
+        account_name=account_name, filename=filename,
+        file_format=file_format, transactions=classified,
+        new_count=new_count, duplicate_count=dup_count,
+        match_count=match_count, is_first_import=first_import,
+        suggested_status=suggested, currency_symbol=currency_sym,
         has_status_override=has_override,
     )
     return token
@@ -336,6 +383,35 @@ def parse_and_stage(
 
 def get_pending(token: str) -> Optional[PendingImport]:
     return _pending_imports.get(token)
+
+
+def get_pending_map(token: str) -> Optional[PendingCsvMap]:
+    return _pending_csv_maps.get(token)
+
+
+def apply_mapping_and_stage(token: str, mapping) -> str:
+    """
+    Apply a user-provided column mapping to a staged CSV file and classify
+    transactions. Returns a new import token for the preview step.
+    """
+    pending_map = _pending_csv_maps.get(token)
+    if not pending_map:
+        raise ValueError("Mapping session not found or expired.")
+
+    from app.core.import_engine.csv_parser import parse_with_mapping, _decode
+    content  = _decode(pending_map.file_bytes)
+    raw_txns = parse_with_mapping(content, mapping)
+
+    del _pending_csv_maps[token]
+
+    # Classify using the same logic as parse_and_stage
+    return _classify_and_stage(
+        raw_txns,
+        has_override=False,
+        file_format="CSV",
+        account_iri_key=pending_map.account_iri_key,
+        filename=pending_map.filename,
+    )
 
 
 # ---------------------------------------------------------------------------

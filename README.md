@@ -4,7 +4,34 @@
 
 My Financial Life is a free, open-source, locally-run personal finance application for Windows, macOS, and Linux. It gives you a complete, real-time picture of your financial life — transactions, balances, spending trends, and net worth — without your data ever leaving your machine.
 
-It is a sister application to **[My Retirement Life](https://github.com/Wooloomooloo2/my-retirement-life)**, and is designed from the ground up to eventually share the same database, so that financial events recorded here — a salary change, a large purchase, a property sale — can feed directly into your retirement projections.
+It is a sister application to **My Retirement Life**, and is designed to eventually share the same database, so that financial events recorded here — a salary change, a large purchase, a property sale — can feed directly into retirement projections.
+
+---
+
+## Status
+
+🟡 **v0.1 — MVP in active development.** Core features working and tested. Register search/filter/sort remaining before v0.1 is complete.
+
+| Feature | Status |
+|---|---|
+| Account management (all 5 types) | ✅ Complete |
+| Transaction register with inline editing | ✅ Complete |
+| Pagination (configurable per-page) | ✅ Complete |
+| Delete transactions / accounts | ✅ Complete |
+| Manual transaction entry | ✅ Complete |
+| OFX / QFX import with duplicate detection | ✅ Complete |
+| CSV import — Banktivity, credit card, generic | ✅ Complete |
+| Column mapper for unknown CSV formats | ✅ Complete |
+| Dashboard — net worth, income/expenditure, chart | ✅ Complete |
+| Register search, filter and sort | 🔧 In progress |
+| Category and payee rules engine | 📋 Post-MVP |
+| Reconciliation workflow | 📋 Post-MVP |
+| QIF import | 📋 Post-MVP |
+| Transfer categories | 📋 Post-MVP |
+| User-defined categories | 📋 Post-MVP |
+| Budget planning | 📋 v1.0 |
+| Reports | 📋 v1.0 |
+| My Retirement Life integration | 📋 v1.0 |
 
 ---
 
@@ -14,56 +41,18 @@ Most personal finance tools are cloud-based, subscription-driven, and built for 
 
 ---
 
-## What it does
-
-- **Account management** — current accounts, savings, credit cards, investments, and property in any currency
-- **Transaction tracking** — import via CSV or OFX/QFX, or enter manually
-- **Smart categorisation** — auto-categorisation rules built from your import history
-- **Net worth** — live calculation across all accounts, assets and liabilities
-- **Dashboard** — spending trends, category breakdown, income vs expenditure, configurable timescale
-- **Privacy first** — all data stored locally in an embedded database; no accounts, no cloud sync, no telemetry
-
----
-
-## Sister app — My Retirement Life
-
-My Financial Life shares its ontology and data model with **My Retirement Life**, a retirement planning and projection application. The two apps are designed to eventually share a single database, so that:
-
-- A salary change recorded in My Financial Life updates retirement projections automatically
-- A property purchase or sale flows through to net worth and retirement planning
-- Investment account balances tracked here feed the retirement projection engine
-
-Both apps use the same tech stack, the same RDF data store, and the same core ontology. See [ADR-005](docs/adr/ADR-005-ontology-strategy.md) for the full design decision.
-
----
-
-## Who it's for
-
-- Anyone who wants a clear, honest picture of their day-to-day finances
-- People with complex financial lives — multiple countries, currencies, or account types
-- My Retirement Life users who want their financial data to feed their retirement projections
-- Anyone who wants their financial data to stay private and on their own machine
-
----
-
-## Status
-
-🟡 **Early development** — project structure and ontology complete, account and transaction screens in progress. Not yet ready for general use.
-
----
-
 ## Tech stack
 
 | Layer | Technology |
-|-------|-----------|
+|---|---|
 | Backend | Python 3.13 + FastAPI |
-| Data store | Oxigraph (RDF triple store, embedded via pyoxigraph) |
+| Data store | Oxigraph (embedded RDF triple store via pyoxigraph 0.5.8) |
 | Templating | Jinja2 (server-rendered HTML) |
 | Frontend | HTMX + Tailwind CSS + DaisyUI + Chart.js |
-| Packaging | PyInstaller (Windows, macOS) + AppImage (Linux) |
-| OFX import | ofxtools |
+| OFX/QFX import | ofxtools |
+| Packaging (planned) | PyInstaller (Windows, macOS) + AppImage (Linux) |
 
-See [docs/adr/](docs/adr/) for the full architecture decision records.
+See [docs/adr/](docs/adr/) for full architecture decision records.
 
 ---
 
@@ -71,14 +60,16 @@ See [docs/adr/](docs/adr/) for the full architecture decision records.
 
 My Financial Life uses a two-layer ontology:
 
-- **`mrl:` namespace** — shared with My Retirement Life. Defines currencies, jurisdictions, persons, and the full account hierarchy. Source of truth lives in the My Retirement Life repository.
-- **`mfl:` namespace** — finance-specific extensions. Defines transactions, payees, category rules, import batches, and valuation events.
+- **`mrl:` namespace** — shared with My Retirement Life. Defines currencies, jurisdictions, persons, and the full account hierarchy. Loaded from `docs/ontology/mrl-ontology.ttl`.
+- **`mfl:` namespace** — finance-specific extensions. Defines transactions, payees, category rules, import batches, and valuation events. Lives in `docs/ontology/mfl-ontology.ttl`.
 
-Both TTL files live in [docs/ontology/](docs/ontology/).
+Named graphs:
+- `https://myfinanciallife.app/ontology/graph` — ontology triples
+- `https://myfinanciallife.app/data/graph` — instance data
 
 ---
 
-## Running locally (development)
+## Running locally
 
 ### Prerequisites
 - Python 3.13+
@@ -101,20 +92,85 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The app will start and open in your default browser at `http://127.0.0.1:8000`.
+Open `http://127.0.0.1:8000` in your browser.
+
+### First run
+1. Go to Settings and enter your name and base currency
+2. Add your first account under Accounts
+3. Import a bank file (OFX or CSV) or add transactions manually
+
+---
+
+## Import formats supported
+
+| Format | Notes |
+|---|---|
+| OFX / QFX | FITID-based duplicate detection, full status preservation |
+| Banktivity CSV | Status (Cleared/Reconciled) preserved, categories stored in memo |
+| Credit card CSV | merchant.name as payee, debitCreditCode for direction |
+| Generic bank CSV | Column mapping UI for unknown formats |
+| QIF | Planned (post-MVP) |
+
+---
+
+## Project structure
+
+```
+my-financial-life/
+├── main.py                          # FastAPI app, lifespan, router registration
+├── requirements.txt
+├── docs/
+│   ├── adr/                         # Architecture decision records (ADR-001–007)
+│   └── ontology/
+│       ├── mrl-ontology.ttl         # Shared with My Retirement Life
+│       └── mfl-ontology.ttl         # MFL-specific ontology
+└── app/
+    ├── api/
+    │   ├── accounts.py              # Account CRUD + register route
+    │   ├── dashboard.py             # Dashboard route
+    │   ├── import_routes.py         # Import workflow routes
+    │   ├── settings.py              # Profile/settings route
+    │   └── transactions.py          # Inline edit, bulk update, delete routes
+    ├── core/
+    │   ├── accounts/
+    │   │   ├── accounts.py          # Account data layer + delete_account
+    │   │   └── person.py            # Person/profile data layer
+    │   ├── dashboard/
+    │   │   └── dashboard.py         # Dashboard data layer
+    │   ├── import_engine/
+    │   │   ├── csv_parser.py        # CSV format detection + parsing
+    │   │   ├── import_service.py    # Classification, staging, commit
+    │   │   └── ofx_parser.py        # OFX/QFX parsing via ofxtools
+    │   ├── ontology/
+    │   │   ├── iri_factory.py       # IRI generation for instances
+    │   │   └── namespaces.py        # All namespace constants
+    │   ├── transactions/
+    │   │   └── transactions.py      # Transaction data layer + delete
+    │   ├── template_globals.py      # Jinja2 global functions
+    │   └── templates.py             # Jinja2 environment setup
+    ├── data/
+    │   ├── ontology_loader.py       # Loads TTL files into Oxigraph
+    │   └── store.py                 # Singleton Oxigraph store
+    └── templates/
+        ├── base.html
+        ├── accounts/
+        ├── dashboard/
+        ├── import/
+        ├── settings/
+        └── transactions/
+```
 
 ---
 
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/) — why the stack was chosen
-- [Ontology](docs/ontology/) — data model design
-
----
-
-## Contributing
-
-Contributions are welcome. Please open an issue before submitting a pull request so we can discuss the approach first.
+- [ADR-001](docs/adr/ADR-001-backend-language-and-triple-store.md) — Python + Oxigraph
+- [ADR-002](docs/adr/ADR-002-frontend-stack.md) — HTMX + Tailwind + DaisyUI
+- [ADR-003](docs/adr/ADR-003-packaging-strategy.md) — PyInstaller packaging
+- [ADR-004](docs/adr/ADR-004-cross-platform-portability.md) — cross-platform approach
+- [ADR-005](docs/adr/ADR-005-ontology-strategy.md) — RDF ontology design
+- [ADR-006](docs/adr/ADR-006-instance-iri-naming-strategy.md) — IRI naming
+- [ADR-007](docs/adr/ADR-007-data-access-patterns.md) — SPARQL data access
 
 ---
 

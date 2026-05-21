@@ -455,6 +455,113 @@ def _create_opening_valuation(
     logger.info(f"Created opening valuation for {account_iri.value}")
 
 
+def get_account_by_iri_key(iri_key_str: str) -> Optional[AccountSummary]:
+    """
+    Return an AccountSummary for a single account by its IRI key.
+    Used by the transaction register to load account header details.
+    Returns None if the account doesn't exist.
+    """
+    from app.core.ontology.iri_factory import iri_from_key
+    account_iri = iri_from_key(iri_key_str)
+
+    class_to_family = {
+        MRL_CASH_ACCOUNT.value:       "cash",
+        MRL_CREDIT_CARD.value:        "credit",
+        MRL_INVESTMENT_ACCOUNT.value: "investment",
+        MRL_PROPERTY_ASSET.value:     "property",
+    }
+
+    for account_class, family in class_to_family.items():
+        if any(True for _ in store.quads_for_pattern(
+            account_iri, RDF_TYPE, NamedNode(account_class), DATA_GRAPH
+        )):
+            name = type_vocab_iri = None
+            currency_iri = None
+            is_liability = False
+
+            for quad in store.quads_for_pattern(account_iri, None, None, DATA_GRAPH):
+                pred = quad.predicate.value
+                if pred == MRL_ACCOUNT_NAME.value:
+                    name = quad.object.value
+                elif pred == MRL_ACCOUNT_TYPE.value:
+                    type_vocab_iri = quad.object.value
+                elif pred == MRL_ACCOUNT_CURRENCY.value:
+                    currency_iri = quad.object
+                elif pred == MRL_IS_LIABILITY.value:
+                    is_liability = str(quad.object.value).lower() == "true"
+
+            # Resolve type option
+            option = None
+            if type_vocab_iri:
+                option = next((o for o in ACCOUNT_TYPE_OPTIONS if o.type_vocab == type_vocab_iri), None)
+            if not option:
+                option = next((o for o in ACCOUNT_TYPE_OPTIONS if o.rdf_class.value == account_class and not o.type_vocab), None)
+
+            code = symbol = ""
+            if currency_iri:
+                code, symbol = _get_currency_details(currency_iri)
+
+            balance = (
+                get_transaction_balance(account_iri)
+                if family in ("cash", "credit")
+                else get_valuation_balance(account_iri)
+            )
+
+            return AccountSummary(
+                iri=account_iri,
+                iri_key=iri_key_str,
+                name=name or "",
+                type_key=option.key if option else "",
+                type_label=option.label if option else "",
+                family=family,
+                currency_code=code,
+                currency_symbol=symbol,
+                balance=balance,
+                is_liability=is_liability,
+            )
+
+    return None
+
+
 def _esc(value: str) -> str:
     """Escape double quotes and backslashes for safe SPARQL string insertion."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def delete_account(iri_key: str) -> None:
+    """
+    Permanently delete an account and ALL linked data:
+    transactions, valuation events, and the account record itself.
+    """
+    from app.core.ontology.iri_factory import iri_from_key as _iri_from_key
+    account_iri = _iri_from_key(iri_key)
+
+    # Delete all transactions linked to this account
+    store.update(f"""
+        DELETE WHERE {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                ?tx <{MFL_ON_ACCOUNT.value}> <{account_iri.value}> ;
+                    ?p ?o .
+            }}
+        }}
+    """)
+
+    # Delete all valuation events linked to this account
+    store.update(f"""
+        DELETE WHERE {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                ?v <{MFL_VALUATION_FOR_ACCOUNT.value}> <{account_iri.value}> ;
+                   ?p ?o .
+            }}
+        }}
+    """)
+
+    # Delete the account record itself
+    store.update(f"""
+        DELETE WHERE {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                <{account_iri.value}> ?p ?o .
+            }}
+        }}
+    """)
+    logger.info(f"Deleted account and all linked data: {account_iri.value}")

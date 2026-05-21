@@ -18,6 +18,8 @@ from app.core.accounts.accounts import get_all_accounts
 from app.core.import_engine.import_service import (
     parse_and_stage,
     get_pending,
+    get_pending_map,
+    apply_mapping_and_stage,
     commit_import,
 )
 
@@ -33,28 +35,17 @@ async def import_upload_get(
     request: Request,
     account: str = Query(default=""),
 ):
-    """Show the file upload form."""
-    grouped = get_all_accounts()
-    # Flatten to a single list for the account dropdown
-    all_accounts = [
-        acc
-        for accounts in grouped.values()
-        for acc in accounts
-    ]
+    grouped      = get_all_accounts()
+    all_accounts = [a for accs in grouped.values() for a in accs]
     return templates.TemplateResponse(
-        request,
-        "import/upload.html",
-        {
-            "active":      "import",
-            "accounts":    all_accounts,
-            "preselect":   account,
-            "error":       None,
-        },
+        request, "import/upload.html",
+        {"active": "import", "accounts": all_accounts,
+         "preselect": account, "error": None},
     )
 
 
 # ---------------------------------------------------------------------------
-# Parse — upload file and classify transactions
+# Parse
 # ---------------------------------------------------------------------------
 
 @router.post("/import/parse")
@@ -63,45 +54,102 @@ async def import_parse(
     account_key: str        = Form(...),
     file:        UploadFile = File(...),
 ):
-    """Parse uploaded OFX/QFX file and redirect to preview."""
-    filename  = file.filename or "import.ofx"
+    filename   = file.filename or "import.ofx"
     file_bytes = await file.read()
 
     if not file_bytes:
-        grouped     = get_all_accounts()
+        grouped      = get_all_accounts()
         all_accounts = [a for accs in grouped.values() for a in accs]
         return templates.TemplateResponse(
-            request,
-            "import/upload.html",
-            {
-                "active":    "import",
-                "accounts":  all_accounts,
-                "preselect": account_key,
-                "error":     "The uploaded file is empty.",
-            },
+            request, "import/upload.html",
+            {"active": "import", "accounts": all_accounts,
+             "preselect": account_key, "error": "The uploaded file is empty."},
             status_code=422,
         )
 
     try:
-        token = parse_and_stage(file_bytes, filename, account_key)
+        token, next_step = parse_and_stage(file_bytes, filename, account_key)
     except ValueError as e:
         grouped      = get_all_accounts()
         all_accounts = [a for accs in grouped.values() for a in accs]
         return templates.TemplateResponse(
-            request,
-            "import/upload.html",
-            {
-                "active":    "import",
-                "accounts":  all_accounts,
-                "preselect": account_key,
-                "error":     str(e),
-            },
+            request, "import/upload.html",
+            {"active": "import", "accounts": all_accounts,
+             "preselect": account_key, "error": str(e)},
             status_code=422,
         )
 
-    return RedirectResponse(
-        url=f"/import/preview/{token}", status_code=303
+    if next_step == "map":
+        return RedirectResponse(url=f"/import/map/{token}", status_code=303)
+    return RedirectResponse(url=f"/import/preview/{token}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Column mapping (generic CSV)
+# ---------------------------------------------------------------------------
+
+@router.get("/import/map/{token}", response_class=HTMLResponse)
+async def import_map_get(request: Request, token: str):
+    """Show column mapping form for unrecognised CSV files."""
+    pending_map = get_pending_map(token)
+    if not pending_map:
+        return RedirectResponse(url="/import?error=expired", status_code=303)
+
+    # Build column options with sample values for each header
+    col_options = []
+    for i, h in enumerate(pending_map.headers):
+        sample = pending_map.preview_rows[0][i] if pending_map.preview_rows else ""
+        col_options.append({"name": h, "sample": sample})
+
+    return templates.TemplateResponse(
+        request, "import/map.html",
+        {
+            "active":      "import",
+            "token":       token,
+            "pending_map": pending_map,
+            "col_options": col_options,
+        },
     )
+
+
+@router.post("/import/map/{token}")
+async def import_map_post(
+    request:         Request,
+    token:           str,
+    date_col:        str  = Form(...),
+    date_format:     str  = Form(default="auto"),
+    amount_mode:     str  = Form(default="single"),
+    amount_col:      str  = Form(default=""),
+    amount_inverted: str  = Form(default=""),
+    debit_col:       str  = Form(default=""),
+    credit_col:      str  = Form(default=""),
+    payee_col:       str  = Form(default=""),
+    memo_col:        str  = Form(default=""),
+    category_col:    str  = Form(default=""),
+):
+    """Apply column mapping and redirect to preview."""
+    from app.core.import_engine.csv_parser import CsvColumnMapping
+
+    mapping = CsvColumnMapping(
+        date_col        = date_col,
+        date_format     = date_format,
+        amount_col      = amount_col      if amount_mode == "single" else "",
+        amount_inverted = bool(amount_inverted),
+        debit_col       = debit_col       if amount_mode == "split"  else "",
+        credit_col      = credit_col      if amount_mode == "split"  else "",
+        payee_col       = payee_col,
+        memo_col        = memo_col,
+        category_col    = category_col,
+    )
+
+    try:
+        import_token = apply_mapping_and_stage(token, mapping)
+    except ValueError as e:
+        return RedirectResponse(
+            url=f"/import/map/{token}?error={e}", status_code=303
+        )
+
+    return RedirectResponse(url=f"/import/preview/{import_token}", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -110,24 +158,18 @@ async def import_parse(
 
 @router.get("/import/preview/{token}", response_class=HTMLResponse)
 async def import_preview(request: Request, token: str):
-    """Show import preview — new transactions, matches, and duplicates."""
     pending = get_pending(token)
     if not pending:
         return RedirectResponse(url="/import?error=expired", status_code=303)
 
-    new_txns     = [t for t in pending.transactions if t.status == "new"]
-    matches      = [t for t in pending.transactions if t.status == "potential_match"]
-    duplicate_ct = pending.duplicate_count
-
     return templates.TemplateResponse(
-        request,
-        "import/preview.html",
+        request, "import/preview.html",
         {
             "active":       "import",
             "pending":      pending,
-            "new_txns":     new_txns,
-            "matches":      matches,
-            "duplicate_ct": duplicate_ct,
+            "new_txns":     [t for t in pending.transactions if t.status == "new"],
+            "matches":      [t for t in pending.transactions if t.status == "potential_match"],
+            "duplicate_ct": pending.duplicate_count,
             "token":        token,
         },
     )
@@ -141,14 +183,13 @@ async def import_preview(request: Request, token: str):
 async def import_confirm(
     request:       Request,
     token:         str,
-    import_status: str = Form(...),   # "cleared" or "uncleared"
+    import_status: str = Form(...),
 ):
-    """Commit the import and redirect to the result page."""
     pending = get_pending(token)
     if not pending:
         return RedirectResponse(url="/import?error=expired", status_code=303)
 
-    form_data     = await request.form()
+    form_data       = await request.form()
     accepted_fitids = set(form_data.getlist("accept_match"))
 
     try:
@@ -161,17 +202,13 @@ async def import_confirm(
         )
 
     batch_key = batch_iri.value.split("#")[-1]
-    account_key = pending.account_iri_key
 
     return RedirectResponse(
         url=(
             f"/import/result"
-            f"?account={account_key}"
-            f"&imported={imported}"
-            f"&skipped={skipped}"
-            f"&matched={matched}"
-            f"&batch={batch_key}"
-            f"&filename={pending.filename}"
+            f"?account={pending.account_iri_key}"
+            f"&imported={imported}&skipped={skipped}&matched={matched}"
+            f"&batch={batch_key}&filename={pending.filename}"
         ),
         status_code=303,
     )
@@ -191,10 +228,8 @@ async def import_result(
     batch:    str = Query(default=""),
     filename: str = Query(default=""),
 ):
-    """Post-import summary page."""
     return templates.TemplateResponse(
-        request,
-        "import/result.html",
+        request, "import/result.html",
         {
             "active":      "import",
             "account_key": account,

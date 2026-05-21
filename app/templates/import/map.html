@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+
+{% block title %}Map columns — {{ app_name }}{% endblock %}
+{% block page_title %}Map CSV columns{% endblock %}
+{% block page_subtitle %}{{ pending_map.filename }} — tell us which column is which{% endblock %}
+
+{% block content %}
+
+<div class="max-w-3xl">
+
+    {% if request.query_params.get('error') %}
+    <div class="alert alert-error mb-5">
+        <i class="ti ti-alert-circle text-lg" aria-hidden="true"></i>
+        <span>{{ request.query_params.get('error') }}</span>
+    </div>
+    {% endif %}
+
+    {# ── CSV Preview ─────────────────────────────────────────────────── #}
+    <div class="card bg-base-100 shadow-sm mb-5">
+        <div class="card-body py-4 px-5">
+            <h3 class="font-medium text-sm mb-3">
+                File preview
+                <span class="text-base-content/40 font-normal">
+                    — first {{ pending_map.preview_rows | length }} rows
+                </span>
+            </h3>
+            <div class="overflow-x-auto">
+                <table class="table table-xs w-full text-xs">
+                    <thead>
+                        <tr class="bg-base-200">
+                            {% for h in pending_map.headers %}
+                            <th class="px-2 py-1.5 text-base-content/60 font-medium
+                                       whitespace-nowrap">
+                                {{ h }}
+                            </th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in pending_map.preview_rows %}
+                        <tr class="border-b border-base-200">
+                            {% for cell in row %}
+                            <td class="px-2 py-1.5 text-base-content/70
+                                       max-w-[120px] truncate">
+                                {{ cell }}
+                            </td>
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    {# ── Column mapping form ──────────────────────────────────────────── #}
+    <div class="card bg-base-100 shadow-sm mb-5">
+        <div class="card-body py-4 px-5">
+            <h3 class="font-medium text-sm mb-4">Map columns to fields</h3>
+
+            <form method="post" action="/import/map/{{ token }}"
+                  class="flex flex-col gap-4">
+
+                {# ── Date ──────────────────────────────────────────────── #}
+                <div class="grid grid-cols-2 gap-4">
+    {# ... payee and memo dropdowns as before ... #}
+    
+    <div class="form-control">
+        <label class="label py-1">
+            <span class="label-text font-medium">Category column</span>
+            <span class="label-text-alt text-base-content/40">
+                Optional — stored in memo
+            </span>
+        </label>
+        <select name="category_col"
+                class="select select-bordered select-sm w-full">
+            <option value="">— skip —</option>
+            {% for col in col_options %}
+            <option value="{{ col.name }}">
+                {{ col.name }}
+                {% if col.sample %}(e.g. {{ col.sample[:15] }}){% endif %}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+</div>
+
+                    <div class="form-control">
+                        <label class="label py-1">
+                            <span class="label-text font-medium">Date format</span>
+                        </label>
+                        <select name="date_format"
+                                class="select select-bordered select-sm w-full">
+                            <option value="auto">Auto-detect</option>
+                            <option value="%d/%m/%Y">DD/MM/YYYY  (e.g. 25/01/2026)</option>
+                            <option value="%m/%d/%Y">MM/DD/YYYY  (e.g. 01/25/2026)</option>
+                            <option value="%Y-%m-%d">YYYY-MM-DD  (e.g. 2026-01-25)</option>
+                            <option value="%d-%m-%Y">DD-MM-YYYY  (e.g. 25-01-2026)</option>
+                            <option value="%d/%m/%y">DD/MM/YY    (e.g. 25/01/26)</option>
+                            <option value="%m/%d/%y">MM/DD/YY    (e.g. 01/25/26)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="divider my-0"></div>
+
+                {# ── Amount ────────────────────────────────────────────── #}
+                <div>
+                    <label class="label py-1">
+                        <span class="label-text font-medium">Amount columns</span>
+                    </label>
+
+                    {# Toggle: single vs split #}
+                    <div class="flex gap-4 mb-3">
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="amount_mode"
+                                   value="single" class="radio radio-sm"
+                                   checked
+                                   onchange="toggleAmountMode(this.value)">
+                            <span class="text-sm">
+                                Single column
+                                <span class="text-base-content/40 text-xs">
+                                    (positive/negative or always positive)
+                                </span>
+                            </span>
+                        </label>
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="amount_mode"
+                                   value="split" class="radio radio-sm"
+                                   onchange="toggleAmountMode(this.value)">
+                            <span class="text-sm">
+                                Separate debit &amp; credit columns
+                            </span>
+                        </label>
+                    </div>
+
+                    {# Single column fields #}
+                    <div id="single-amount-fields" class="grid grid-cols-2 gap-4">
+                        <div class="form-control">
+                            <label class="label py-1">
+                                <span class="label-text text-xs">Amount column</span>
+                            </label>
+                            <select name="amount_col"
+                                    class="select select-bordered select-sm w-full">
+                                <option value="">— select —</option>
+                                {% for col in col_options %}
+                                <option value="{{ col.name }}">
+                                    {{ col.name }}
+                                    {% if col.sample %}(e.g. {{ col.sample[:15] }}){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-control pt-6">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" name="amount_inverted"
+                                       value="1" class="checkbox checkbox-sm">
+                                <span class="text-xs text-base-content/70">
+                                    Positive values = money out
+                                    <span class="block text-base-content/40">
+                                        (some banks invert the sign)
+                                    </span>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+
+                    {# Split columns fields — hidden by default #}
+                    <div id="split-amount-fields" class="hidden grid grid-cols-2 gap-4">
+                        <div class="form-control">
+                            <label class="label py-1">
+                                <span class="label-text text-xs">
+                                    Debit column (money out)
+                                </span>
+                            </label>
+                            <select name="debit_col"
+                                    class="select select-bordered select-sm w-full">
+                                <option value="">— none —</option>
+                                {% for col in col_options %}
+                                <option value="{{ col.name }}">
+                                    {{ col.name }}
+                                    {% if col.sample %}(e.g. {{ col.sample[:15] }}){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-control">
+                            <label class="label py-1">
+                                <span class="label-text text-xs">
+                                    Credit column (money in)
+                                </span>
+                            </label>
+                            <select name="credit_col"
+                                    class="select select-bordered select-sm w-full">
+                                <option value="">— none —</option>
+                                {% for col in col_options %}
+                                <option value="{{ col.name }}">
+                                    {{ col.name }}
+                                    {% if col.sample %}(e.g. {{ col.sample[:15] }}){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="divider my-0"></div>
+
+                {# ── Optional fields ───────────────────────────────────── #}
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="form-control">
+                        <label class="label py-1">
+                            <span class="label-text font-medium">Payee column</span>
+                            <span class="label-text-alt text-base-content/40">
+                                Optional
+                            </span>
+                        </label>
+                        <select name="payee_col"
+                                class="select select-bordered select-sm w-full">
+                            <option value="">— skip —</option>
+                            {% for col in col_options %}
+                            <option value="{{ col.name }}">
+                                {{ col.name }}
+                                {% if col.sample %}(e.g. {{ col.sample[:15] }}){% endif %}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="form-control">
+                        <label class="label py-1">
+                            <span class="label-text font-medium">Memo / notes column</span>
+                            <span class="label-text-alt text-base-content/40">
+                                Optional
+                            </span>
+                        </label>
+                        <select name="memo_col"
+                                class="select select-bordered select-sm w-full">
+                            <option value="">— skip —</option>
+                            {% for col in col_options %}
+                            <option value="{{ col.name }}">
+                                {{ col.name }}
+                                {% if col.sample %}(e.g. {{ col.sample[:15] }}){% endif %}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <div class="divider my-0"></div>
+
+                {# ── Submit ────────────────────────────────────────────── #}
+                <div class="flex gap-3">
+                    <a href="/import" class="btn btn-ghost flex-1">Cancel</a>
+                    <button type="submit" class="btn btn-primary flex-1 gap-2">
+                        <i class="ti ti-eye" aria-hidden="true"></i>
+                        Preview import
+                    </button>
+                </div>
+
+            </form>
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleAmountMode(mode) {
+    const single = document.getElementById('single-amount-fields');
+    const split  = document.getElementById('split-amount-fields');
+    if (mode === 'split') {
+        single.classList.add('hidden');
+        split.classList.remove('hidden');
+    } else {
+        single.classList.remove('hidden');
+        split.classList.add('hidden');
+    }
+}
+</script>
+{% endblock %}

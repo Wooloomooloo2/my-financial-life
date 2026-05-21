@@ -6,7 +6,7 @@
 
 {% block content %}
 
-{# Account header card #}
+{# ── Account header ───────────────────────────────────────────────── #}
 <div class="card bg-base-100 shadow-sm mb-4">
     <div class="card-body py-4 flex flex-row items-center gap-6">
         <div class="flex-1">
@@ -20,7 +20,7 @@
             </div>
             <div class="text-xs text-base-content/50 mt-0.5">Current balance</div>
         </div>
-        <div class="flex gap-2">
+        <div class="flex gap-2 flex-wrap">
             <a href="/import?account={{ account.iri_key }}"
                class="btn btn-outline btn-sm gap-1">
                 <i class="ti ti-file-import" aria-hidden="true"></i> Import
@@ -29,11 +29,39 @@
                     class="btn btn-primary btn-sm gap-1">
                 <i class="ti ti-plus" aria-hidden="true"></i> Add transaction
             </button>
+            <button onclick="document.getElementById('delete-account-modal').showModal()"
+                    class="btn btn-ghost btn-sm text-error gap-1">
+                <i class="ti ti-trash" aria-hidden="true"></i> Delete account
+            </button>
         </div>
     </div>
 </div>
 
-{# Add transaction form — hidden by default #}
+{# ── Delete account modal ─────────────────────────────────────────── #}
+<dialog id="delete-account-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg text-error">Delete account?</h3>
+        <p class="py-3 text-sm text-base-content/70">
+            This will permanently delete
+            <strong>{{ account.name }}</strong>
+            and all <strong>{{ total }}</strong> of its transactions.
+            This cannot be undone.
+        </p>
+        <div class="modal-action">
+            <form method="dialog">
+                <button class="btn btn-ghost">Cancel</button>
+            </form>
+            <form method="post" action="/accounts/{{ account.iri_key }}/delete">
+                <button type="submit" class="btn btn-error">
+                    Delete account and all transactions
+                </button>
+            </form>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+{# ── Add transaction form — hidden by default ─────────────────────── #}
 <div id="add-form-panel" class="hidden mb-4">
     <div class="card bg-base-100 shadow-sm">
         <div class="card-body py-4">
@@ -69,15 +97,13 @@
                     <label class="label py-0.5">
                         <span class="label-text text-xs">Type</span>
                     </label>
-                    <select name="tx_type"
-                            class="select select-bordered select-sm">
+                    <select name="tx_type" class="select select-bordered select-sm">
                         <option value="debit">Debit (money out)</option>
                         <option value="credit">Credit (money in)</option>
                     </select>
                 </div>
                 <div class="col-span-1 flex gap-2">
-                    <button type="submit"
-                            class="btn btn-primary btn-sm flex-1">Add</button>
+                    <button type="submit" class="btn btn-primary btn-sm flex-1">Add</button>
                     <button type="button" onclick="toggleAddForm()"
                             class="btn btn-ghost btn-sm">✕</button>
                 </div>
@@ -86,13 +112,12 @@
     </div>
 </div>
 
-{# Bulk action bar — slides in when rows are checked #}
+{# ── Bulk action bar ──────────────────────────────────────────────── #}
 <div id="bulk-bar"
      class="hidden sticky top-0 z-20 card bg-base-100 shadow-md
             border border-primary/20 mb-3">
     <div class="card-body py-3 flex flex-row items-center gap-3 flex-wrap">
-        <span id="bulk-count"
-              class="text-sm font-medium text-primary whitespace-nowrap">
+        <span id="bulk-count" class="text-sm font-medium text-primary whitespace-nowrap">
             0 selected
         </span>
         <div class="flex flex-1 gap-2 flex-wrap items-center">
@@ -126,29 +151,57 @@
                 class="btn btn-primary btn-xs whitespace-nowrap">
             Apply to selected
         </button>
-        <button onclick="clearBulkSelection()"
-                class="btn btn-ghost btn-xs">Cancel</button>
+        <button onclick="clearBulkSelection()" class="btn btn-ghost btn-xs">Cancel</button>
     </div>
 </div>
 
 {# Hidden form for bulk submit #}
 <form id="bulk-form" hx-post="/transactions/bulk-update" hx-trigger="submit">
     <input type="hidden" name="redirect_to"
-           value="/accounts/{{ account.iri_key }}">
+           value="/accounts/{{ account.iri_key }}?page={{ page }}&per_page={{ per_page }}">
     <input type="hidden" id="bulk-category-val" name="bulk_category" value="">
     <input type="hidden" id="bulk-status-val"   name="bulk_status"   value="">
     <input type="hidden" id="bulk-payee-val"    name="bulk_payee"    value="">
     <input type="hidden" id="bulk-memo-val"     name="bulk_memo"     value="">
 </form>
 
-{# Transaction table #}
+{# ── Pagination top bar ───────────────────────────────────────────── #}
+{% if total > 0 %}
+<div class="flex items-center justify-between mb-3 px-1">
+    <span class="text-xs text-base-content/50">
+        Showing {{ page_start }}–{{ page_end }} of {{ total }} transactions
+    </span>
+    <div class="flex items-center gap-2">
+        <select class="select select-xs select-bordered"
+                onchange="window.location='/accounts/{{ account.iri_key }}?page=1&per_page='+this.value">
+            {% for n in [25, 50, 100, 250] %}
+            <option value="{{ n }}" {% if n == per_page %}selected{% endif %}>
+                {{ n }} per page
+            </option>
+            {% endfor %}
+        </select>
+        {% if page > 1 %}
+        <a href="/accounts/{{ account.iri_key }}?page={{ page - 1 }}&per_page={{ per_page }}"
+           class="btn btn-xs btn-ghost">← Prev</a>
+        {% endif %}
+        <span class="text-xs text-base-content/50 tabular-nums">
+            {{ page }} / {{ total_pages }}
+        </span>
+        {% if page < total_pages %}
+        <a href="/accounts/{{ account.iri_key }}?page={{ page + 1 }}&per_page={{ per_page }}"
+           class="btn btn-xs btn-ghost">Next →</a>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{# ── Transaction table ────────────────────────────────────────────── #}
 <div class="card bg-base-100 shadow-sm overflow-hidden">
     {% if transactions %}
     <div class="overflow-x-auto">
         <table class="table table-sm w-full">
             <thead>
-                <tr class="text-xs text-base-content/50 border-b border-base-200
-                            bg-base-50">
+                <tr class="text-xs text-base-content/50 border-b border-base-200 bg-base-50">
                     <th class="w-8 px-3">
                         <input type="checkbox" class="checkbox checkbox-xs"
                                id="select-all" onchange="selectAll(this)">
@@ -160,6 +213,7 @@
                     <th class="px-3 w-28">Status</th>
                     <th class="px-3 text-right w-28">Amount</th>
                     <th class="px-3 text-right w-28">Balance</th>
+                    <th class="w-8 px-2"></th>
                 </tr>
             </thead>
             <tbody>
@@ -171,8 +225,7 @@
     </div>
     {% else %}
     <div class="px-6 py-12 text-center">
-        <i class="ti ti-list text-4xl text-base-content/20 block mb-3"
-           aria-hidden="true"></i>
+        <i class="ti ti-list text-4xl text-base-content/20 block mb-3" aria-hidden="true"></i>
         <p class="text-sm text-base-content/40">No transactions yet.</p>
         <p class="text-xs text-base-content/30 mt-1">
             Import a bank file or add a transaction manually.
@@ -181,10 +234,24 @@
     {% endif %}
 </div>
 
+{# ── Pagination bottom ────────────────────────────────────────────── #}
+{% if total_pages > 1 %}
+<div class="flex items-center justify-center gap-2 mt-4">
+    {% if page > 1 %}
+    <a href="/accounts/{{ account.iri_key }}?page={{ page - 1 }}&per_page={{ per_page }}"
+       class="btn btn-sm btn-ghost">← Prev</a>
+    {% endif %}
+    <span class="text-sm text-base-content/50">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/accounts/{{ account.iri_key }}?page={{ page + 1 }}&per_page={{ per_page }}"
+       class="btn btn-sm btn-ghost">Next →</a>
+    {% endif %}
+</div>
+{% endif %}
+
 <div class="mt-4">
     <a href="/accounts"
-       class="text-xs text-base-content/40 hover:text-base-content/70
-              flex items-center gap-1">
+       class="text-xs text-base-content/40 hover:text-base-content/70 flex items-center gap-1">
         <i class="ti ti-arrow-left text-xs" aria-hidden="true"></i>
         All accounts
     </a>
@@ -214,14 +281,12 @@ function updateBulkBar() {
 }
 
 function selectAll(master) {
-    document.querySelectorAll('.tx-checkbox')
-            .forEach(cb => cb.checked = master.checked);
+    document.querySelectorAll('.tx-checkbox').forEach(cb => cb.checked = master.checked);
     updateBulkBar();
 }
 
 function clearBulkSelection() {
-    document.querySelectorAll('.tx-checkbox, #select-all')
-            .forEach(cb => cb.checked = false);
+    document.querySelectorAll('.tx-checkbox, #select-all').forEach(cb => cb.checked = false);
     document.getElementById('bulk-bar').classList.add('hidden');
 }
 

@@ -1,11 +1,5 @@
 # ===========================================================================
 # app/api/transactions.py
-#
-# Inline edit, save, and bulk update routes for the transaction register.
-#
-# GET  /transactions/{tx_key}/edit/{field}   — edit widget HTML
-# POST /transactions/{tx_key}/save/{field}   — save + display HTML
-# POST /transactions/bulk-update             — bulk field update
 # ===========================================================================
 
 from fastapi import APIRouter, Request, Form, Query
@@ -15,6 +9,7 @@ from app.core.transactions.transactions import (
     get_categories_for_select,
     update_transaction_field,
     bulk_update_transactions,
+    delete_transaction,
     STATUS_OPTIONS,
     UNCAT_IRI,
     _load_category_labels,
@@ -29,8 +24,7 @@ router = APIRouter()
 # HTML fragment helpers
 # ---------------------------------------------------------------------------
 
-def _category_display_html(tx_key: str, cat_iri: str,
-                            cat_label: str, cat_color: str) -> str:
+def _category_display_html(tx_key, cat_iri, cat_label, cat_color):
     return (
         f'<span class="{cat_color} cursor-pointer hover:underline"'
         f' hx-get="/transactions/{tx_key}/edit/category"'
@@ -39,8 +33,7 @@ def _category_display_html(tx_key: str, cat_iri: str,
     )
 
 
-def _status_display_html(tx_key: str, status_label: str,
-                          status_badge: str) -> str:
+def _status_display_html(tx_key, status_label, status_badge):
     return (
         f'<span class="badge badge-sm {status_badge} cursor-pointer"'
         f' hx-get="/transactions/{tx_key}/edit/status"'
@@ -49,8 +42,7 @@ def _status_display_html(tx_key: str, status_label: str,
     )
 
 
-def _text_display_html(tx_key: str, field: str,
-                        value: str, placeholder: str = "—") -> str:
+def _text_display_html(tx_key, field, value, placeholder="—"):
     if value.strip():
         content = f'<span class="truncate block max-w-[180px]">{value}</span>'
     else:
@@ -63,7 +55,7 @@ def _text_display_html(tx_key: str, field: str,
     )
 
 
-def _category_options_html(categories, current_iri: str) -> str:
+def _category_options_html(categories, current_iri):
     uncat_sel = "selected" if not current_iri or current_iri == UNCAT_IRI else ""
     html = f'<option value="" {uncat_sel}>— Uncategorised —</option>'
     for group in categories:
@@ -79,10 +71,8 @@ def _category_options_html(categories, current_iri: str) -> str:
 # GET — edit widgets
 # ---------------------------------------------------------------------------
 
-@router.get("/transactions/{tx_key}/edit/category",
-            response_class=HTMLResponse)
-async def edit_category(tx_key: str,
-                         current: str = Query(default="")):
+@router.get("/transactions/{tx_key}/edit/category", response_class=HTMLResponse)
+async def edit_category(tx_key: str, current: str = Query(default="")):
     categories = get_categories_for_select()
     options    = _category_options_html(categories, current)
     return HTMLResponse(
@@ -94,10 +84,8 @@ async def edit_category(tx_key: str,
     )
 
 
-@router.get("/transactions/{tx_key}/edit/status",
-            response_class=HTMLResponse)
-async def edit_status(tx_key: str,
-                       current: str = Query(default="")):
+@router.get("/transactions/{tx_key}/edit/status", response_class=HTMLResponse)
+async def edit_status(tx_key: str, current: str = Query(default="")):
     options = "".join(
         f'<option value="{iri}" {"selected" if iri == current else ""}>{label}</option>'
         for iri, label in STATUS_OPTIONS
@@ -111,8 +99,7 @@ async def edit_status(tx_key: str,
     )
 
 
-@router.get("/transactions/{tx_key}/edit/payee",
-            response_class=HTMLResponse)
+@router.get("/transactions/{tx_key}/edit/payee", response_class=HTMLResponse)
 async def edit_payee(tx_key: str, current: str = Query(default="")):
     escaped = current.replace('"', "&quot;")
     return HTMLResponse(
@@ -124,8 +111,7 @@ async def edit_payee(tx_key: str, current: str = Query(default="")):
     )
 
 
-@router.get("/transactions/{tx_key}/edit/memo",
-            response_class=HTMLResponse)
+@router.get("/transactions/{tx_key}/edit/memo", response_class=HTMLResponse)
 async def edit_memo(tx_key: str, current: str = Query(default="")):
     escaped = current.replace('"', "&quot;")
     return HTMLResponse(
@@ -141,8 +127,7 @@ async def edit_memo(tx_key: str, current: str = Query(default="")):
 # POST — save and return display HTML
 # ---------------------------------------------------------------------------
 
-@router.post("/transactions/{tx_key}/save/category",
-             response_class=HTMLResponse)
+@router.post("/transactions/{tx_key}/save/category", response_class=HTMLResponse)
 async def save_category(tx_key: str, value: str = Form(default="")):
     update_transaction_field(tx_key, "category", value)
     cat_labels   = _load_category_labels()
@@ -154,30 +139,44 @@ async def save_category(tx_key: str, value: str = Form(default="")):
         "expense": "text-base-content text-xs",
         "uncat":   "text-base-content/30 text-xs italic",
     }.get(cat_fam, "text-base-content/30 text-xs italic")
-    return HTMLResponse(
-        _category_display_html(tx_key, value, cat_label, cat_color))
+    return HTMLResponse(_category_display_html(tx_key, value, cat_label, cat_color))
 
 
-@router.post("/transactions/{tx_key}/save/status",
-             response_class=HTMLResponse)
+@router.post("/transactions/{tx_key}/save/status", response_class=HTMLResponse)
 async def save_status(tx_key: str, value: str = Form(default="")):
     update_transaction_field(tx_key, "status", value)
     s_label, s_badge = STATUS_META.get(value, ("Unknown", "badge-ghost"))
     return HTMLResponse(_status_display_html(tx_key, s_label, s_badge))
 
 
-@router.post("/transactions/{tx_key}/save/payee",
-             response_class=HTMLResponse)
+@router.post("/transactions/{tx_key}/save/payee", response_class=HTMLResponse)
 async def save_payee(tx_key: str, value: str = Form(default="")):
     update_transaction_field(tx_key, "payee", value)
     return HTMLResponse(_text_display_html(tx_key, "payee", value))
 
 
-@router.post("/transactions/{tx_key}/save/memo",
-             response_class=HTMLResponse)
+@router.post("/transactions/{tx_key}/save/memo", response_class=HTMLResponse)
 async def save_memo(tx_key: str, value: str = Form(default="")):
     update_transaction_field(tx_key, "memo", value)
     return HTMLResponse(_text_display_html(tx_key, "memo", value))
+
+
+# ---------------------------------------------------------------------------
+# DELETE — remove a single transaction
+# ---------------------------------------------------------------------------
+
+@router.delete("/transactions/{tx_key}")
+async def delete_transaction_route(
+    request:     Request,
+    tx_key:      str,
+    account_key: str = Query(default=""),
+    page:        int = Query(default=1),
+):
+    """Delete a transaction and redirect the register to the same page."""
+    delete_transaction(tx_key)
+    r = Response(status_code=200)
+    r.headers["HX-Redirect"] = f"/accounts/{account_key}?page={page}"
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +205,4 @@ async def bulk_update(
             if value.strip():
                 bulk_update_transactions(tx_keys, field, value)
 
-    return Response(
-        status_code=204,
-        headers={"HX-Redirect": redirect_to},
-    )
+    return Response(status_code=204, headers={"HX-Redirect": redirect_to})

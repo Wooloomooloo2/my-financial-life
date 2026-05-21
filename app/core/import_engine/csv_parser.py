@@ -29,6 +29,7 @@ import csv
 import io
 import hashlib
 import logging
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -42,6 +43,110 @@ _BANKTIVITY_STATUS_MAP = {
     "reconciled": MFLX + "TransactionStatus_Reconciled",
     "pending":    MFLX + "TransactionStatus_Pending",
 }
+
+
+# ---------------------------------------------------------------------------
+# Column mapping dataclass — used for generic CSV imports
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CsvColumnMapping:
+    date_col:        str
+    date_format:     str  = "auto"
+    amount_col:      str  = ""       # single signed amount column
+    amount_inverted: bool = False    # True if positive = debit (some banks invert)
+    debit_col:       str  = ""       # separate debit (money out) column
+    credit_col:      str  = ""       # separate credit (money in) column
+    payee_col:       str  = ""
+    memo_col:        str  = ""
+    category_col:    str  = ""      #stored in memo field for now
+
+def parse_with_mapping(content: str, mapping: CsvColumnMapping) -> list[dict]:
+    """
+    Parse CSV content using an explicit column mapping provided by the user.
+    Returns normalised transaction dicts in the same format as parse_csv().
+    """
+    reader = csv.DictReader(io.StringIO(content))
+    transactions = []
+
+    for row in reader:
+        # Date
+        date_raw = row.get(mapping.date_col, "").strip()
+        if mapping.date_format == "auto":
+            date_iso = _parse_generic_date(date_raw)
+        else:
+            try:
+                from datetime import datetime
+                date_iso = datetime.strptime(date_raw, mapping.date_format).strftime("%Y-%m-%d")
+            except ValueError:
+                date_iso = _parse_generic_date(date_raw)
+
+        if not date_iso:
+            continue
+
+        # Amount
+        if mapping.amount_col:
+            # Single signed column
+            raw = (row.get(mapping.amount_col, "") or "").strip()
+            value = _parse_amount_str(raw)
+            if value is None:
+                continue
+            amount = abs(value)
+            if mapping.amount_inverted:
+                tx_type = "debit" if value > 0 else "credit"
+            else:
+                tx_type = "debit" if value < 0 else "credit"
+        elif mapping.debit_col or mapping.credit_col:
+            # Separate debit/credit columns
+            debit_raw  = (row.get(mapping.debit_col,  "") or "").strip()
+            credit_raw = (row.get(mapping.credit_col, "") or "").strip()
+            d_val = _parse_amount_str(debit_raw)
+            c_val = _parse_amount_str(credit_raw)
+            if d_val and abs(d_val) > 0:
+                amount  = abs(d_val)
+                tx_type = "debit"
+            elif c_val and abs(c_val) > 0:
+                amount  = abs(c_val)
+                tx_type = "credit"
+            else:
+                continue
+        else:
+            continue
+
+        payee_raw = (row.get(mapping.payee_col, "") or "").strip() if mapping.payee_col else ""
+        memo      = (row.get(mapping.memo_col,  "") or "").strip() if mapping.memo_col  else ""
+        category  = (row.get(mapping.category_col, "") or "").strip() if mapping.category_col else ""
+
+# Combine memo and category
+if category and memo:
+    memo = f"{category} | {memo}"
+elif category:
+    memo = category
+
+    
+        transactions.append({
+            "fitid":           "",
+            "date":            date_iso,
+            "amount":          amount,
+            "tx_type":         tx_type,
+            "payee_raw":       payee_raw,
+            "memo":            memo,
+            "status_override": "",
+        })
+
+    logger.info(f"Mapped CSV: parsed {len(transactions)} transactions")
+    return transactions
+
+
+def _parse_amount_str(s: str) -> Optional[Decimal]:
+    """Strip currency symbols and parse as Decimal. Returns None on failure."""
+    clean = s.strip().strip('"').replace("£", "").replace("$", "").replace("€", "").replace(",", "").strip()
+    if not clean:
+        return None
+    try:
+        return Decimal(clean)
+    except InvalidOperation:
+        return None
 
 
 # ---------------------------------------------------------------------------
