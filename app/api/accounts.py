@@ -14,6 +14,8 @@ from app.core.accounts.accounts import (
     get_all_accounts,
     create_account,
     delete_account,
+    get_account_for_edit,
+    update_account,
     ACCOUNT_TYPE_OPTIONS,
     ACCOUNT_FAMILIES,
     get_type_option,
@@ -144,7 +146,69 @@ async def account_type_fields(
 
 
 # ---------------------------------------------------------------------------
-# URL builder
+# Edit account
+# ---------------------------------------------------------------------------
+
+@router.get("/accounts/{iri_key}/edit", response_class=HTMLResponse)
+async def account_edit_get(request: Request, iri_key: str):
+    account = get_account_for_edit(iri_key)
+    if not account:
+        return templates.TemplateResponse(
+            request, "accounts/list.html",
+            {"active": "accounts", "grouped": {}, "families": ACCOUNT_FAMILIES},
+            status_code=404,
+        )
+    return templates.TemplateResponse(
+        request, "accounts/edit.html",
+        {"active": "accounts", "account": account, "error": None},
+    )
+
+
+@router.post("/accounts/{iri_key}/edit")
+async def account_edit_post(
+    request:            Request,
+    iri_key:            str,
+    account_name:       str = Form(...),
+    notes:              str = Form(default=""),
+    interest_rate:      str = Form(default=""),
+    credit_limit:       str = Form(default=""),
+    statement_day:      str = Form(default=""),
+    growth_rate:        str = Form(default="0"),
+    dividend_rate:      str = Form(default="0"),
+    reinvest_dividends: str = Form(default=""),
+    property_address:   str = Form(default=""),
+    purchase_price:     str = Form(default=""),
+    purchase_date:      str = Form(default=""),
+    is_mortgaged:       str = Form(default=""),
+):
+    if not account_name.strip():
+        account = get_account_for_edit(iri_key)
+        return templates.TemplateResponse(
+            request, "accounts/edit.html",
+            {"active": "accounts", "account": account, "error": "Account name is required."},
+            status_code=422,
+        )
+
+    update_account(
+        iri_key_str        = iri_key,
+        name               = account_name,
+        notes              = notes,
+        interest_rate      = interest_rate,
+        credit_limit       = credit_limit,
+        statement_day      = statement_day,
+        growth_rate        = growth_rate,
+        dividend_rate      = dividend_rate,
+        reinvest_dividends = bool(reinvest_dividends),
+        property_address   = property_address,
+        purchase_price     = purchase_price,
+        purchase_date      = purchase_date,
+        is_mortgaged       = bool(is_mortgaged),
+    )
+    return RedirectResponse(url=f"/accounts/{iri_key}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Register
 # ---------------------------------------------------------------------------
 
 def _make_url(
@@ -155,14 +219,8 @@ def _make_url(
     sort_col: str | None = None,
     sort_dir: str | None = None,
 ) -> str:
-    """
-    Build a register URL that preserves all active filter state.
-    sort/dir are omitted when they equal the defaults ('date'/'desc') to keep
-    the URL clean. page and per_page are always included.
-    """
     sc = sort_col if sort_col is not None else filters.sort_col
     sd = sort_dir if sort_dir is not None else filters.sort_dir
-
     params: dict[str, str] = {}
     if filters.search:      params["search"]   = filters.search
     if filters.date_preset: params["date"]      = filters.date_preset
@@ -172,13 +230,8 @@ def _make_url(
     if sd != "desc":        params["dir"]       = sd
     params["page"]     = str(page)
     params["per_page"] = str(per_page)
-
     return base + "?" + urlencode(params)
 
-
-# ---------------------------------------------------------------------------
-# Register
-# ---------------------------------------------------------------------------
 
 @router.get("/accounts/{iri_key}", response_class=HTMLResponse)
 async def account_register(
@@ -224,8 +277,6 @@ async def account_register(
 
     base = f"/accounts/{iri_key}"
 
-    # Sort URL for each sortable column: toggles direction if already active,
-    # otherwise uses the natural default for that column.
     def _sort_url(col: str) -> str:
         if filters.sort_col == col:
             new_dir = "asc" if filters.sort_dir == "desc" else "desc"
@@ -233,7 +284,6 @@ async def account_register(
             new_dir = "desc" if col in ("date", "amount") else "asc"
         return _make_url(base, filters, 1, per_page, sort_col=col, sort_dir=new_dir)
 
-    # Per-page selector base URL (JS appends 'page=1&per_page=N')
     pp_params: dict[str, str] = {}
     if filters.search:             pp_params["search"]   = filters.search
     if filters.date_preset:        pp_params["date"]      = filters.date_preset
@@ -244,11 +294,9 @@ async def account_register(
     pp_qs            = urlencode(pp_params)
     perpage_base_url = f"{base}?{pp_qs}&" if pp_qs else f"{base}?"
 
-    # URL for clearing all filters while preserving current sort
     _clear_f          = FilterParams(sort_col=filters.sort_col, sort_dir=filters.sort_dir)
     clear_filters_url = _make_url(base, _clear_f, 1, per_page)
 
-    # Full URL for the current page (used in bulk redirect and delete return)
     current_page_url         = _make_url(base, filters, page, per_page)
     current_page_url_encoded = quote(current_page_url, safe="")
 
@@ -267,10 +315,8 @@ async def account_register(
             "categories":                categories,
             "status_options":            STATUS_OPTIONS,
             "today":                     today,
-            # filter/sort state
             "filters":                   filters,
             "date_presets":              DATE_PRESETS,
-            # precomputed URLs
             "sort_urls":                 {c: _sort_url(c) for c in ("date", "payee", "amount", "category")},
             "prev_page_url":             _make_url(base, filters, page - 1, per_page) if page > 1 else None,
             "next_page_url":             _make_url(base, filters, page + 1, per_page) if page < total_pages else None,

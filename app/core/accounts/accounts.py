@@ -9,6 +9,7 @@
 #   - Querying all accounts with computed balances
 #   - Balance calculation (transactions for cash/credit; valuations for
 #     investment/property)
+#   - Reading and updating mutable account fields (edit form)
 # ===========================================================================
 
 from __future__ import annotations
@@ -111,6 +112,38 @@ class AccountSummary:
     currency_symbol: str
     balance:         Decimal
     is_liability:    bool
+
+
+# ---------------------------------------------------------------------------
+# Account edit dataclass — used by the edit form
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AccountEditData:
+    """All fields needed to render and process the account edit form."""
+    iri_key:            str
+    type_key:           str
+    type_label:         str
+    family:             str
+    name:               str
+    currency_iri:       str
+    currency_code:      str
+    currency_symbol:    str
+    notes:              str  = ""
+    # Cash
+    interest_rate:      str  = ""
+    # Credit
+    credit_limit:       str  = ""
+    statement_day:      str  = ""
+    # Investment
+    growth_rate:        str  = ""
+    dividend_rate:      str  = ""
+    reinvest_dividends: bool = False
+    # Property
+    property_address:   str  = ""
+    purchase_price:     str  = ""
+    purchase_date:      str  = ""
+    is_mortgaged:       bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +315,101 @@ def get_all_accounts() -> dict[str, list[AccountSummary]]:
         grouped[option.family].append(summary)
 
     return grouped
+
+
+# ---------------------------------------------------------------------------
+# Read — single account for edit form
+# ---------------------------------------------------------------------------
+
+def get_account_for_edit(iri_key_str: str) -> Optional[AccountEditData]:
+    """
+    Read all editable fields for the account edit form.
+    Returns None if the account does not exist.
+    """
+    from app.core.ontology.iri_factory import iri_from_key
+    account_iri = iri_from_key(iri_key_str)
+
+    fields: dict = {
+        "notes": "", "interest_rate": "", "credit_limit": "",
+        "statement_day": "", "growth_rate": "", "dividend_rate": "",
+        "reinvest_dividends": False, "property_address": "",
+        "purchase_price": "", "purchase_date": "", "is_mortgaged": False,
+    }
+    type_vocab_iri    = None
+    rdf_class_iri     = None
+    currency_iri_node = None
+    name              = None
+
+    for quad in store.quads_for_pattern(account_iri, None, None, DATA_GRAPH):
+        pred = quad.predicate.value
+        obj  = quad.object
+
+        if pred == MRL_ACCOUNT_NAME.value:
+            name = obj.value
+        elif pred == RDF_TYPE.value and obj.value.startswith(MRL):
+            rdf_class_iri = obj.value
+        elif pred == MRL_ACCOUNT_TYPE.value:
+            type_vocab_iri = obj.value
+        elif pred == MRL_ACCOUNT_CURRENCY.value:
+            currency_iri_node = obj
+        elif pred == MRL_ACCOUNT_NOTES.value:
+            fields["notes"] = obj.value
+        elif pred == MRL + "annualInterestRate":
+            fields["interest_rate"] = obj.value
+        elif pred == MRL + "creditLimit":
+            fields["credit_limit"] = obj.value
+        elif pred == MRL + "statementDay":
+            fields["statement_day"] = obj.value
+        elif pred == MRL + "annualGrowthRate":
+            fields["growth_rate"] = obj.value
+        elif pred == MRL + "annualDividendRate":
+            fields["dividend_rate"] = obj.value
+        elif pred == MRL + "reinvestDividends":
+            fields["reinvest_dividends"] = obj.value.lower() == "true"
+        elif pred == MRL + "propertyAddress":
+            fields["property_address"] = obj.value
+        elif pred == MRL + "purchasePrice":
+            fields["purchase_price"] = obj.value
+        elif pred == MRL + "purchaseDate":
+            fields["purchase_date"] = obj.value
+        elif pred == MRL + "isMortgaged":
+            fields["is_mortgaged"] = obj.value.lower() == "true"
+
+    if name is None:
+        return None  # Account not found
+
+    # Resolve type option
+    option = None
+    if type_vocab_iri:
+        option = next(
+            (o for o in ACCOUNT_TYPE_OPTIONS if o.type_vocab == type_vocab_iri), None
+        )
+    if not option and rdf_class_iri:
+        option = next(
+            (o for o in ACCOUNT_TYPE_OPTIONS
+             if o.rdf_class.value == rdf_class_iri and o.type_vocab is None),
+            None,
+        )
+
+    if not option:
+        return None
+
+    code = symbol = currency_iri_str = ""
+    if currency_iri_node:
+        code, symbol = _get_currency_details(currency_iri_node)
+        currency_iri_str = currency_iri_node.value
+
+    return AccountEditData(
+        iri_key=iri_key_str,
+        type_key=option.key,
+        type_label=option.label,
+        family=option.family,
+        name=name,
+        currency_iri=currency_iri_str,
+        currency_code=code,
+        currency_symbol=symbol,
+        **fields,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -523,10 +651,143 @@ def get_account_by_iri_key(iri_key_str: str) -> Optional[AccountSummary]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _esc(value: str) -> str:
     """Escape double quotes and backslashes for safe SPARQL string insertion."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
+
+def _del(acc: str, pred: str) -> None:
+    """Delete all triples for an account predicate."""
+    store.update(f"""
+        DELETE WHERE {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                <{acc}> <{pred}> ?o .
+            }}
+        }}
+    """)
+
+
+def _ins_str(acc: str, pred: str, value: str) -> None:
+    store.update(f"""
+        INSERT DATA {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                <{acc}> <{pred}> "{_esc(value)}"^^<http://www.w3.org/2001/XMLSchema#string> .
+            }}
+        }}
+    """)
+
+
+def _ins_typed(acc: str, pred: str, value: str, dtype: str) -> None:
+    store.update(f"""
+        INSERT DATA {{
+            GRAPH <{DATA_GRAPH.value}> {{
+                <{acc}> <{pred}> "{value}"^^<http://www.w3.org/2001/XMLSchema#{dtype}> .
+            }}
+        }}
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Write — update account (mutable fields only)
+# ---------------------------------------------------------------------------
+
+def update_account(
+    iri_key_str:        str,
+    name:               str,
+    notes:              str  = "",
+    # Cash
+    interest_rate:      str  = "",
+    # Credit
+    credit_limit:       str  = "",
+    statement_day:      str  = "",
+    # Investment
+    growth_rate:        str  = "0",
+    dividend_rate:      str  = "0",
+    reinvest_dividends: bool = False,
+    # Property
+    property_address:   str  = "",
+    purchase_price:     str  = "",
+    purchase_date:      str  = "",
+    is_mortgaged:       bool = False,
+) -> None:
+    """
+    Update the mutable fields of an account.
+    Account type, currency, and opening balance/date are immutable — this
+    function does not touch them.
+    """
+    from app.core.ontology.iri_factory import iri_from_key
+    account_iri = iri_from_key(iri_key_str)
+    acc = account_iri.value
+
+    # Determine family from the store so we know which type-specific predicates to manage
+    family = None
+    for quad in store.quads_for_pattern(account_iri, RDF_TYPE, None, DATA_GRAPH):
+        obj_iri = quad.object.value
+        if obj_iri.startswith(MRL):
+            for opt in ACCOUNT_TYPE_OPTIONS:
+                if opt.rdf_class.value == obj_iri:
+                    family = opt.family
+                    break
+        if family:
+            break
+
+    if not family:
+        raise ValueError(f"Account not found: {iri_key_str}")
+
+    # Name — always present, always updated
+    _del(acc, MRL_ACCOUNT_NAME.value)
+    _ins_str(acc, MRL_ACCOUNT_NAME.value, name.strip() or "Unnamed account")
+
+    # Notes — optional
+    _del(acc, MRL_ACCOUNT_NOTES.value)
+    if notes.strip():
+        _ins_str(acc, MRL_ACCOUNT_NOTES.value, notes.strip())
+
+    # Family-specific predicates
+    if family == "cash":
+        _del(acc, MRL + "annualInterestRate")
+        if interest_rate.strip():
+            _ins_typed(acc, MRL + "annualInterestRate", interest_rate.strip(), "decimal")
+
+    elif family == "credit":
+        _del(acc, MRL + "creditLimit")
+        if credit_limit.strip():
+            _ins_typed(acc, MRL + "creditLimit", credit_limit.strip(), "decimal")
+        _del(acc, MRL + "statementDay")
+        if statement_day.strip():
+            _ins_typed(acc, MRL + "statementDay", statement_day.strip(), "integer")
+
+    elif family == "investment":
+        _del(acc, MRL + "annualGrowthRate")
+        _ins_typed(acc, MRL + "annualGrowthRate", growth_rate.strip() or "0", "decimal")
+        _del(acc, MRL + "annualDividendRate")
+        _ins_typed(acc, MRL + "annualDividendRate", dividend_rate.strip() or "0", "decimal")
+        _del(acc, MRL + "reinvestDividends")
+        _ins_typed(acc, MRL + "reinvestDividends", "true" if reinvest_dividends else "false", "boolean")
+
+    elif family == "property":
+        _del(acc, MRL + "propertyAddress")
+        if property_address.strip():
+            _ins_str(acc, MRL + "propertyAddress", property_address.strip())
+        _del(acc, MRL + "purchasePrice")
+        if purchase_price.strip():
+            _ins_typed(acc, MRL + "purchasePrice", purchase_price.strip(), "decimal")
+        _del(acc, MRL + "purchaseDate")
+        if purchase_date.strip():
+            _ins_typed(acc, MRL + "purchaseDate", purchase_date.strip(), "date")
+        _del(acc, MRL + "isMortgaged")
+        _ins_typed(acc, MRL + "isMortgaged", "true" if is_mortgaged else "false", "boolean")
+
+    logger.info(f"Updated account: {acc}")
+
+
+# ---------------------------------------------------------------------------
+# Delete
+# ---------------------------------------------------------------------------
 
 def delete_account(iri_key: str) -> None:
     """

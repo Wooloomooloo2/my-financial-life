@@ -1,0 +1,249 @@
+{% extends "base.html" %}
+
+{% block title %}Edit {{ account.name }} — {{ app_name }}{% endblock %}
+{% block page_title %}Edit account{% endblock %}
+{% block page_subtitle %}{{ account.type_label }} · {{ account.currency_code }}{% endblock %}
+
+{% block content %}
+
+<div class="max-w-lg">
+
+    {% if error %}
+    <div class="alert alert-error mb-6">
+        <i class="ti ti-alert-circle text-lg" aria-hidden="true"></i>
+        <span>{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <div class="card bg-base-100 shadow-sm">
+        <div class="card-body gap-5">
+
+            <form method="post" action="/accounts/{{ account.iri_key }}/edit"
+                  class="flex flex-col gap-4">
+
+                {# Account type — immutable, displayed as read-only info #}
+                <div class="form-control">
+                    <label class="label">
+                        <span class="label-text font-medium">Account type</span>
+                    </label>
+                    <div class="input input-bordered w-full flex items-center
+                                bg-base-200/50 text-base-content/60 cursor-not-allowed">
+                        {{ account.type_label }}
+                        <span class="ml-2 text-xs text-base-content/30">· {{ account.currency_code }}</span>
+                    </div>
+                    <label class="label">
+                        <span class="label-text-alt text-base-content/30">
+                            Account type and currency cannot be changed after creation.
+                        </span>
+                    </label>
+                </div>
+
+                {# Account name #}
+                <div class="form-control">
+                    <label class="label" for="account_name">
+                        <span class="label-text">Account name</span>
+                    </label>
+                    <input
+                        id="account_name"
+                        name="account_name"
+                        type="text"
+                        class="input input-bordered w-full"
+                        value="{{ account.name | e }}"
+                        required
+                    />
+                </div>
+
+                {# ── Type-specific fields ──────────────────────────────────────
+                   Rendered server-side based on account.family.
+                   Account type is immutable so no HTMX dynamic loading needed.
+                ────────────────────────────────────────────────────────────── #}
+
+                {% if account.family == 'cash' %}
+                {# Cash: interest rate only #}
+                <div class="form-control">
+                    <label class="label" for="interest_rate">
+                        <span class="label-text">Interest rate (%)</span>
+                        <span class="label-text-alt text-base-content/40">Optional</span>
+                    </label>
+                    <input
+                        id="interest_rate"
+                        name="interest_rate"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        class="input input-bordered w-full"
+                        value="{{ account.interest_rate }}"
+                        placeholder="e.g. 3.50"
+                    />
+                </div>
+
+                {% elif account.family == 'credit' %}
+                {# Credit: credit limit and statement day #}
+                <div class="form-control">
+                    <label class="label" for="credit_limit">
+                        <span class="label-text">Credit limit ({{ account.currency_code }})</span>
+                        <span class="label-text-alt text-base-content/40">Optional</span>
+                    </label>
+                    <input
+                        id="credit_limit"
+                        name="credit_limit"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        class="input input-bordered w-full"
+                        value="{{ account.credit_limit }}"
+                        placeholder="e.g. 5000.00"
+                    />
+                </div>
+                <div class="form-control">
+                    <label class="label" for="statement_day">
+                        <span class="label-text">Statement day of month</span>
+                        <span class="label-text-alt text-base-content/40">Optional, 1–31</span>
+                    </label>
+                    <input
+                        id="statement_day"
+                        name="statement_day"
+                        type="number"
+                        min="1"
+                        max="31"
+                        step="1"
+                        class="input input-bordered w-full"
+                        value="{{ account.statement_day }}"
+                        placeholder="e.g. 25"
+                    />
+                </div>
+
+                {% elif account.family == 'investment' %}
+                {# Investment: growth rate, dividend rate, reinvest toggle #}
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="form-control">
+                        <label class="label" for="growth_rate">
+                            <span class="label-text">Annual growth rate (%)</span>
+                        </label>
+                        <input
+                            id="growth_rate"
+                            name="growth_rate"
+                            type="number"
+                            step="0.01"
+                            class="input input-bordered w-full"
+                            value="{{ account.growth_rate or '0' }}"
+                        />
+                    </div>
+                    <div class="form-control">
+                        <label class="label" for="dividend_rate">
+                            <span class="label-text">Dividend rate (%)</span>
+                        </label>
+                        <input
+                            id="dividend_rate"
+                            name="dividend_rate"
+                            type="number"
+                            step="0.01"
+                            class="input input-bordered w-full"
+                            value="{{ account.dividend_rate or '0' }}"
+                        />
+                    </div>
+                </div>
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-3">
+                        <input
+                            type="checkbox"
+                            name="reinvest_dividends"
+                            class="checkbox"
+                            {{ 'checked' if account.reinvest_dividends }}
+                        />
+                        <span class="label-text">Reinvest dividends automatically</span>
+                    </label>
+                </div>
+
+                {% elif account.family == 'property' %}
+                {# Property: address, purchase price/date, mortgage flag #}
+                <div class="form-control">
+                    <label class="label" for="property_address">
+                        <span class="label-text">Property address</span>
+                        <span class="label-text-alt text-base-content/40">Optional</span>
+                    </label>
+                    <input
+                        id="property_address"
+                        name="property_address"
+                        type="text"
+                        class="input input-bordered w-full"
+                        value="{{ account.property_address | e }}"
+                    />
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="form-control">
+                        <label class="label" for="purchase_price">
+                            <span class="label-text">Purchase price ({{ account.currency_code }})</span>
+                        </label>
+                        <input
+                            id="purchase_price"
+                            name="purchase_price"
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            class="input input-bordered w-full"
+                            value="{{ account.purchase_price }}"
+                            placeholder="0.00"
+                        />
+                    </div>
+                    <div class="form-control">
+                        <label class="label" for="purchase_date">
+                            <span class="label-text">Purchase date</span>
+                        </label>
+                        <input
+                            id="purchase_date"
+                            name="purchase_date"
+                            type="date"
+                            class="input input-bordered w-full"
+                            value="{{ account.purchase_date }}"
+                        />
+                    </div>
+                </div>
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-3">
+                        <input
+                            type="checkbox"
+                            name="is_mortgaged"
+                            class="checkbox"
+                            {{ 'checked' if account.is_mortgaged }}
+                        />
+                        <span class="label-text">This property has a mortgage</span>
+                    </label>
+                </div>
+
+                {% endif %}
+
+                {# Notes — always editable #}
+                <div class="form-control">
+                    <label class="label" for="notes">
+                        <span class="label-text">Notes</span>
+                        <span class="label-text-alt text-base-content/40">Optional</span>
+                    </label>
+                    <textarea
+                        id="notes"
+                        name="notes"
+                        class="textarea textarea-bordered w-full"
+                        rows="2"
+                        placeholder="Any notes about this account…"
+                    >{{ account.notes | e }}</textarea>
+                </div>
+
+                <div class="divider my-0"></div>
+
+                <div class="flex gap-3">
+                    <a href="/accounts/{{ account.iri_key }}"
+                       class="btn btn-ghost flex-1">Cancel</a>
+                    <button type="submit" class="btn btn-primary flex-1">
+                        <i class="ti ti-device-floppy" aria-hidden="true"></i>
+                        Save changes
+                    </button>
+                </div>
+
+            </form>
+
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}
