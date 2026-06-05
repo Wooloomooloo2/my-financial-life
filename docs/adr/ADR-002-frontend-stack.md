@@ -1,7 +1,7 @@
 # ADR-002 — Frontend stack
 
 **Date:** 2026-05-18
-**Status:** Accepted
+**Status:** Superseded by [ADR-008](ADR-008-desktop-ui-framework.md) (2026-06-05)
 
 ---
 

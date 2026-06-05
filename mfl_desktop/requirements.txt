@@ -1,0 +1,5 @@
+# mfl_desktop dependencies (per ADR-008 / ADR-009).
+# SQLite is in Python's stdlib — not listed.
+
+ofxtools>=0.9.4   # OFX/QFX parsing
+PySide6>=6.8.1    # native UI; not yet used but pinned for when the UI work starts

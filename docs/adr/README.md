@@ -20,13 +20,16 @@ ADRs are written at the time a decision is made and are not retrospective docume
 
 | ADR | Title | Date | Status |
 |-----|-------|------|--------|
-| [ADR-001](ADR-001-backend-language-and-triple-store.md) | Backend language and triple store | 2026-05-18 | Accepted |
-| [ADR-002](ADR-002-frontend-stack.md) | Frontend stack | 2026-05-18 | Accepted |
+| [ADR-001](ADR-001-backend-language-and-triple-store.md) | Backend language and triple store | 2026-05-18 | Partially superseded by ADR-009 |
+| [ADR-002](ADR-002-frontend-stack.md) | Frontend stack | 2026-05-18 | Superseded by ADR-008 |
 | [ADR-003](ADR-003-packaging-strategy.md) | Packaging strategy | 2026-05-18 | Accepted |
 | [ADR-004](ADR-004-cross-platform-portability.md) | Cross-platform portability approach | 2026-05-18 | Accepted |
 | [ADR-005](ADR-005-ontology-strategy.md) | Ontology strategy — MRL dependency and MFL extension | 2026-05-18 | Accepted |
 | [ADR-006](ADR-006-instance-iri-naming-strategy.md) | Instance IRI naming strategy | 2026-05-18 | Accepted |
 | [ADR-007](ADR-007-data-access-patterns.md) | Data access patterns — quad patterns vs SPARQL | 2026-05-18 | Accepted |
+| [ADR-008](ADR-008-desktop-ui-framework.md) | Desktop application UI framework | 2026-06-05 | Accepted |
+| [ADR-009](ADR-009-storage-engine-for-ledger-data.md) | Storage engine for ledger data | 2026-06-05 | Accepted |
+| [ADR-010](ADR-010-transactional-schema-design.md) | Transactional schema design | 2026-06-05 | Accepted |
 
 ---
 
@@ -52,6 +55,15 @@ All user-created instance IRIs follow the pattern **`mfl:ClassName_<uuid>`** whe
 
 ### ADR-007 — Data access patterns — quad patterns vs SPARQL
 Establishes a clear split between the two Oxigraph read mechanisms, consistent with MRL ADR-007: **`quads_for_pattern`** is used for fetching all properties of a known IRI and checking existence. **SPARQL SELECT** is used for filtering, aggregation, multi-hop traversal, and reporting queries. All writes use **SPARQL UPDATE** with explicit XSD datatype annotations on numeric, boolean, and date values.
+
+### ADR-008 — Desktop application UI framework
+Replaces the v0.1 browser-based frontend with a native desktop UI built on **PySide6 (Qt for Python)**, packaged as a single Windows `.exe` via PyInstaller. macOS and Linux follow. Qt's Model/View architecture (`QAbstractTableModel` + `QTableView`) is purpose-built for the high-performance, editable, virtualised transaction register the application needs and which HTML/HTMX could not deliver to a Banktivity-grade standard. Tauri, Electron, Flutter, and .NET MAUI were considered and rejected — Tauri because it still renders the UI in a WebView and forces either a Rust rewrite of the import engine or a sidecar process; the others because they discard the existing Python parser/import investment. Supersedes ADR-002.
+
+### ADR-009 — Storage engine for ledger data
+Replaces Oxigraph as MFL's primary store with **SQLite**, motivated by the actual workload: tens of thousands of transactions, register filter/sort/search/paginate at sub-100 ms, and per-lot IRR/ROI calculations — all materially easier and faster in SQL than SPARQL. **MRL retains Oxigraph** because its workload (tax law across jurisdictions, heterogeneous evolving relationships) is what RDF was designed for. The "shared database with MRL" goal from ADR-001 moves from the storage layer to the integration boundary — MFL can read MRL's store as a reference source and emit RDF for export, but writes its own data relationally. DuckDB is recorded as a future analytical attachment if reports become a bottleneck. Partially supersedes ADR-001.
+
+### ADR-010 — Transactional schema design
+Fixes the concrete SQLite schema implementing ADR-009: nine tables (`person`, `account`, `category`, `payee`, `txn`, `lot`, `valuation`, `rule`, `import_batch`), each carrying both an internal `id` and a cross-app `iri` per ADR-006. **Currency stored as INTEGER minor units (pence)** for exact arithmetic; REAL only for non-currency quantities like share counts. **Categories are hierarchical and dual-sourced** (system/user/import), with `parent_id` self-referencing adjacency and `WITH RECURSIVE` for descendant queries. All system-default categories are deletable except the reserved **Uncategorised** row, which serves as the deletion sink (carve-out enforced at the Repository layer). Import path conflicts auto-create as separate categories rather than prompting or auto-merging. Duplicate detection preserved from v0.1 via a partial unique index on `(account_id, import_hash)`. The reference SQL is in [`docs/schema.sql`](../schema.sql).
 
 ---
 

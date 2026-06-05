@@ -1,0 +1,17 @@
+Current Account
+Type,Status,Date,Payee,Category/Account,Amount,Note,Memo
+Deposit,Cleared,5/1/26,Acme Corp Payroll,Income:Salary,"£3,250.00",,May salary
+Withdrawal,Cleared,5/2/26,Tesco,Food:Groceries,-£42.18,,Weekly shop
+Withdrawal,Cleared,5/3/26,British Gas,Utilities:Energy,-£95.00,Direct debit,
+Withdrawal,Cleared,5/4/26,Spotify,Subscriptions:Music,-£11.99,,
+Withdrawal,Reconciled,5/5/26,Pret,Food:Dining out,-£8.40,,Sandwich
+Withdrawal,Cleared,5/6/26,Shell,Auto:Gas,-£62.30,,Fillup
+Withdrawal,Cleared,5/7/26,TfL,Transport:Public transport,-£14.80,,
+Transfer,Cleared,5/8/26,Savings,,£-500.00,,Move to savings
+Withdrawal,Cleared,5/9/26,Amazon,Shopping,-£28.99,,Book
+Withdrawal,Reconciled,5/10/26,Sainsbury's,Food:Groceries,-£37.50,,
+Withdrawal,Cleared,5/11/26,Netflix,Subscriptions:Streaming,-£10.99,,
+Withdrawal,Cleared,5/12/26,Boots,Healthcare,-£15.40,,
+Deposit,Cleared,5/15/26,HMRC Refund,Income:Other income,£127.50,Tax refund,
+Withdrawal,Pending,5/20/26,Waitrose,Food:Groceries,-£54.20,,
+Withdrawal,Cleared,5/22/26,Shell,Auto:Gas,-£58.10,,Fillup

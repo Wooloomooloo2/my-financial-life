@@ -1,7 +1,7 @@
 # ADR-001 — Backend language and triple store
 
 **Date:** 2026-05-18
-**Status:** Accepted
+**Status:** Partially superseded by [ADR-009](ADR-009-storage-engine-for-ledger-data.md) (2026-06-05) — Python remains as the backend language; Oxigraph is replaced by SQLite as MFL's primary store. MRL retains Oxigraph.
 
 ---
 
