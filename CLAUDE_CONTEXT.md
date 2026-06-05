@@ -17,6 +17,11 @@ without needing the original conversation transcript.
 - **Reports round 1 (2026-06-05):** Reports → Spending Over Time (stacked bar by top-level expense category group, granularity weekly/monthly/quarterly/annually, date range, account/category/Uncategorised filters, average line, strict-outflow semantics per ADR-018); Reports → Net Worth (Pocketsmith-style three-column layout, big total + horizontal proportional bar + colour-coded legend / Assets / Debts, grouped by account type with per-account drill-down, +Asset / +Debt buttons opening the existing AccountDialog).
 - **Transfers (2026-06-05):** category-driven (ADR-020). No dedicated New Transfer verb — picking a `kind='transfer'` category on any flow (New Transaction, inline cell edit, Bulk Edit) prompts for the destination account and creates a partner row sharing one `transfer_id`. Direction inferred from source amount sign. Delete is partner-aware. Migration 0004.
 - **Generic CSV mapping wizard (2026-06-05):** unknown-format CSVs (Pocketsmith, etc.) now open a `CsvMappingDialog` — file-preview at top, mapping form in the middle, live after-mapping preview at the bottom (ADR-021). Smart defaults pre-fill all five fields from the existing alias lists; user just confirms for conventional layouts. No schema change. Known formats still commit silently per the no-dialog-for-known-imports rule. Saved mapping profiles (auto-skip the dialog for repeat imports) are explicitly deferred to a future ADR. Shipped alongside a fix to `_classify_and_stage` so within-batch composite-hash collisions (two CSV rows with the same date/amount/empty-payee) get a deterministic `:N` suffix instead of blowing up the `UNIQUE(account_id, import_hash)` constraint at commit.
+- **Register typeahead delegates (2026-06-05):** Payee and Category inline editors are now repository-backed typeaheads matching the dialog flows (ADR-022). `PayeeTypeaheadDelegate` wraps `QLineEdit` + `QCompleter` over `Repository.list_payee_names()`; `CategoryTypeaheadDelegate` reuses the same `make_category_picker` helper as the dialog combos and reads `list_categories_flat()` fresh per editor open (no delegate rebind needed). Typing an unknown category name in the Category cell pops a single Yes/No confirm; on Yes the category is created top-level with `kind='expense'`, `source='user'` (aligned with the import path's default) and committed into the cell. Lightweight `_reload_category_cache()` on the window refreshes the cached choice list + filter combo without resetting the model, so the inline-create path is safe to call from inside a delegate `setModelData`.
+- **Scheduled transactions / bills (2026-06-05):** First half of the budget arc (ADR-023). New `scheduled_txn` table (migration 0005) stores templates: cadence (weekly/biweekly/monthly/quarterly/annual), anchor date, next-due date, optional end date, signed estimated amount, `variable` flag (prompt at post), `auto_post` flag. Posting materialises one `txn` (or a transfer pair via `create_transfer` when category kind = transfer) and advances next-due via anchor-based math (Jan 31 monthly → Feb 28 → Mar 31). Manual post by default; launch-time `auto_post_due(today)` sweep catches up auto-posters loop-style (a user gone two months gets every missed occurrence). New dialogs: `ScheduleDialog` (single-record edit, transfer destination revealed when category kind = transfer) and `SchedulesDialog` (Manage → Schedules… — table view + New/Edit/Post Now/Delete). No txn → schedule back-link in v1.
+- **Budget core (2026-06-05):** Second half of the budget arc (ADR-024). New `budget` / `budget_account` (M:N perimeter) / `budget_category` (target + cadence + role) tables (migration 0006). One budget per file in v1; schema supports many. Perimeter rule: transfers between two in-perimeter accounts cancel out; transfers crossing the perimeter count. Per-category amount stored positive; direction inferred from `category.kind`. Role on `budget_category` (bills / saving / discretionary). Actuals bucket against the **nearest budgeted ancestor** of each txn's category; un-budgeted-chain txns fall into "Other". Pure-Python `mfl_desktop/budget_calc.py` does pro-rating (`365.25/12` etc., identity for matching cadence on its calendar period) and the four Simplifi tiles (Income after bills & saving / Planned spending / Other spending / Available). **Transfer-kind budget categories are skipped in the tile math** (post-ship amendment to ADR-024). Cash-on-hand badge in the header is the separate reality-check. New screens: `BudgetSetupDialog` (two-tab modal — Accounts + Categories) and `BudgetWindow` (non-modal `QMainWindow` under a new top-level **Budget** menu, Ctrl+B, refreshes on `WindowActivate`). No rollover.
+- **Budget visualisations (2026-06-06):** Round C of the budget arc (ADR-025). Closes the four ADR-024 deferrals. **Full-cadence-period subtitle** on non-monthly cards (e.g. £1,800 annual Holidays card now shows "£147.84/mo" + a second line "£1,800 annually · this year: £450 of £1,800"). **Burn-down chart** under the tile strip — QtCharts line chart with Actual cumulative outflow vs. linear Ideal pacing + vertical today marker. **Proportional summary bar** (reusing `ProportionalBar` from ADR-019) showing Bills / Saving / Planned / Other / Available proportions with colour-keyed legend — owner's no-pies rule (ADR-018) preserved. **Scheduled-but-not-posted projection** per card: "+£X expected" badge surfacing un-posted scheduled outflows whose `next_due_date` falls inside the screen period. All computation in `mfl_desktop/budget_calc.py` as optional kwargs to `compute_budget_view`; pure-function contract preserved. New widget `mfl_desktop/ui/burn_down_chart.py`. Cadence-period containment uses the global anchor rule (Monday weeks, calendar quarters/years; bi-weekly = 14-day window ending today pending per-schedule anchors).
+- **Budget arc state (2026-06-06):** All three rounds shipped end-to-end, but the screen is **rough** — owner flagged it as needing further polish iterations after real use. Likely targets for the next pass: card-layout density (current vertical stack of header + cash badge + 4 tiles + bar + chart + cards eats ~480px before any card is visible), visual tone of the QtCharts default styling on the burn-down (echoes the same complaint about Spending Over Time visuals), labelling clarity on the tile colours, and the "Other" bucket behaviour when the user hasn't set up budget categories yet. Don't treat any specific bit of the screen as final — every part is fair game when polish work resumes.
 - **Original PySide6 prototype kept at `prototype_register/`** as a reference for the data-grid pattern; it's not the main app.
 - **Sister app MRL stays RDF-based.** MFL ↔ MRL integration is now at the data-exchange boundary, not shared storage.
 
@@ -214,7 +219,9 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │   │   ├── 0001_initial.sql         # ADR-010 schema + seeded categories
 │   │   ├── 0002_category_kind.sql   # ADR-014: kind column + Transfer seed
 │   │   ├── 0003_account_folders.sql # ADR-015: account_folder + account.folder_id
-│   │   └── 0004_transfers.sql       # ADR-020: txn.transfer_id + partial index
+│   │   ├── 0004_transfers.sql       # ADR-020: txn.transfer_id + partial index
+│   │   ├── 0005_scheduled_txn.sql   # ADR-023: scheduled_txn template + due-date indexes
+│   │   └── 0006_budgets.sql         # ADR-024: budget + budget_account + budget_category
 │   ├── import_engine/               # Lifted from app/core/import_engine/
 │   │   ├── ofx_parser.py            # OFX/QFX — verbatim from v0.1
 │   │   ├── csv_parser.py            # Banktivity / credit-card / generic CSV (syntax bug fixed)
@@ -223,8 +230,14 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │       ├── register_window.py       # QMainWindow with sidebar + register
 │       ├── register_model.py        # QAbstractTableModel — single-account + all-transactions modes
 │       ├── filter_proxy.py          # Sort / filter on underlying values
-│       ├── delegates.py             # Category + Status combo delegates
+│       ├── delegates.py             # Payee + Category typeahead delegates + Status combo (ADR-022)
+│       ├── category_picker.py       # Shared editable-combo helper for category fields
 │       ├── csv_mapping_dialog.py    # ADR-021: column-mapping wizard for unknown CSV formats
+│       ├── schedule_dialog.py       # ADR-023: single-record schedule create/edit
+│       ├── schedules_dialog.py     # ADR-023: schedule list + CRUD + Post Now
+│       ├── budget_setup_dialog.py   # ADR-024: perimeter + per-category setup
+│       ├── budget_window.py         # ADR-024/025: budget screen (tiles + bar + chart + cards)
+│       ├── burn_down_chart.py       # ADR-025: cumulative outflow vs ideal pacing
 │       └── sidebar.py               # Account list with "All transactions" entry
 └── prototype_register/              # Original PySide6 prototype — kept for reference
     ├── README.md
@@ -239,22 +252,31 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 
 Captured during the rewrite as features are deferred for later turns.
 
-### Register UX (deferred from initial PySide6 wire-up, 2026-06-05)
+### Register UX
 
-The register window currently uses standard `QComboBox` delegates for category and status, and a plain `QLineEdit` for payee. Real use surfaces four UX improvements:
+Items (1)–(3) of the original cluster shipped under ADR-022 (typeahead delegates + inline category create). Item (4) bulk-edit shipped in the basic-management round under ADR-017. Follow-ups noted in ADR-022's consequences section:
 
-1. **Payee autocomplete on edit.** Typing in the Payee cell should suggest existing payees from the `payee` table (Qt `QCompleter` over `QLineEdit`). Faster than free typing, ensures consistent names.
-2. **Category autocomplete on edit.** Same pattern for category. A flat combo of 100+ categories becomes unusable; a typeahead is the right shape regardless of dataset size.
-3. **Inline category creation while editing.** If the user types a category name that doesn't exist, an option to create it on the spot (default placement: top-level, source = `user`; re-parent later via category management). Drives off the same typeahead widget as (2).
-4. **Multi-edit / bulk-edit.** Select N transactions in the register, set one or more fields (category / status / payee / memo) for all of them in a single action. The v0.1 web app had this as a "bulk bar"; the Qt version probably belongs in a sidebar or modal that opens when more than one row is selected.
-
-Items (1)–(3) cluster around a single custom typeahead delegate and should be done together. (4) is a separate piece of work.
+- **Kind-aware inline create.** Today's confirm dialog fixes `kind='expense'` for the new category. If real use shows the owner regularly wanting income or transfer-kind categories created inline, the right v2 is a tiny kind radio inside the confirm dialog — not a separate full-create dialog path.
+- **Memo history typeahead.** The memo cell is still a bare `QLineEdit`. A repository-backed completer over distinct memo strings would slot in symmetrically with the payee delegate.
 
 ### Polish backlog from 2026-06-05 basic-management round
 
 - **Visible "New Transaction" button.** Today the only entry points are the Transaction menu and Ctrl+N. A toolbar / register-pane button would be more discoverable. Owner asked for this during step 1; deferred to a later UI polish pass.
 - **Unlock kind combo on New sub-category.** In the New Category dialog, when a parent is chosen the kind combo is locked to the parent's kind. For mixed-kind structures (e.g. Paycheck with Gross Pay = income and Taxes = expense beneath it), creating a different-kind child is currently two steps (create as inherited kind, then Change Kind). Editing this to leave the kind combo *unlocked* (just defaulting to parent's kind) is the obvious fix when real-world use confirms the need.
 - **Spending Over Time chart visuals.** The QtCharts default style reads "very basic and a bit 1990's". v2 polish: nicer palette (qualitative colors, accessible contrast); modern font and spacing; cleaner axis labels (e.g. `Jan 2026` instead of `2026-01`); tooltips on bar segments; optional "show numbers on bars" toggle; consider a single chart background colour and minimum gridlines. Could also add a Save Chart As Image action.
+
+### Budget arc — follow-ups after round C (2026-06-06)
+
+The three-round arc (ADR-023 / 024 / 025) is complete. Items deliberately left for later polish or to feed real-use feedback:
+
+- **Per-card sparkline** of historical actuals over the last N periods — a thin chart inside each card showing the trend, scoped to the card's own cadence period. Deferred from round C to keep card-layout simple while owner lives with the screen.
+- **Reports → Budget vs Actual** time-series window — a separate report showing planned vs actual per category over a date range. Bigger window of its own; defer until use surfaces a clear need beyond the current per-month view.
+- **Overdue-schedules surface on the budget window** — round C deliberately omits overdue schedules (next_due_date before period start) from the per-card "expected" badge. A small "X overdue schedules — review in Manage ▸ Schedules" indicator on the budget header would close the visibility gap.
+- **Per-schedule (and per-budget_category) cadence anchor** — the global Monday-weeks / calendar-quarters rule from ADR-023 holds for both schedules and budget cards. A user whose paycheck is a Friday-paid biweekly schedule would benefit from a per-row anchor override; needs UI in the schedule and budget setup dialogs and a small schema migration to add the anchor column on budget_category (it's already on scheduled_txn).
+- **Rollover** of unspent surplus / deficit between periods — a per-`budget_category` rollover flag. Additive when needed.
+- **Multi-budget per file** — schema already supports it; UI surfaces a single default budget today.
+- **Stepped burn-down ideal** that drops at known scheduled-txn dates rather than a single straight line. Adds nuance without new data.
+- **Budget palette extraction** — round C inlines the segment / chip colours in `budget_window.py` and the chart series colours in `burn_down_chart.py`; consolidate if a wider palette unification ever lands.
 
 ### Other deferred items
 
@@ -294,6 +316,10 @@ Items (1)–(3) cluster around a single custom typeahead delegate and should be 
 | ADR-019 | Net Worth report — three-column Assets / Net Worth / Debts | **Accepted 2026-06-05** |
 | ADR-020 | Account transfers — category-driven, two linked txns sharing one transfer_id | **Accepted 2026-06-05** |
 | ADR-021 | Generic CSV column-mapping wizard | **Accepted 2026-06-05** |
+| ADR-022 | Register typeahead delegates + inline category create | **Accepted 2026-06-05** |
+| ADR-023 | Scheduled transactions (bills, recurring income, recurring transfers) | **Accepted 2026-06-05** |
+| ADR-024 | Budget core — perimeter + per-category targets + screen | **Accepted 2026-06-05** |
+| ADR-025 | Budget visualisations — burn-down + summary bar + cadence subtitles + scheduled projection | **Accepted 2026-06-06** |
 
 Full index and summaries: [`docs/adr/README.md`](docs/adr/README.md).
 

@@ -9,6 +9,7 @@ success or rollback() on failure.
 """
 from __future__ import annotations
 
+import calendar
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -130,6 +131,88 @@ class CategoryChoice:
     kind: str = "expense"
 
 
+SCHEDULE_CADENCES: tuple[str, ...] = (
+    "weekly", "biweekly", "monthly", "quarterly", "annual",
+)
+
+
+BUDGET_ROLES: tuple[str, ...] = ("bills", "saving", "discretionary")
+
+
+@dataclass(frozen=True)
+class Budget:
+    """A budget plan. v1 keeps one row per file (see ADR-024); the schema
+    supports more so multi-plan can land additively."""
+    id: int
+    iri: str
+    name: str
+
+
+@dataclass(frozen=True)
+class BudgetCategoryRow:
+    """One per-category line in a budget, joined with the category's name,
+    parent name, and kind so the screen + dialog can render without a
+    second pass through the category list. Amount is stored as a positive
+    magnitude in pence; signing comes from ``category_kind`` at display time.
+    """
+    id: int
+    budget_id: int
+    category_id: int
+    category_name: str
+    category_parent_name: str   # '' if top-level
+    category_kind: str
+    amount: Decimal
+    cadence: str
+    role: str
+
+
+@dataclass(frozen=True)
+class PerimeterTxn:
+    """A transaction inside a budget's perimeter window, after the intra-
+    perimeter-transfer cancellation rule (ADR-024 §transfers). Used by
+    ``budget_calc`` to bucket actuals against budgeted categories."""
+    id: int
+    account_id: int
+    posted_date: str
+    amount: Decimal      # signed
+    category_id: int
+
+
+@dataclass(frozen=True)
+class ScheduledTxnRow:
+    """A scheduled transaction joined with its account, payee, category, and
+    optional transfer-destination names. Used by the Schedules dialog list view
+    and (in round B) by the budget screen to project planned spending.
+
+    `estimated_amount` is signed (matches `txn.amount`); `variable=1` means
+    the schedule is a placeholder amount and the post path prompts for the
+    real number. `category_kind` is denormalised onto the row so the dialog
+    can branch (transfer-kind schedules need a destination account) without
+    re-querying.
+    """
+    id: int
+    iri: str
+    account_id: int
+    account_name: str
+    payee_id: Optional[int]
+    payee_name: str
+    category_id: int
+    category_name: str
+    category_kind: str
+    transfer_to_account_id: Optional[int]
+    transfer_to_account_name: str   # '' when not a transfer
+    estimated_amount: Decimal
+    variable: bool
+    memo: str
+    cadence: str
+    anchor_date: str
+    next_due_date: str
+    end_date: Optional[str]
+    auto_post: bool
+    notes: str
+    archived_at: Optional[str]
+
+
 # ── Identifier helpers (ADR-006) ────────────────────────────────────────────
 
 
@@ -143,6 +226,14 @@ def new_import_batch_iri() -> str:
 
 def new_transfer_iri() -> str:
     return f"mfl:Transfer_{uuid.uuid4().hex[:8]}"
+
+
+def new_scheduled_txn_iri() -> str:
+    return f"mfl:Scheduled_{uuid.uuid4().hex[:8]}"
+
+
+def new_budget_iri() -> str:
+    return f"mfl:Budget_{uuid.uuid4().hex[:8]}"
 
 
 # ── Repository ──────────────────────────────────────────────────────────────
@@ -906,6 +997,17 @@ class Repository:
             "SELECT id FROM payee WHERE name = ?", (clean,),
         ).fetchone()
         return row["id"] if row is not None else None
+
+    def list_payee_names(self) -> list[str]:
+        """Names only, sorted case-insensitively. Used by the register's payee
+        typeahead delegate — a lightweight list to feed a QCompleter without
+        the cost of the usage_count subquery."""
+        cur = self._conn.execute(
+            "SELECT name FROM payee "
+            "WHERE archived_at IS NULL "
+            "ORDER BY name COLLATE NOCASE"
+        )
+        return [r["name"] for r in cur]
 
     def list_payees_with_usage(self) -> list[PayeeRow]:
         """All payees with their current transaction count, sorted by name.
@@ -1779,3 +1881,744 @@ class Repository:
             ),
         )
         return cur.lastrowid
+
+    # ── Scheduled transactions (ADR-023) ──
+
+    _SCHEDULED_COLS = (
+        "s.id, s.iri, s.account_id, a.name AS account_name, "
+        "s.payee_id, COALESCE(p.name, '') AS payee_name, "
+        "s.category_id, c.name AS category_name, c.kind AS category_kind, "
+        "s.transfer_to_account_id, "
+        "COALESCE(ta.name, '') AS transfer_to_account_name, "
+        "s.estimated_amount, s.variable, "
+        "COALESCE(s.memo, '') AS memo, "
+        "s.cadence, s.anchor_date, s.next_due_date, s.end_date, "
+        "s.auto_post, COALESCE(s.notes, '') AS notes, s.archived_at"
+    )
+
+    def _row_to_scheduled(self, row) -> ScheduledTxnRow:
+        return ScheduledTxnRow(
+            id=row["id"], iri=row["iri"],
+            account_id=row["account_id"], account_name=row["account_name"],
+            payee_id=row["payee_id"], payee_name=row["payee_name"],
+            category_id=row["category_id"],
+            category_name=row["category_name"],
+            category_kind=row["category_kind"],
+            transfer_to_account_id=row["transfer_to_account_id"],
+            transfer_to_account_name=row["transfer_to_account_name"],
+            estimated_amount=pence_to_decimal(row["estimated_amount"]),
+            variable=bool(row["variable"]),
+            memo=row["memo"], cadence=row["cadence"],
+            anchor_date=row["anchor_date"],
+            next_due_date=row["next_due_date"],
+            end_date=row["end_date"],
+            auto_post=bool(row["auto_post"]),
+            notes=row["notes"],
+            archived_at=row["archived_at"],
+        )
+
+    def list_scheduled_txns(
+        self, include_archived: bool = False,
+    ) -> list[ScheduledTxnRow]:
+        """Active schedules in next-due-date order. Pass ``include_archived``
+        to see archives too (used by the management dialog's filter)."""
+        where = "" if include_archived else "WHERE s.archived_at IS NULL"
+        cur = self._conn.execute(
+            f"SELECT {self._SCHEDULED_COLS} "
+            f"FROM scheduled_txn s "
+            f"JOIN      account  a  ON a.id = s.account_id "
+            f"LEFT JOIN payee    p  ON p.id = s.payee_id "
+            f"JOIN      category c  ON c.id = s.category_id "
+            f"LEFT JOIN account  ta ON ta.id = s.transfer_to_account_id "
+            f"{where} "
+            f"ORDER BY s.next_due_date ASC, s.id ASC"
+        )
+        return [self._row_to_scheduled(r) for r in cur]
+
+    def get_scheduled_txn(self, schedule_id: int) -> Optional[ScheduledTxnRow]:
+        row = self._conn.execute(
+            f"SELECT {self._SCHEDULED_COLS} "
+            f"FROM scheduled_txn s "
+            f"JOIN      account  a  ON a.id = s.account_id "
+            f"LEFT JOIN payee    p  ON p.id = s.payee_id "
+            f"JOIN      category c  ON c.id = s.category_id "
+            f"LEFT JOIN account  ta ON ta.id = s.transfer_to_account_id "
+            f"WHERE s.id = ?",
+            (schedule_id,),
+        ).fetchone()
+        return self._row_to_scheduled(row) if row is not None else None
+
+    def list_schedules_due_through(
+        self, through_date: str,
+    ) -> list[ScheduledTxnRow]:
+        """Every active schedule with ``next_due_date <= through_date``.
+        Used by the launch-time auto-post sweep and (in round B) by the
+        budget screen's planned-spending projection."""
+        cur = self._conn.execute(
+            f"SELECT {self._SCHEDULED_COLS} "
+            f"FROM scheduled_txn s "
+            f"JOIN      account  a  ON a.id = s.account_id "
+            f"LEFT JOIN payee    p  ON p.id = s.payee_id "
+            f"JOIN      category c  ON c.id = s.category_id "
+            f"LEFT JOIN account  ta ON ta.id = s.transfer_to_account_id "
+            f"WHERE s.archived_at IS NULL AND s.next_due_date <= ? "
+            f"ORDER BY s.next_due_date ASC, s.id ASC",
+            (through_date,),
+        )
+        return [self._row_to_scheduled(r) for r in cur]
+
+    def create_scheduled_txn(
+        self,
+        *,
+        account_id: int,
+        payee_name: str,
+        category_id: int,
+        estimated_amount: Decimal,
+        cadence: str,
+        anchor_date: str,
+        end_date: Optional[str] = None,
+        next_due_date: Optional[str] = None,
+        transfer_to_account_id: Optional[int] = None,
+        variable: bool = False,
+        auto_post: bool = False,
+        memo: str = "",
+        notes: str = "",
+    ) -> int:
+        """Insert a new schedule. ``next_due_date`` defaults to ``anchor_date``
+        (the first occurrence is the anchor); pass an explicit value to
+        skip ahead. Validates cadence + transfer-kind / destination-account
+        consistency. Commits on success.
+        """
+        if cadence not in SCHEDULE_CADENCES:
+            raise ValueError(
+                f"Invalid cadence {cadence!r}; expected one of {SCHEDULE_CADENCES}."
+            )
+        kind = self.get_category_kind(category_id)
+        if kind is None:
+            raise ValueError(f"No category with id {category_id}")
+        if kind == "transfer":
+            if transfer_to_account_id is None:
+                raise ValueError(
+                    "Transfer-kind categories require a destination account."
+                )
+            if transfer_to_account_id == account_id:
+                raise ValueError(
+                    "Destination account must differ from the source."
+                )
+        else:
+            # Stamp out a destination if the caller mistakenly set one — keeps
+            # the column meaningful (NULL iff non-transfer).
+            transfer_to_account_id = None
+        if estimated_amount == 0:
+            raise ValueError("Estimated amount cannot be zero.")
+        if next_due_date is None:
+            next_due_date = anchor_date
+
+        payee_id = self.get_or_create_payee(payee_name)
+        iri = new_scheduled_txn_iri()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO scheduled_txn "
+                "(iri, account_id, payee_id, category_id, "
+                " transfer_to_account_id, estimated_amount, variable, "
+                " memo, cadence, anchor_date, next_due_date, end_date, "
+                " auto_post, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    iri, account_id, payee_id, category_id,
+                    transfer_to_account_id,
+                    decimal_to_pence(estimated_amount),
+                    1 if variable else 0,
+                    memo or None, cadence, anchor_date, next_due_date,
+                    end_date, 1 if auto_post else 0, notes or None,
+                ),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return cur.lastrowid
+
+    def update_scheduled_txn(
+        self,
+        schedule_id: int,
+        *,
+        account_id: int,
+        payee_name: str,
+        category_id: int,
+        estimated_amount: Decimal,
+        cadence: str,
+        anchor_date: str,
+        next_due_date: str,
+        end_date: Optional[str],
+        transfer_to_account_id: Optional[int],
+        variable: bool,
+        auto_post: bool,
+        memo: str,
+        notes: str,
+    ) -> None:
+        """Replace every editable field on the schedule. Validation matches
+        ``create_scheduled_txn``. Does not retro-edit any txns that were
+        already materialised from prior occurrences — past posts are the
+        responsibility of the register, not the schedule.
+        """
+        if cadence not in SCHEDULE_CADENCES:
+            raise ValueError(
+                f"Invalid cadence {cadence!r}; expected one of {SCHEDULE_CADENCES}."
+            )
+        kind = self.get_category_kind(category_id)
+        if kind is None:
+            raise ValueError(f"No category with id {category_id}")
+        if kind == "transfer":
+            if transfer_to_account_id is None:
+                raise ValueError(
+                    "Transfer-kind categories require a destination account."
+                )
+            if transfer_to_account_id == account_id:
+                raise ValueError(
+                    "Destination account must differ from the source."
+                )
+        else:
+            transfer_to_account_id = None
+        if estimated_amount == 0:
+            raise ValueError("Estimated amount cannot be zero.")
+
+        payee_id = self.get_or_create_payee(payee_name)
+        try:
+            self._conn.execute(
+                "UPDATE scheduled_txn SET "
+                "  account_id = ?, payee_id = ?, category_id = ?, "
+                "  transfer_to_account_id = ?, estimated_amount = ?, "
+                "  variable = ?, memo = ?, cadence = ?, anchor_date = ?, "
+                "  next_due_date = ?, end_date = ?, auto_post = ?, "
+                "  notes = ? "
+                "WHERE id = ?",
+                (
+                    account_id, payee_id, category_id,
+                    transfer_to_account_id,
+                    decimal_to_pence(estimated_amount),
+                    1 if variable else 0,
+                    memo or None, cadence, anchor_date, next_due_date,
+                    end_date, 1 if auto_post else 0, notes or None,
+                    schedule_id,
+                ),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def delete_scheduled_txn(self, schedule_id: int) -> None:
+        """Hard-delete a schedule. Already-materialised txns are untouched —
+        the schedule is a template, the txn is the truth, and the link
+        between them is not stored in v1 (see ADR-023 deferrals)."""
+        try:
+            self._conn.execute(
+                "DELETE FROM scheduled_txn WHERE id = ?", (schedule_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    @staticmethod
+    def compute_next_due_date(
+        anchor_date: str, cadence: str, current_due: str,
+    ) -> str:
+        """Next occurrence after ``current_due``, anchored at ``anchor_date``.
+
+        For weekly/biweekly the math is current + 7 / + 14 days. For
+        monthly / quarterly / annual the next occurrence is anchor-based —
+        we add one period's months to the current month and use
+        ``min(anchor.day, days_in_target_month)`` so a "31st of every
+        month" schedule produces Jan 31 → Feb 28 → Mar 31 (not Mar 28),
+        and a "Feb 29" annual schedule produces 2024-02-29 → 2025-02-28
+        → 2026-02-28 → 2027-02-28 → 2028-02-29.
+        """
+        if cadence not in SCHEDULE_CADENCES:
+            raise ValueError(
+                f"Invalid cadence {cadence!r}; expected one of {SCHEDULE_CADENCES}."
+            )
+        cur = date.fromisoformat(current_due)
+        if cadence == "weekly":
+            return (cur + timedelta(days=7)).isoformat()
+        if cadence == "biweekly":
+            return (cur + timedelta(days=14)).isoformat()
+        anchor = date.fromisoformat(anchor_date)
+        months_step = {"monthly": 1, "quarterly": 3, "annual": 12}[cadence]
+        # Total months from anchor to current, then advance by one step.
+        total_months = (
+            (cur.year - anchor.year) * 12 + (cur.month - anchor.month)
+        )
+        next_month_offset = total_months + months_step
+        target_year = anchor.year + (anchor.month - 1 + next_month_offset) // 12
+        target_month = (anchor.month - 1 + next_month_offset) % 12 + 1
+        target_day = min(anchor.day, calendar.monthrange(target_year, target_month)[1])
+        return date(target_year, target_month, target_day).isoformat()
+
+    def post_scheduled_txn(
+        self,
+        schedule_id: int,
+        actual_amount: Optional[Decimal] = None,
+    ) -> int:
+        """Materialise the next occurrence and advance ``next_due_date``.
+
+        For non-transfer categories: inserts one txn via the same path as
+        manual entry (``insert_transaction``). For transfer-kind categories:
+        uses ``create_transfer`` with the source/destination derived from
+        the schedule's account and ``transfer_to_account_id``, with the
+        direction determined by the sign of the estimated amount (negative
+        = outflow, the schedule's own account is the source).
+
+        ``actual_amount`` overrides the stored estimate; required for
+        variable schedules (the dialog passes the user-entered amount),
+        ignored on fixed schedules unless the caller deliberately passes
+        one. Sign of the actual amount must match the sign of the estimate
+        — a fixed-direction schedule producing an inverted-sign txn is
+        almost always a bug.
+
+        Atomic: the txn insert / transfer pair plus the schedule update
+        run in one SQLite transaction. If the post advances past
+        ``end_date`` the schedule is archived in the same transaction.
+
+        Returns the txn id (or the source-half id for transfers).
+        """
+        sched = self.get_scheduled_txn(schedule_id)
+        if sched is None:
+            raise ValueError(f"No schedule with id {schedule_id}")
+        if sched.archived_at is not None:
+            raise ValueError("Schedule is archived; cannot post.")
+
+        amount = (
+            sched.estimated_amount if actual_amount is None else actual_amount
+        )
+        if amount == 0:
+            raise ValueError("Cannot post a zero amount.")
+        if (amount > 0) != (sched.estimated_amount > 0):
+            raise ValueError(
+                "Actual amount sign does not match the schedule's direction. "
+                f"Expected {'inflow' if sched.estimated_amount > 0 else 'outflow'}."
+            )
+
+        posted_date = sched.next_due_date
+        try:
+            if sched.category_kind == "transfer":
+                if sched.transfer_to_account_id is None:
+                    raise ValueError(
+                        "Transfer schedule is missing a destination account."
+                    )
+                # Direction: estimated_amount sign tells us which side is the
+                # source. Negative → schedule's own account is the source.
+                if amount < 0:
+                    from_id = sched.account_id
+                    to_id = sched.transfer_to_account_id
+                else:
+                    from_id = sched.transfer_to_account_id
+                    to_id = sched.account_id
+                # create_transfer commits internally; replicate its work
+                # inline so we can include the schedule update in the same
+                # transaction.
+                transfer_iri = new_transfer_iri()
+                from_name = self._conn.execute(
+                    "SELECT name FROM account WHERE id = ?", (from_id,),
+                ).fetchone()["name"]
+                to_name = self._conn.execute(
+                    "SELECT name FROM account WHERE id = ?", (to_id,),
+                ).fetchone()["name"]
+                payee_to = self.get_or_create_payee(f"Transfer to {to_name}")
+                payee_from = self.get_or_create_payee(
+                    f"Transfer from {from_name}"
+                )
+                magnitude = abs(amount)
+                source_id = self._insert_transfer_half(
+                    account_id=from_id, amount=-magnitude,
+                    payee_id=payee_to, category_id=sched.category_id,
+                    status="Pending", memo=sched.memo,
+                    posted_date=posted_date, transfer_id=transfer_iri,
+                )
+                self._insert_transfer_half(
+                    account_id=to_id, amount=magnitude,
+                    payee_id=payee_from, category_id=sched.category_id,
+                    status="Pending", memo=sched.memo,
+                    posted_date=posted_date, transfer_id=transfer_iri,
+                )
+                inserted_id = source_id
+            else:
+                inserted_id = self.insert_transaction(
+                    account_id=sched.account_id,
+                    posted_date=posted_date,
+                    amount=amount,
+                    payee_id=sched.payee_id,
+                    category_id=sched.category_id,
+                    status="Pending",
+                    memo=sched.memo,
+                    import_hash=None,
+                    import_batch_id=None,
+                )
+
+            next_due = self.compute_next_due_date(
+                sched.anchor_date, sched.cadence, sched.next_due_date,
+            )
+            archive = (
+                sched.end_date is not None and next_due > sched.end_date
+            )
+            if archive:
+                self._conn.execute(
+                    "UPDATE scheduled_txn SET "
+                    "  next_due_date = ?, archived_at = datetime('now') "
+                    "WHERE id = ?",
+                    (next_due, schedule_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE scheduled_txn SET next_due_date = ? WHERE id = ?",
+                    (next_due, schedule_id),
+                )
+            self.commit()
+            return inserted_id
+        except Exception:
+            self.rollback()
+            raise
+
+    def auto_post_due(self, through_date: str) -> list[int]:
+        """Launch-time sweep: post every ``auto_post=1`` active schedule
+        whose ``next_due_date <= through_date``. Catches up multiple
+        missed occurrences by looping until next_due_date moves past
+        the cutoff. Returns the list of materialised txn ids (source
+        side for transfers) in post order.
+
+        Each post is its own atomic transaction; one schedule's failure
+        doesn't abort the others. Failures are silently skipped here —
+        the caller is the app startup path and shouldn't refuse to
+        launch over a single bad schedule. (The dialog's manual Post
+        Now flow surfaces errors per-action.)
+        """
+        posted: list[int] = []
+        cur = self._conn.execute(
+            "SELECT id FROM scheduled_txn "
+            "WHERE archived_at IS NULL AND auto_post = 1 "
+            "  AND next_due_date <= ? "
+            "ORDER BY next_due_date ASC, id ASC",
+            (through_date,),
+        )
+        # Snapshot the candidate ids — each post advances next_due_date
+        # so the looping window can shift while we iterate the rowset.
+        candidate_ids = [r["id"] for r in cur]
+        for sid in candidate_ids:
+            while True:
+                # Re-read each iteration so the loop terminates correctly
+                # when next_due_date moves past through_date or the
+                # schedule was archived by hitting end_date.
+                sched = self.get_scheduled_txn(sid)
+                if sched is None or sched.archived_at is not None:
+                    break
+                if sched.next_due_date > through_date:
+                    break
+                try:
+                    txn_id = self.post_scheduled_txn(sid)
+                    posted.append(txn_id)
+                except Exception:
+                    # Skip the rest of this schedule's catch-up — likely
+                    # a variable bill or a config issue the user needs to
+                    # resolve manually.
+                    break
+        return posted
+
+    # ── Budgets (ADR-024) ──
+
+    def get_default_budget(self) -> Optional[Budget]:
+        """Return the single v1 budget if it exists, or None.
+        ``get_or_create_default_budget`` is the constructor side."""
+        row = self._conn.execute(
+            "SELECT id, iri, name FROM budget ORDER BY id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return Budget(id=row["id"], iri=row["iri"], name=row["name"])
+
+    def get_or_create_default_budget(self) -> Budget:
+        """Return the file's single budget, creating an empty one on first
+        access. Empty = no perimeter, no categories — the screen renders
+        an explicit "Set up your budget" state in that case."""
+        existing = self.get_default_budget()
+        if existing is not None:
+            return existing
+        iri = new_budget_iri()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO budget (iri, name) VALUES (?, 'My Budget')",
+                (iri,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return Budget(id=cur.lastrowid, iri=iri, name="My Budget")
+
+    def rename_budget(self, budget_id: int, new_name: str) -> None:
+        clean = (new_name or "").strip()
+        if not clean:
+            raise ValueError("Budget name cannot be empty.")
+        try:
+            self._conn.execute(
+                "UPDATE budget SET name = ? WHERE id = ?",
+                (clean, budget_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── Budget perimeter (which accounts count) ──
+
+    def list_budget_account_ids(self, budget_id: int) -> list[int]:
+        """The set of accounts inside this budget's perimeter, in account-
+        display order (family, name) so the dialog renders consistently
+        with the sidebar."""
+        cur = self._conn.execute(
+            "SELECT a.id FROM budget_account ba "
+            "JOIN account a ON a.id = ba.account_id "
+            "WHERE ba.budget_id = ? AND a.archived_at IS NULL "
+            "ORDER BY a.family, a.name",
+            (budget_id,),
+        )
+        return [int(r["id"]) for r in cur]
+
+    def set_budget_accounts(
+        self, budget_id: int, account_ids: list[int],
+    ) -> None:
+        """Replace the budget's perimeter with the given set of account ids.
+        Atomic — the old perimeter is dropped and the new one inserted in
+        one SQL transaction; failure leaves the previous perimeter intact."""
+        unique_ids = list(dict.fromkeys(account_ids))  # preserve order, dedupe
+        try:
+            self._conn.execute(
+                "DELETE FROM budget_account WHERE budget_id = ?",
+                (budget_id,),
+            )
+            if unique_ids:
+                self._conn.executemany(
+                    "INSERT INTO budget_account (budget_id, account_id) "
+                    "VALUES (?, ?)",
+                    [(budget_id, aid) for aid in unique_ids],
+                )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── Budget categories ──
+
+    _BUDGET_CATEGORY_COLS = (
+        "bc.id, bc.budget_id, bc.category_id, "
+        "c.name AS category_name, "
+        "COALESCE(p.name, '') AS category_parent_name, "
+        "c.kind AS category_kind, "
+        "bc.amount, bc.cadence, bc.role"
+    )
+
+    def _row_to_budget_category(self, row) -> BudgetCategoryRow:
+        return BudgetCategoryRow(
+            id=row["id"], budget_id=row["budget_id"],
+            category_id=row["category_id"],
+            category_name=row["category_name"],
+            category_parent_name=row["category_parent_name"],
+            category_kind=row["category_kind"],
+            amount=pence_to_decimal(row["amount"]),
+            cadence=row["cadence"], role=row["role"],
+        )
+
+    def list_budget_categories(
+        self, budget_id: int,
+    ) -> list[BudgetCategoryRow]:
+        """All per-category budget rows for the given budget, sorted by
+        role then category name. Used by both the screen and the setup
+        dialog."""
+        cur = self._conn.execute(
+            f"SELECT {self._BUDGET_CATEGORY_COLS} "
+            f"FROM budget_category bc "
+            f"JOIN      category c ON c.id = bc.category_id "
+            f"LEFT JOIN category p ON p.id = c.parent_id "
+            f"WHERE bc.budget_id = ? "
+            f"ORDER BY bc.role, c.name",
+            (budget_id,),
+        )
+        return [self._row_to_budget_category(r) for r in cur]
+
+    def upsert_budget_category(
+        self,
+        *,
+        budget_id: int,
+        category_id: int,
+        amount: Decimal,
+        cadence: str,
+        role: str,
+    ) -> int:
+        """Insert or update one per-category budget row. ``UNIQUE(budget_id,
+        category_id)`` makes the ON CONFLICT path the natural shape.
+        Returns the row id (either freshly inserted or the existing one).
+        """
+        if cadence not in SCHEDULE_CADENCES:
+            raise ValueError(
+                f"Invalid cadence {cadence!r}; expected one of {SCHEDULE_CADENCES}."
+            )
+        if role not in BUDGET_ROLES:
+            raise ValueError(
+                f"Invalid role {role!r}; expected one of {BUDGET_ROLES}."
+            )
+        if amount < 0:
+            raise ValueError("Budget amount cannot be negative.")
+        try:
+            self._conn.execute(
+                "INSERT INTO budget_category "
+                "(budget_id, category_id, amount, cadence, role) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(budget_id, category_id) DO UPDATE SET "
+                "  amount = excluded.amount, "
+                "  cadence = excluded.cadence, "
+                "  role = excluded.role",
+                (
+                    budget_id, category_id, decimal_to_pence(amount),
+                    cadence, role,
+                ),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        row = self._conn.execute(
+            "SELECT id FROM budget_category "
+            "WHERE budget_id = ? AND category_id = ?",
+            (budget_id, category_id),
+        ).fetchone()
+        return int(row["id"])
+
+    def delete_budget_category(
+        self, budget_id: int, category_id: int,
+    ) -> None:
+        try:
+            self._conn.execute(
+                "DELETE FROM budget_category "
+                "WHERE budget_id = ? AND category_id = ?",
+                (budget_id, category_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── Budget computation source data ──
+
+    def compute_perimeter_cash_on_hand(
+        self, budget_id: int,
+    ) -> Decimal:
+        """Sum of current balances across the budget's in-perimeter
+        accounts. Reality-check number for the header badge; not part of
+        the planned-vs-actual tile math.
+
+        Naive cross-currency sum — same caveat as `compute_account_balances`
+        (ADR-015): mixed-currency perimeters are simply summed pence-wise.
+        Acceptable until multi-currency budgets become a concern."""
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM("
+            "  a.opening_balance + COALESCE("
+            "    (SELECT SUM(t.amount) FROM txn t WHERE t.account_id = a.id), 0"
+            "  )"
+            "), 0) AS total_pence "
+            "FROM account a "
+            "JOIN budget_account ba ON ba.account_id = a.id "
+            "WHERE ba.budget_id = ? AND a.archived_at IS NULL",
+            (budget_id,),
+        ).fetchone()
+        return pence_to_decimal(int(row["total_pence"]))
+
+    def list_perimeter_txns(
+        self,
+        budget_id: int,
+        period_start: str,
+        period_end: str,
+    ) -> list[PerimeterTxn]:
+        """All transactions inside the budget's perimeter window, filtered
+        by the intra-perimeter-transfer cancellation rule:
+
+        - non-transfer rows on perimeter accounts → included;
+        - transfer rows where the *partner* account is also in perimeter
+          → excluded (both halves cancel inside the perimeter);
+        - transfer rows where the partner account is OUTSIDE the perimeter
+          → included (this half is real cross-perimeter flow).
+
+        The bucket-by-budgeted-ancestor mapping is left to the computation
+        module (`mfl_desktop/budget_calc.py`) — this method is pure data.
+        """
+        # SQLite parameter substitution doesn't take a tuple for IN clauses;
+        # we splice the budget_id into a CTE and let the engine resolve
+        # everything. Cheaper than two round-trips when the perimeter has
+        # 20+ accounts.
+        sql = (
+            "WITH peri AS ("
+            "  SELECT account_id FROM budget_account WHERE budget_id = ?"
+            ") "
+            "SELECT t.id, t.account_id, t.posted_date, t.amount, t.category_id "
+            "FROM txn t "
+            "WHERE t.account_id IN (SELECT account_id FROM peri) "
+            "  AND t.posted_date BETWEEN ? AND ? "
+            "  AND ("
+            "    t.transfer_id IS NULL "
+            "    OR NOT EXISTS ("
+            "      SELECT 1 FROM txn t2 "
+            "      WHERE t2.transfer_id = t.transfer_id "
+            "        AND t2.id != t.id "
+            "        AND t2.account_id IN (SELECT account_id FROM peri)"
+            "    )"
+            "  ) "
+            "ORDER BY t.posted_date, t.id"
+        )
+        cur = self._conn.execute(
+            sql, (budget_id, period_start, period_end),
+        )
+        return [
+            PerimeterTxn(
+                id=int(r["id"]),
+                account_id=int(r["account_id"]),
+                posted_date=r["posted_date"],
+                amount=pence_to_decimal(int(r["amount"])),
+                category_id=int(r["category_id"]),
+            )
+            for r in cur
+        ]
+
+    def category_parent_map(self) -> dict[int, Optional[int]]:
+        """Mapping of category id → parent id, for the whole tree. Used
+        by the budget computation to walk up to the nearest budgeted
+        ancestor when bucketing actuals — cheaper to compute the chain
+        in Python from one snapshot than to do a recursive CTE per
+        transaction."""
+        cur = self._conn.execute(
+            "SELECT id, parent_id FROM category WHERE archived_at IS NULL"
+        )
+        return {int(r["id"]): r["parent_id"] for r in cur}
+
+    def list_perimeter_schedules_due_through(
+        self,
+        budget_id: int,
+        through_date: str,
+    ) -> list[ScheduledTxnRow]:
+        """Schedules due on or before ``through_date`` whose source account
+        is inside the budget's perimeter. Used by the budget screen to
+        surface "still-to-post" planned outflows that haven't been
+        materialised yet (auto-post off, or user hasn't launched today)."""
+        cur = self._conn.execute(
+            f"SELECT {self._SCHEDULED_COLS} "
+            f"FROM scheduled_txn s "
+            f"JOIN      account  a  ON a.id = s.account_id "
+            f"LEFT JOIN payee    p  ON p.id = s.payee_id "
+            f"JOIN      category c  ON c.id = s.category_id "
+            f"LEFT JOIN account  ta ON ta.id = s.transfer_to_account_id "
+            f"JOIN budget_account ba ON ba.account_id = s.account_id "
+            f"WHERE s.archived_at IS NULL "
+            f"  AND s.next_due_date <= ? "
+            f"  AND ba.budget_id = ? "
+            f"ORDER BY s.next_due_date ASC, s.id ASC",
+            (through_date, budget_id),
+        )
+        return [self._row_to_scheduled(r) for r in cur]

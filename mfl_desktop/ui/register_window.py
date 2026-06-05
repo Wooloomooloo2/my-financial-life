@@ -7,6 +7,7 @@ Balance column hidden — see project-all-transactions-view in memory).
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -34,13 +35,19 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui.account_dialog import AccountDialog
+from mfl_desktop.ui.budget_window import BudgetWindow
 from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
 from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
-from mfl_desktop.ui.delegates import CategoryDelegate, StatusDelegate
+from mfl_desktop.ui.delegates import (
+    CategoryTypeaheadDelegate,
+    PayeeTypeaheadDelegate,
+    StatusDelegate,
+)
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.payees_dialog import PayeesDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
+from mfl_desktop.ui.schedules_dialog import SchedulesDialog
 from mfl_desktop.ui.sidebar import KIND_ROLE, AccountSidebar
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
@@ -173,6 +180,12 @@ class RegisterWindow(QMainWindow):
         else:
             self._show_all_transactions()
 
+        # Auto-post any schedules that have come due since the last launch —
+        # see ADR-023. Runs against the freshly-opened DB only; the user's
+        # variable-amount and manual schedules are left for them to action
+        # via Manage ▸ Schedules.
+        self._run_auto_post_sweep()
+
     # ── sidebar plumbing ──
 
     def _select_account_in_sidebar(self, account_iri: str) -> None:
@@ -242,10 +255,19 @@ class RegisterWindow(QMainWindow):
         # positions differ between modes.
         for i in range(len(self._model.COLUMNS)):
             self._table.setItemDelegateForColumn(i, None)
+        if "payee_name" in col_index:
+            self._table.setItemDelegateForColumn(
+                col_index["payee_name"],
+                PayeeTypeaheadDelegate(self._repo, self._table),
+            )
         if "category_name" in col_index:
             self._table.setItemDelegateForColumn(
                 col_index["category_name"],
-                CategoryDelegate(self._categories, self._table),
+                CategoryTypeaheadDelegate(
+                    self._repo,
+                    self._on_create_category_inline,
+                    self._table,
+                ),
             )
         if "status" in col_index:
             self._table.setItemDelegateForColumn(
@@ -358,6 +380,10 @@ class RegisterWindow(QMainWindow):
         self._manage_categories_action.triggered.connect(self._on_manage_categories)
         manage_menu.addAction(self._manage_categories_action)
 
+        self._manage_schedules_action = QAction("&Schedules…", self)
+        self._manage_schedules_action.triggered.connect(self._on_manage_schedules)
+        manage_menu.addAction(self._manage_schedules_action)
+
         reports_menu = self.menuBar().addMenu("&Reports")
 
         self._spending_report_action = QAction("&Spending Over Time…", self)
@@ -367,6 +393,15 @@ class RegisterWindow(QMainWindow):
         self._net_worth_action = QAction("&Net Worth…", self)
         self._net_worth_action.triggered.connect(self._on_net_worth)
         reports_menu.addAction(self._net_worth_action)
+
+        budget_menu = self.menuBar().addMenu("&Budget")
+
+        self._budget_action = QAction("&Open Budget…", self)
+        self._budget_action.setShortcut(QKeySequence("Ctrl+B"))
+        self._budget_action.triggered.connect(self._on_open_budget)
+        budget_menu.addAction(self._budget_action)
+        # Expose on the window so the shortcut fires while the table has focus.
+        self.addAction(self._budget_action)
 
     # ── new / delete transaction ──
 
@@ -501,6 +536,65 @@ class RegisterWindow(QMainWindow):
         self._model.reload()
         self._refresh_sidebar_balances()
         self.statusBar().showMessage("Transfer partner created", 4000)
+
+    # ── inline category create (ADR-022) ──
+
+    def _on_create_category_inline(self, name: str) -> Optional[int]:
+        """Confirm-and-create a brand-new top-level category from the
+        register's category typeahead delegate.
+
+        Defaults per ADR-022: top-level (parent_id=None), kind='expense',
+        source='user'. A single Yes/No confirm guards against typos —
+        creating a junk category from a misspelled lookup is more painful
+        to clean up than the one extra keystroke costs. On Yes we refresh
+        the cached choice list, the typeahead delegate, and the filter
+        combo via _refresh_categories_view so the new entry is visible
+        everywhere immediately.
+
+        Returns the new category id, or None if the user cancelled or the
+        creation failed."""
+        clean = (name or "").strip()
+        if not clean:
+            return None
+        confirm = QMessageBox.question(
+            self, "Create category?",
+            f"No category named {clean!r} exists.\n\n"
+            f"Create it as a new top-level expense category?\n"
+            f"(You can move it under a parent or change its kind later "
+            f"from Manage ▸ Categories.)",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return None
+        try:
+            new_id = self._repo.create_category(
+                clean, parent_id=None, kind="expense", source="user",
+            )
+        except ValueError as e:
+            # Sibling-name collision (race with another window or with a
+            # category that exists but wasn't in the typeahead because the
+            # delegate's snapshot is stale) — surface the reason rather
+            # than silently doing nothing.
+            QMessageBox.warning(self, "Could not create category", str(e))
+            return None
+        # Lightweight refresh only: update the cached list + filter combo so
+        # the dataChanged hook and the next filter use see the new category.
+        # Skip the full _refresh_categories_view here — it resets the model,
+        # which would invalidate the QModelIndex the delegate is about to
+        # commit into. The typeahead delegate re-reads choices fresh on
+        # its next createEditor, so no delegate rebind is needed either.
+        self._reload_category_cache()
+        self.statusBar().showMessage(
+            f"Created category {clean!r} (expense, top-level)", 6000,
+        )
+        return new_id
+
+    def _reload_category_cache(self) -> None:
+        """Refresh the cached category list and the filter-bar combo without
+        touching the model or the typeahead delegate. Safe to call from
+        inside a delegate's setModelData."""
+        self._categories = self._repo.list_categories_flat()
+        self._populate_category_combo()
 
     # ── transfer helpers (category-driven, ADR-020) ──
 
@@ -772,6 +866,10 @@ class RegisterWindow(QMainWindow):
         self._populate_category_combo()
         self._update_window_title()
         old_repo.close()
+        # Re-run the auto-post sweep against the newly-opened DB. Schedules
+        # are per-file, so swapping files means a different set of due
+        # auto-posters to materialise (or none, for a fresh DB).
+        self._run_auto_post_sweep()
 
     # ── import ──
 
@@ -880,7 +978,11 @@ class RegisterWindow(QMainWindow):
         if "category_name" in col_index:
             self._table.setItemDelegateForColumn(
                 col_index["category_name"],
-                CategoryDelegate(self._categories, self._table),
+                CategoryTypeaheadDelegate(
+                    self._repo,
+                    self._on_create_category_inline,
+                    self._table,
+                ),
             )
         self._populate_category_combo()
 
@@ -1206,6 +1308,41 @@ class RegisterWindow(QMainWindow):
         dialog.categories_changed.connect(self._refresh_categories_view)
         dialog.exec()
 
+    def _on_manage_schedules(self) -> None:
+        dialog = SchedulesDialog(self._repo, parent=self)
+        # Post Now materialises a real txn (or transfer pair) that should
+        # appear in the register immediately, and may move balances —
+        # refresh the model + sidebar after any successful mutation.
+        dialog.schedules_changed.connect(self._on_schedules_changed)
+        dialog.exec()
+
+    def _on_schedules_changed(self) -> None:
+        self._model.reload()
+        self._refresh_sidebar_balances()
+
+    def _run_auto_post_sweep(self) -> None:
+        """Materialise any auto-post schedules whose next-due date has
+        already arrived. Idempotent: each post advances next_due_date
+        past today, so re-running on the same launch posts nothing.
+        Failures inside individual schedules are swallowed by the
+        repository sweep (see ``auto_post_due``); we surface the count
+        only if it was non-zero so a quiet startup stays quiet."""
+        try:
+            posted = self._repo.auto_post_due(date.today().isoformat())
+        except Exception:
+            # The whole sweep failed (unexpected DB error). Don't refuse
+            # to launch over it — the user can still use the app and
+            # see the schedules via the dialog.
+            return
+        if not posted:
+            return
+        self._model.reload()
+        self._refresh_sidebar_balances()
+        self.statusBar().showMessage(
+            f"Auto-posted {len(posted)} scheduled "
+            f"transaction{'s' if len(posted) != 1 else ''}.", 8000,
+        )
+
     # ── reports ──
 
     def _on_spending_report(self) -> None:
@@ -1242,6 +1379,24 @@ class RegisterWindow(QMainWindow):
 
     def _on_net_worth_closed(self, _obj=None) -> None:
         self._net_worth_win = None
+
+    def _on_open_budget(self) -> None:
+        """Open the Budget window — non-modal, singleton like the other
+        report windows. The window auto-refreshes on activation so flipping
+        back from the register reflects new actuals (ADR-024)."""
+        existing = getattr(self, "_budget_win", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        win = BudgetWindow(self._repo, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.destroyed.connect(self._on_budget_closed)
+        self._budget_win = win
+        win.show()
+
+    def _on_budget_closed(self, _obj=None) -> None:
+        self._budget_win = None
 
     def _populate_category_combo(self) -> None:
         """Rebuild the filter-bar Category combo. Preserves the
