@@ -179,6 +179,15 @@ class ImportService:
 
         classified: list[ClassifiedTransaction] = []
         new_count = dup_count = match_count = 0
+        # Hashes already assigned to a row in *this* batch. Used to resolve
+        # within-batch collisions on the composite-hash path — two CSV rows
+        # with the same date, amount, and payee (very common when the source
+        # has no payee column, or when the user does two coffees on the same
+        # day at the same price) would otherwise produce the same hash and
+        # blow up the UNIQUE(account_id, import_hash) constraint on commit.
+        # The suffix is deterministic, so re-importing the same file gets the
+        # same hashes and cross-batch duplicate detection still works.
+        batch_seen_hashes: set[str] = set()
 
         for raw in raw_txns:
             date_iso = raw["date"]
@@ -193,8 +202,14 @@ class ImportService:
             if fitid:
                 import_hash = fitid
             else:
-                import_hash = compute_hash(account_iri, date_iso, str(amount), payee_raw)
+                base_hash = compute_hash(account_iri, date_iso, str(amount), payee_raw)
+                import_hash = base_hash
+                n = 1
+                while import_hash in batch_seen_hashes:
+                    import_hash = f"{base_hash}:{n}"
+                    n += 1
                 fitid = import_hash
+            batch_seen_hashes.add(import_hash)
 
             # Signed amount in the database carries direction; the matcher
             # compares against that, so we sign here.
@@ -248,6 +263,14 @@ class ImportService:
 
     def get_pending_map(self, token: str) -> Optional[PendingCsvMap]:
         return self._pending_maps.get(token)
+
+    def discard_pending_map(self, token: str) -> None:
+        """Drop a staged mapping session (e.g. user cancelled the wizard).
+
+        Idempotent — no error if the token is already gone. Frees the staged
+        file bytes the PendingCsvMap was holding in memory.
+        """
+        self._pending_maps.pop(token, None)
 
     def apply_mapping_and_stage(
         self, token: str, mapping: csv_parser.CsvColumnMapping,

@@ -16,6 +16,7 @@ without needing the original conversation transcript.
 - **Basic management round complete (2026-06-05):** new + delete + bulk-edit transaction (Ctrl+E modal with per-field checkboxes); account CRUD (create / edit / delete) with opening balance; payee + category management dialogs with rename / merge / delete (cross-merge/-kind-merge rejected explicitly); category `kind` (income/expense/transfer) with cascade on reparent and direct Change Kind verb; Banktivity-style account folders in the sidebar with balance roll-up; File → Save Copy As… / Open… for `.mfl` snapshots; register search now covers payee/memo/amount/date and is comma-insensitive; category combos in dialogs are searchable typeaheads.
 - **Reports round 1 (2026-06-05):** Reports → Spending Over Time (stacked bar by top-level expense category group, granularity weekly/monthly/quarterly/annually, date range, account/category/Uncategorised filters, average line, strict-outflow semantics per ADR-018); Reports → Net Worth (Pocketsmith-style three-column layout, big total + horizontal proportional bar + colour-coded legend / Assets / Debts, grouped by account type with per-account drill-down, +Asset / +Debt buttons opening the existing AccountDialog).
 - **Transfers (2026-06-05):** category-driven (ADR-020). No dedicated New Transfer verb — picking a `kind='transfer'` category on any flow (New Transaction, inline cell edit, Bulk Edit) prompts for the destination account and creates a partner row sharing one `transfer_id`. Direction inferred from source amount sign. Delete is partner-aware. Migration 0004.
+- **Generic CSV mapping wizard (2026-06-05):** unknown-format CSVs (Pocketsmith, etc.) now open a `CsvMappingDialog` — file-preview at top, mapping form in the middle, live after-mapping preview at the bottom (ADR-021). Smart defaults pre-fill all five fields from the existing alias lists; user just confirms for conventional layouts. No schema change. Known formats still commit silently per the no-dialog-for-known-imports rule. Saved mapping profiles (auto-skip the dialog for repeat imports) are explicitly deferred to a future ADR. Shipped alongside a fix to `_classify_and_stage` so within-batch composite-hash collisions (two CSV rows with the same date/amount/empty-payee) get a deterministic `:N` suffix instead of blowing up the `UNIQUE(account_id, import_hash)` constraint at commit.
 - **Original PySide6 prototype kept at `prototype_register/`** as a reference for the data-grid pattern; it's not the main app.
 - **Sister app MRL stays RDF-based.** MFL ↔ MRL integration is now at the data-exchange boundary, not shared storage.
 
@@ -223,6 +224,7 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │       ├── register_model.py        # QAbstractTableModel — single-account + all-transactions modes
 │       ├── filter_proxy.py          # Sort / filter on underlying values
 │       ├── delegates.py             # Category + Status combo delegates
+│       ├── csv_mapping_dialog.py    # ADR-021: column-mapping wizard for unknown CSV formats
 │       └── sidebar.py               # Account list with "All transactions" entry
 └── prototype_register/              # Original PySide6 prototype — kept for reference
     ├── README.md
@@ -256,7 +258,7 @@ Items (1)–(3) cluster around a single custom typeahead delegate and should be 
 
 ### Other deferred items
 
-- **Generic-CSV column mapping UI.** When `parse_and_stage` returns `"map"` the GUI currently shows a "coming soon" message. Build the mapping UI on top of `apply_mapping_and_stage` so unknown bank-CSV formats can be imported with user-supplied column mappings. (Known formats — Banktivity, credit-card, OFX/QFX — already commit silently per the no-dialog feedback rule; the mapping UI is *only* for genuine unknowns.)
+- **Saved CSV mapping profiles.** Follow-up to ADR-021: persist the mapping the user just used (keyed by a normalised header signature) so the next Pocketsmith (or other unknown-format) import skips the wizard and commits silently. Needs its own ADR — header-signature scheme, conflict handling when export columns are renamed, profile-management UI (edit/rename/delete).
 - **QIF parser.** v0.2 high-priority; lift the QIF format alongside the existing OFX/CSV parsers.
 - **Categorisation rules engine.** Schema reserves the `rule` table; no service uses it yet.
 - **Per-lot IRR / ROI.** Schema is in place (`lot`, `valuation`); no computation yet.
@@ -291,6 +293,7 @@ Items (1)–(3) cluster around a single custom typeahead delegate and should be 
 | ADR-018 | Reports framework + first chart — Spending Over Time | **Accepted 2026-06-05** |
 | ADR-019 | Net Worth report — three-column Assets / Net Worth / Debts | **Accepted 2026-06-05** |
 | ADR-020 | Account transfers — category-driven, two linked txns sharing one transfer_id | **Accepted 2026-06-05** |
+| ADR-021 | Generic CSV column-mapping wizard | **Accepted 2026-06-05** |
 
 Full index and summaries: [`docs/adr/README.md`](docs/adr/README.md).
 
@@ -304,6 +307,7 @@ Most legacy-specific pitfalls only matter while maintaining the v0.1 web app; th
 1. **Windows date formatting** — `%-d` doesn't work. Use `f"{d.day} {d.strftime('%b %Y')}"`.
 2. **Full file replacements lose manually-added code** — verify imports survive after any full Write. The `import hashlib` / `compute_hash` pair was lost more than once in v0.1; don't repeat the mistake on the rewrite.
 3. **IRI namespace discipline** — Transactions are MFL namespace, accounts/person are MRL. Carrying this into SQLite as stored strings means the mistake travels silently if you generate the wrong prefix on insert.
+4. **CSV import hashes can collide within one batch.** The composite `date|amount|payee_raw` hash isn't unique across a single file — two coffees on the same day at the same price, or any rows with an unmapped payee column, will collide. `_classify_and_stage` resolves this with a deterministic `:N` suffix; any future rewrite of the staging path must preserve this or the `UNIQUE(account_id, import_hash)` constraint will fire at commit.
 
 **Legacy-only:**
 4. **pyoxigraph ASK returns bool** — `bool(store.query("ASK {...}"))`.

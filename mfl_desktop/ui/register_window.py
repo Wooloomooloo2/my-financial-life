@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -35,6 +36,7 @@ from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui.account_dialog import AccountDialog
 from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
+from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
 from mfl_desktop.ui.delegates import CategoryDelegate, StatusDelegate
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.payees_dialog import PayeesDialog
@@ -800,17 +802,45 @@ class RegisterWindow(QMainWindow):
             return
 
         if next_step == "map":
-            QMessageBox.information(
-                self, "Column mapping needed",
-                "This CSV format requires column mapping, which is coming "
-                "in a future update. Please use OFX/QFX or a Banktivity "
-                "export for now.",
-            )
-            return
+            pending_map = self._service.get_pending_map(token)
+            if pending_map is None:
+                # Token expired between stage and dialog construction — should
+                # not happen but degrade gracefully.
+                return
+            if not pending_map.headers:
+                QMessageBox.warning(
+                    self, "Cannot map this file",
+                    "The CSV file appears to have no header row, so MFL can't "
+                    "offer column names to map. Please add headers to the "
+                    "first row and try again.",
+                )
+                self._service.discard_pending_map(token)
+                return
+            dialog = CsvMappingDialog(pending_map, parent=self)
+            if dialog.exec() != QDialog.Accepted or dialog.mapping is None:
+                self._service.discard_pending_map(token)
+                return
+            try:
+                token = self._service.apply_mapping_and_stage(
+                    token, dialog.mapping,
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Import failed",
+                    f"Could not apply the column mapping:\n\n{e}",
+                )
+                return
 
-        # Known format — commit directly with suggested status and auto-accept
-        # all potential matches (per ADR-010 §6 and the no-dialog-for-known-
-        # imports feedback). Nothing to ask the user; just do it.
+        # Known format (or just-mapped generic CSV) — commit directly with
+        # suggested status and auto-accept all potential matches. Per ADR-010 §6,
+        # the no-dialog-for-known-imports feedback, and ADR-021's commit path:
+        # once the format is understood, nothing to ask the user; just do it.
+        self._commit_pending(token)
+
+    def _commit_pending(self, token: str) -> None:
+        """Commit a staged PendingImport silently and show the result in the
+        status bar. Shared by the known-format and just-mapped paths in
+        _on_import."""
         pending = self._service.get_pending(token)
         if pending is None:
             return
@@ -832,7 +862,7 @@ class RegisterWindow(QMainWindow):
         self._refresh_categories_view()
         self._refresh_sidebar_balances()
         self.statusBar().showMessage(
-            f"Imported {result.imported} new into {self._account.name} · "
+            f"Imported {result.imported} new into {pending.account_name} · "
             f"{result.skipped} skipped · "
             f"{result.matched} matched  "
             f"(status: {pending.suggested_status})",

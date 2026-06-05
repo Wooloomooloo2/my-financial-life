@@ -379,6 +379,10 @@ _CREDIT_ALIASES = ("credit", "credit amount", "deposits", "deposit")
 _PAYEE_ALIASES  = ("description", "payee", "reference", "details",
                    "transaction description", "narrative")
 _MEMO_ALIASES   = ("memo", "note", "notes", "additional info")
+# Used only by the mapping wizard's smart-default scan. The generic parser
+# itself does not look for a category column — categories on the generic path
+# come from the wizard's explicit mapping.
+_CATEGORY_ALIASES = ("category", "categories", "tag", "tags")
 
 
 def _parse_generic(content: str) -> list[dict]:
