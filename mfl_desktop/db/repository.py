@@ -68,6 +68,11 @@ class TransactionRow:
     Amount is Decimal (signed; negative = debit). Running balance is computed
     in date order at load time and is only meaningful in single-account view
     — `list_all_transactions` returns rows with running_balance = 0.
+
+    `transfer_id`, when present, indicates this row is one half of a
+    transfer (per ADR-020) — the partner shares the same value. Used by
+    the register window to distinguish "already a transfer" from "could
+    become a transfer" when the user picks a transfer-kind category.
     """
     id: int
     iri: str
@@ -82,6 +87,7 @@ class TransactionRow:
     status: str
     memo: str
     running_balance: Decimal
+    transfer_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +127,7 @@ class CategoryChoice:
     name: str
     parent_name: str   # '' if top-level — used to disambiguate sibling-name collisions
     source: str
+    kind: str = "expense"
 
 
 # ── Identifier helpers (ADR-006) ────────────────────────────────────────────
@@ -132,6 +139,10 @@ def new_transaction_iri() -> str:
 
 def new_import_batch_iri() -> str:
     return f"mfl:ImportBatch_{uuid.uuid4().hex[:8]}"
+
+
+def new_transfer_iri() -> str:
+    return f"mfl:Transfer_{uuid.uuid4().hex[:8]}"
 
 
 # ── Repository ──────────────────────────────────────────────────────────────
@@ -1146,7 +1157,8 @@ class Repository:
             "       t.posted_date, t.amount, "
             "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
-            "       t.status, COALESCE(t.memo, '') AS memo "
+            "       t.status, COALESCE(t.memo, '') AS memo, "
+            "       t.transfer_id "
             "FROM txn t "
             "JOIN      account a  ON a.id = t.account_id "
             "LEFT JOIN payee p    ON p.id = t.payee_id "
@@ -1167,6 +1179,7 @@ class Repository:
                 category_id=r["category_id"], category_name=r["category_name"],
                 status=r["status"], memo=r["memo"],
                 running_balance=running,
+                transfer_id=r["transfer_id"],
             ))
         return rows
 
@@ -1182,7 +1195,8 @@ class Repository:
             "       t.posted_date, t.amount, "
             "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
-            "       t.status, COALESCE(t.memo, '') AS memo "
+            "       t.status, COALESCE(t.memo, '') AS memo, "
+            "       t.transfer_id "
             "FROM txn t "
             "JOIN      account a  ON a.id = t.account_id "
             "LEFT JOIN payee p    ON p.id = t.payee_id "
@@ -1198,25 +1212,133 @@ class Repository:
                 category_id=r["category_id"], category_name=r["category_name"],
                 status=r["status"], memo=r["memo"],
                 running_balance=Decimal("0.00"),
+                transfer_id=r["transfer_id"],
             )
             for r in cur
         ]
 
-    def list_categories_flat(self) -> list[CategoryChoice]:
+    # ── Reports (read-only aggregates) ──
+
+    _BUCKET_EXPR = {
+        # Monday-anchored week ('YYYY-Wnn'). SQLite's %W uses Monday as
+        # the first day of the week, which is what UK personal-finance
+        # reports usually expect.
+        "week":    "strftime('%Y-W%W', t.posted_date)",
+        "month":   "strftime('%Y-%m', t.posted_date)",
+        # 'YYYY-Qn' for chronological sortability.
+        "quarter": (
+            "strftime('%Y', t.posted_date) || '-Q' "
+            "|| ((CAST(strftime('%m', t.posted_date) AS INTEGER) - 1) / 3 + 1)"
+        ),
+        "year":    "strftime('%Y', t.posted_date)",
+    }
+
+    def spending_aggregates(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        granularity: str,
+        account_ids: Optional[list[int]] = None,
+        include_uncategorised: bool = True,
+    ) -> list[dict]:
+        """Outflow spending per (bucket, category_id) over a date range.
+
+        v1 uses a **strict outflow** definition: only transactions whose
+        amount is negative on a `kind='expense'` category contribute. This
+        keeps the chart's bars unambiguously positive and avoids the
+        "Uncategorised has £20k of income misclassified as expense" trap
+        (ADR-014 wrong-bucket risk, ADR-018 §spending semantics).
+
+        Refund handling — where a positive amount on an expense category
+        reduces the bucket — is deferred to the future Cash Flow report,
+        which interprets signed amounts directly.
+
+        Returns a list of dicts: ``{bucket, category_id, spending_pence}``
+        — pence are always ≥ 0. Caller rolls category_id up to a "report
+        group" id (see `mfl_desktop.reports.category_group_map`) and
+        aggregates further.
+        """
+        if granularity not in self._BUCKET_EXPR:
+            raise ValueError(
+                f"Unknown granularity {granularity!r}; expected one of "
+                f"{tuple(self._BUCKET_EXPR.keys())}"
+            )
+        bucket_expr = self._BUCKET_EXPR[granularity]
+
+        filters: list[str] = []
+        params: list = [date_from, date_to]
+
+        if account_ids is not None:
+            if not account_ids:
+                # Empty account selection → no rows.
+                return []
+            ph = ",".join("?" * len(account_ids))
+            filters.append(f"t.account_id IN ({ph})")
+            params.extend(account_ids)
+
+        if not include_uncategorised:
+            filters.append("t.category_id != ?")
+            params.append(UNCATEGORISED_ID)
+
+        filter_sql = ""
+        if filters:
+            filter_sql = " AND " + " AND ".join(filters)
+
+        sql = (
+            f"SELECT {bucket_expr} AS bucket, "
+            f"       t.category_id AS category_id, "
+            f"       SUM(-t.amount) AS spending_pence "
+            f"FROM txn t "
+            f"JOIN category c ON c.id = t.category_id "
+            f"WHERE t.posted_date BETWEEN ? AND ? "
+            f"  AND c.kind = 'expense' "
+            f"  AND t.amount < 0 "  # strict outflow — see docstring
+            f"  {filter_sql} "
+            f"GROUP BY bucket, t.category_id "
+            f"ORDER BY bucket"
+        )
+        cur = self._conn.execute(sql, params)
+        return [
+            {
+                "bucket": r["bucket"],
+                "category_id": int(r["category_id"]),
+                "spending_pence": int(r["spending_pence"]),
+            }
+            for r in cur
+        ]
+
+    def list_categories_flat(
+        self, kinds: Optional[tuple[str, ...]] = None,
+    ) -> list[CategoryChoice]:
         """Return all active categories with their immediate parent name for
         disambiguation. Sorted by parent then name. The parent_name is the
-        immediate parent only — for deep nesting the full path is not shown."""
+        immediate parent only — for deep nesting the full path is not shown.
+
+        `kinds`, when provided, narrows the result to categories of those
+        kinds (e.g. `('transfer',)` for the transfer-target picker)."""
+        params: list = []
+        kind_clause = ""
+        if kinds is not None:
+            if not kinds:
+                return []
+            ph = ",".join("?" * len(kinds))
+            kind_clause = f" AND c.kind IN ({ph})"
+            params.extend(kinds)
         cur = self._conn.execute(
-            "SELECT c.id, c.name, c.source, COALESCE(p.name, '') AS parent_name "
+            "SELECT c.id, c.name, c.source, c.kind, "
+            "       COALESCE(p.name, '') AS parent_name "
             "FROM category c "
             "LEFT JOIN category p ON p.id = c.parent_id "
-            "WHERE c.archived_at IS NULL "
-            "ORDER BY COALESCE(p.name, ''), c.name"
+            f"WHERE c.archived_at IS NULL{kind_clause} "
+            "ORDER BY COALESCE(p.name, ''), c.name",
+            params,
         )
         return [
             CategoryChoice(
                 id=r["id"], name=r["name"],
                 parent_name=r["parent_name"], source=r["source"],
+                kind=r["kind"],
             )
             for r in cur
         ]
@@ -1331,18 +1453,329 @@ class Repository:
             raise
 
     def delete_transactions(self, txn_ids: list[int]) -> int:
-        """Delete one or more transactions by id. Returns the rows-affected
-        count. Commits on success; rolls back on error."""
+        """Delete one or more transactions by id, **expanded to include any
+        transfer partners** (per ADR-020 — both halves of a transfer are one
+        logical operation, so deleting one removes both). Returns the count
+        of rows actually deleted. Commits on success; rolls back on error."""
         if not txn_ids:
             return 0
-        placeholders = ",".join("?" * len(txn_ids))
+        expanded = self.expand_transfer_partners(txn_ids)
+        placeholders = ",".join("?" * len(expanded))
         try:
             cur = self._conn.execute(
                 f"DELETE FROM txn WHERE id IN ({placeholders})",
-                tuple(txn_ids),
+                tuple(expanded),
             )
             self.commit()
             return cur.rowcount
         except Exception:
             self.rollback()
             raise
+
+    def expand_transfer_partners(self, txn_ids: list[int]) -> list[int]:
+        """Given a list of txn ids, return the same set plus the partner
+        of any id whose row has a transfer_id. Stable iteration order:
+        original ids first, then any added partners. Used by both the
+        delete path and the UI's confirmation prompt so the user sees the
+        true count of rows that will be removed."""
+        if not txn_ids:
+            return []
+        placeholders = ",".join("?" * len(txn_ids))
+        cur = self._conn.execute(
+            f"SELECT id FROM txn WHERE transfer_id IS NOT NULL AND "
+            f"transfer_id IN ("
+            f"  SELECT transfer_id FROM txn "
+            f"  WHERE id IN ({placeholders}) AND transfer_id IS NOT NULL"
+            f")",
+            tuple(txn_ids),
+        )
+        partners = {r["id"] for r in cur}
+        # Preserve original ordering; append unseen partners at the end.
+        seen = set(txn_ids)
+        result = list(txn_ids)
+        for pid in partners:
+            if pid not in seen:
+                seen.add(pid)
+                result.append(pid)
+        return result
+
+    def get_default_transfer_category_id(self) -> Optional[int]:
+        """The seeded top-level 'Transfer' category (added by migration 0002).
+        Used as the default in the New Transfer dialog. Falls back to any
+        transfer-kind row if the seeded one was renamed/deleted."""
+        row = self._conn.execute(
+            "SELECT id FROM category "
+            "WHERE kind = 'transfer' AND archived_at IS NULL "
+            "  AND parent_id IS NULL AND name = 'Transfer' LIMIT 1"
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+        row = self._conn.execute(
+            "SELECT id FROM category "
+            "WHERE kind = 'transfer' AND archived_at IS NULL "
+            "ORDER BY parent_id IS NULL DESC, id LIMIT 1"
+        ).fetchone()
+        return row["id"] if row is not None else None
+
+    def create_transfer(
+        self,
+        *,
+        from_account_id: int,
+        to_account_id: int,
+        posted_date: str,
+        amount: Decimal,        # positive magnitude
+        category_id: int,
+        memo: str = "",
+        status: str = "Pending",
+    ) -> tuple[int, int]:
+        """Create a transfer between two accounts as two linked txns.
+
+        Both rows share one `transfer_id` IRI so the delete path (and any
+        future report logic) can treat them as a single operation. The
+        source's payee is "Transfer to <dest>"; the destination's is
+        "Transfer from <source>" — that gives the register a self-
+        documenting display without a special UI marker.
+
+        Validation:
+        - source and destination must differ;
+        - amount must be > 0;
+        - status must be a valid txn.status enum value.
+
+        Atomic — either both rows are inserted or neither is. Returns the
+        ``(source_txn_id, destination_txn_id)`` pair.
+        """
+        if from_account_id == to_account_id:
+            raise ValueError("Source and destination accounts must differ.")
+        if amount <= 0:
+            raise ValueError("Transfer amount must be greater than zero.")
+        if status not in ("Pending", "Uncleared", "Cleared", "Reconciled"):
+            raise ValueError(f"Invalid status: {status!r}")
+
+        # Look up account names for the payee labels.
+        rows = self._conn.execute(
+            "SELECT id, name FROM account WHERE id IN (?, ?)",
+            (from_account_id, to_account_id),
+        ).fetchall()
+        names = {r["id"]: r["name"] for r in rows}
+        if from_account_id not in names or to_account_id not in names:
+            raise ValueError("Unknown account id passed to create_transfer.")
+        from_name = names[from_account_id]
+        to_name = names[to_account_id]
+
+        transfer_iri = new_transfer_iri()
+        try:
+            payee_to = self.get_or_create_payee(f"Transfer to {to_name}")
+            payee_from = self.get_or_create_payee(f"Transfer from {from_name}")
+            source_id = self._insert_transfer_half(
+                account_id=from_account_id,
+                amount=-amount,
+                payee_id=payee_to,
+                category_id=category_id,
+                status=status,
+                memo=memo,
+                posted_date=posted_date,
+                transfer_id=transfer_iri,
+            )
+            dest_id = self._insert_transfer_half(
+                account_id=to_account_id,
+                amount=amount,
+                payee_id=payee_from,
+                category_id=category_id,
+                status=status,
+                memo=memo,
+                posted_date=posted_date,
+                transfer_id=transfer_iri,
+            )
+            self.commit()
+            return source_id, dest_id
+        except Exception:
+            self.rollback()
+            raise
+
+    def convert_to_transfer(
+        self,
+        *,
+        txn_id: int,
+        other_account_id: int,
+    ) -> int:
+        """Pair an existing txn with a new partner row to form a transfer.
+
+        Generates one shared `transfer_id`, applies it to the existing txn,
+        and inserts a partner on `other_account_id` with the opposite-sign
+        amount. The partner's payee reads "Transfer from <source>"; the
+        existing txn's payee is left alone so any meaningful import-derived
+        payee survives. Atomic — either both rows have the transfer_id and
+        the partner exists or nothing changed. Returns the partner txn id.
+        """
+        try:
+            partner_id = self._convert_to_transfer_unbatched(
+                txn_id, other_account_id,
+            )
+            self.commit()
+            return partner_id
+        except Exception:
+            self.rollback()
+            raise
+
+    def bulk_convert_to_transfers(
+        self,
+        txn_ids: list[int],
+        other_account_id: int,
+    ) -> list[int]:
+        """Convert each of `txn_ids` into a transfer paired with a fresh
+        partner on `other_account_id`. Each pair gets its own
+        `transfer_id` — they're independent transfers, just submitted as
+        one batch. All-or-nothing: any failure rolls back every change.
+        Returns the partner ids in the order they were created."""
+        if not txn_ids:
+            return []
+        try:
+            partner_ids = [
+                self._convert_to_transfer_unbatched(tid, other_account_id)
+                for tid in txn_ids
+            ]
+            self.commit()
+            return partner_ids
+        except Exception:
+            self.rollback()
+            raise
+
+    def bulk_set_category_and_convert(
+        self,
+        txn_ids: list[int],
+        *,
+        category_id: int,
+        other_account_id: int,
+        payee_name=None,
+        status=None,
+        memo=None,
+    ) -> list[int]:
+        """Atomic combination of `bulk_update_transactions` and
+        `bulk_convert_to_transfers` used by the bulk-edit dispatcher when
+        the user picks a transfer-kind category. The category is updated
+        (so the partner inherits the new one) plus optional other fields,
+        then a partner row is created per source txn against
+        `other_account_id`. All in one SQL transaction.
+
+        `payee_name` / `status` / `memo` follow the same _UNSET sentinel
+        convention as `bulk_update_transactions` — leave them at the
+        default to skip that column. Returns the partner ids in input
+        order."""
+        if not txn_ids:
+            return []
+        placeholders = ",".join("?" * len(txn_ids))
+        try:
+            self._conn.execute(
+                f"UPDATE txn SET category_id = ? WHERE id IN ({placeholders})",
+                (int(category_id), *txn_ids),
+            )
+            if payee_name is not self._UNSET and payee_name is not None:
+                clean = (payee_name or "").strip()
+                payee_id = (
+                    self.get_or_create_payee(clean) if clean else None
+                )
+                self._conn.execute(
+                    f"UPDATE txn SET payee_id = ? WHERE id IN ({placeholders})",
+                    (payee_id, *txn_ids),
+                )
+            if status is not self._UNSET and status is not None:
+                if status not in ("Pending", "Uncleared", "Cleared", "Reconciled"):
+                    raise ValueError(f"Invalid status: {status!r}")
+                self._conn.execute(
+                    f"UPDATE txn SET status = ? WHERE id IN ({placeholders})",
+                    (status, *txn_ids),
+                )
+            if memo is not self._UNSET and memo is not None:
+                value = memo.strip() if isinstance(memo, str) else memo
+                self._conn.execute(
+                    f"UPDATE txn SET memo = ? WHERE id IN ({placeholders})",
+                    (value or None, *txn_ids),
+                )
+            partner_ids = [
+                self._convert_to_transfer_unbatched(tid, other_account_id)
+                for tid in txn_ids
+            ]
+            self.commit()
+            return partner_ids
+        except Exception:
+            self.rollback()
+            raise
+
+    def _convert_to_transfer_unbatched(
+        self, txn_id: int, other_account_id: int,
+    ) -> int:
+        """Internal helper used by both single and bulk convert. Does NOT
+        commit — caller is responsible for the transaction boundary."""
+        row = self._conn.execute(
+            "SELECT t.id, t.account_id, t.amount, t.posted_date, "
+            "       t.category_id, t.status, t.memo, t.transfer_id, "
+            "       a.name AS account_name "
+            "FROM txn t "
+            "JOIN account a ON a.id = t.account_id "
+            "WHERE t.id = ?",
+            (txn_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No transaction with id {txn_id}")
+        if row["transfer_id"] is not None:
+            raise ValueError(
+                f"Transaction {txn_id} is already part of a transfer."
+            )
+        if row["account_id"] == other_account_id:
+            raise ValueError(
+                "Destination account must differ from the transaction's "
+                "own account."
+            )
+        if int(row["amount"]) == 0:
+            raise ValueError(
+                "Cannot convert a zero-amount transaction to a transfer."
+            )
+        transfer_iri = new_transfer_iri()
+        self._conn.execute(
+            "UPDATE txn SET transfer_id = ? WHERE id = ?",
+            (transfer_iri, txn_id),
+        )
+        # Partner inherits date, category, status, memo from the existing
+        # txn so reports treat the pair as one consistent block.
+        partner_payee_id = self.get_or_create_payee(
+            f"Transfer from {row['account_name']}"
+        )
+        partner_iri = new_transaction_iri()
+        partner_amount_pence = -int(row["amount"])
+        cur = self._conn.execute(
+            "INSERT INTO txn "
+            "(iri, account_id, posted_date, amount, payee_id, category_id, "
+            " status, memo, import_hash, import_batch_id, transfer_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
+            (
+                partner_iri, other_account_id, row["posted_date"],
+                partner_amount_pence, partner_payee_id, row["category_id"],
+                row["status"], row["memo"], transfer_iri,
+            ),
+        )
+        return cur.lastrowid
+
+    def _insert_transfer_half(
+        self,
+        *,
+        account_id: int,
+        amount: Decimal,
+        payee_id: Optional[int],
+        category_id: int,
+        status: str,
+        memo: str,
+        posted_date: str,
+        transfer_id: str,
+    ) -> int:
+        iri = new_transaction_iri()
+        cur = self._conn.execute(
+            "INSERT INTO txn "
+            "(iri, account_id, posted_date, amount, payee_id, category_id, "
+            " status, memo, import_hash, import_batch_id, transfer_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
+            (
+                iri, account_id, posted_date, decimal_to_pence(amount),
+                payee_id, category_id, status, memo or None, transfer_id,
+            ),
+        )
+        return cur.lastrowid

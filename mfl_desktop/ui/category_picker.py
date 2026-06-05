@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QCompleter, QComboBox
 
 from mfl_desktop.db.repository import CategoryChoice
 
@@ -47,6 +47,12 @@ def make_category_picker(
                 break
     completer = combo.completer()
     if completer is not None:
+        # PopupCompletion: typing pops a dropdown of matching items rather
+        # than splicing the matched suffix into the user's input. The
+        # default InlineCompletion + MatchContains combination produces
+        # frankenwords like "sub" + "ls and Subscriptions" when the
+        # matched text overlaps the typed prefix.
+        completer.setCompletionMode(QCompleter.PopupCompletion)
         completer.setFilterMode(Qt.MatchContains)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
     return combo

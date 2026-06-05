@@ -40,6 +40,8 @@ from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.payees_dialog import PayeesDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui.sidebar import KIND_ROLE, AccountSidebar
+from mfl_desktop.ui.net_worth_window import NetWorthWindow
+from mfl_desktop.ui.spending_report_window import SpendingReportWindow
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
 
 STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
@@ -227,6 +229,11 @@ class RegisterWindow(QMainWindow):
         self._model = model
         self._proxy.setSourceModel(self._model)
         self._model.reload()
+        # Inline category edits trigger the transfer-conversion prompt
+        # via dataChanged (ADR-020). Connecting per-model is safe — the
+        # old model is dropped when self._model is reassigned, taking
+        # its connection with it.
+        self._model.dataChanged.connect(self._on_model_data_changed)
 
         col_index = {name: i for i, (_, name, _) in enumerate(self._model.COLUMNS)}
         # Clear all delegates then reattach where applicable, since column
@@ -349,6 +356,16 @@ class RegisterWindow(QMainWindow):
         self._manage_categories_action.triggered.connect(self._on_manage_categories)
         manage_menu.addAction(self._manage_categories_action)
 
+        reports_menu = self.menuBar().addMenu("&Reports")
+
+        self._spending_report_action = QAction("&Spending Over Time…", self)
+        self._spending_report_action.triggered.connect(self._on_spending_report)
+        reports_menu.addAction(self._spending_report_action)
+
+        self._net_worth_action = QAction("&Net Worth…", self)
+        self._net_worth_action.triggered.connect(self._on_net_worth)
+        reports_menu.addAction(self._net_worth_action)
+
     # ── new / delete transaction ──
 
     def _on_new_transaction(self) -> None:
@@ -370,6 +387,48 @@ class RegisterWindow(QMainWindow):
             return
         values = dialog.values()
         if values is None:
+            return
+
+        # ADR-020: a transfer-kind category turns this into a transfer —
+        # prompt for the destination, then create both halves via
+        # create_transfer. Otherwise insert as a normal txn.
+        if self._category_kind(values.category_id) == "transfer":
+            other_id = self._prompt_destination_account(
+                exclude_account_ids={values.account_id},
+                title="New transfer",
+                message=(
+                    "This category is a transfer category — "
+                    "which account is the other side?"
+                ),
+            )
+            if other_id is None:
+                return
+            # Direction is encoded in the dialog's signed amount: negative
+                # = "money out from this account" so dialog account is the
+            # source; positive = inflow, dialog account is the destination.
+            if values.amount < 0:
+                from_id, to_id = values.account_id, other_id
+            else:
+                from_id, to_id = other_id, values.account_id
+            try:
+                self._repo.create_transfer(
+                    from_account_id=from_id,
+                    to_account_id=to_id,
+                    posted_date=values.posted_date,
+                    amount=abs(values.amount),
+                    category_id=values.category_id,
+                    memo=values.memo,
+                    status=values.status,
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Could not save transfer",
+                    f"The transfer was not saved:\n\n{e}",
+                )
+                return
+            self._model.reload()
+            self._refresh_sidebar_balances()
+            self.statusBar().showMessage("Transfer recorded", 4000)
             return
 
         try:
@@ -398,15 +457,109 @@ class RegisterWindow(QMainWindow):
         self._refresh_sidebar_balances()
         self.statusBar().showMessage("Transaction added", 4000)
 
+    def _on_model_data_changed(self, top_left, _bottom_right, _roles) -> None:
+        """Detect inline category edits that set a transfer-kind category
+        on a non-transfer row and pop the destination-account prompt
+        (ADR-020). Other edits — payee, status, memo — pass through
+        without action."""
+        col_idx = top_left.column()
+        if col_idx < 0 or col_idx >= len(self._model.COLUMNS):
+            return
+        col_name = self._model.COLUMNS[col_idx][1]
+        if col_name != "category_name":
+            return
+        row = self._model.row_at(top_left.row())
+        if row.transfer_id is not None:
+            return
+        if self._category_kind(row.category_id) != "transfer":
+            return
+        other_id = self._prompt_destination_account(
+            exclude_account_ids={row.account_id},
+            title="New transfer",
+            message=(
+                "This category is a transfer category — "
+                "which account is the other side?"
+            ),
+        )
+        if other_id is None:
+            # User cancelled. Row is left with the transfer-kind category
+            # but no partner — a recoverable rough edge (they can come
+            # back and pick the destination from bulk edit, or re-set
+            # the category to trigger the prompt again).
+            return
+        try:
+            self._repo.convert_to_transfer(
+                txn_id=row.id, other_account_id=other_id,
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Could not create transfer partner", str(e),
+            )
+            return
+        self._model.reload()
+        self._refresh_sidebar_balances()
+        self.statusBar().showMessage("Transfer partner created", 4000)
+
+    # ── transfer helpers (category-driven, ADR-020) ──
+
+    def _category_kind(self, category_id: int) -> Optional[str]:
+        """Look up a category's kind from the window's cached list."""
+        for c in self._categories:
+            if c.id == category_id:
+                return c.kind
+        return None
+
+    def _prompt_destination_account(
+        self,
+        *,
+        exclude_account_ids: set[int],
+        title: str = "Pick destination account",
+        message: str = "Transfer to which account?",
+    ) -> Optional[int]:
+        """Modal account picker for the destination half of a transfer.
+
+        Returns the chosen account id, or None if the user cancelled or
+        there are no candidate accounts. Used by the new-transaction
+        save path, the inline-category-edit hook, and bulk edit."""
+        accounts = self._repo.list_accounts()
+        candidates = [a for a in accounts if a.id not in exclude_account_ids]
+        if not candidates:
+            QMessageBox.information(
+                self, "No other account",
+                "You need at least one other account to record a transfer.",
+            )
+            return None
+        names = [f"{a.name}  ·  {a.currency}" for a in candidates]
+        choice, ok = QInputDialog.getItem(
+            self, title, message, names, 0, False,
+        )
+        if not ok:
+            return None
+        for label, acct in zip(names, candidates):
+            if label == choice:
+                return acct.id
+        return None
+
     def _on_delete_transactions(self) -> None:
         ids = self._selected_txn_ids()
         if not ids:
             return
-        msg = (
-            f"Delete {len(ids)} transactions?"
-            if len(ids) > 1
-            else "Delete this transaction?"
-        )
+        # If any selected row is part of a transfer, both halves will be
+        # removed — surface that in the confirmation so the user isn't
+        # surprised by a sibling vanishing from a different account.
+        expanded = self._repo.expand_transfer_partners(ids)
+        partner_count = len(expanded) - len(ids)
+        if len(expanded) > 1:
+            msg = f"Delete {len(expanded)} transactions?"
+        else:
+            msg = "Delete this transaction?"
+        if partner_count > 0:
+            msg += (
+                f"\n\n{partner_count} of these are linked transfer "
+                f"partner{'s' if partner_count != 1 else ''} that will be "
+                f"removed automatically — both halves of a transfer "
+                f"always go together."
+            )
         confirm = QMessageBox.question(
             self, "Confirm delete", msg,
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
@@ -471,6 +624,56 @@ class RegisterWindow(QMainWindow):
         changes = dialog.values()
         if not changes:
             return
+
+        # ADR-020 category-driven transfers: if the user picked a
+        # transfer-kind category, prompt for the destination and convert
+        # every selected row into a transfer (plus apply any other ticked
+        # fields). Otherwise the existing bulk_update path runs as before.
+        new_category_id = changes.get("category_id")
+        if (
+            new_category_id is not None
+            and self._category_kind(new_category_id) == "transfer"
+        ):
+            # Collect the source accounts to exclude from the destination
+            # picker — a transfer to itself is invalid.
+            source_accounts: set[int] = set()
+            for proxy_idx in self._table.selectionModel().selectedRows():
+                source_idx = self._proxy.mapToSource(proxy_idx)
+                if not source_idx.isValid():
+                    continue
+                source_accounts.add(self._model.row_at(source_idx.row()).account_id)
+            other_id = self._prompt_destination_account(
+                exclude_account_ids=source_accounts,
+                title="Bulk transfer",
+                message=(
+                    "You picked a transfer category. Which account is the "
+                    "other side for these transactions?"
+                ),
+            )
+            if other_id is None:
+                return
+            try:
+                self._repo.bulk_set_category_and_convert(
+                    ids,
+                    category_id=new_category_id,
+                    other_account_id=other_id,
+                    payee_name=changes.get("payee_name", self._repo._UNSET),
+                    status=changes.get("status", self._repo._UNSET),
+                    memo=changes.get("memo", self._repo._UNSET),
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Bulk transfer failed",
+                    f"The change was not applied:\n\n{e}",
+                )
+                return
+            self._model.reload()
+            self._refresh_sidebar_balances()
+            self.statusBar().showMessage(
+                f"Converted {len(ids)} transactions to transfers", 4000,
+            )
+            return
+
         try:
             self._repo.bulk_update_transactions(ids, **changes)
         except Exception as e:
@@ -480,9 +683,8 @@ class RegisterWindow(QMainWindow):
             )
             return
         self._model.reload()
-        # If a category changed, balances and sidebar don't move but the
-        # category column does; if payee changed it doesn't affect totals.
-        # Skip the sidebar refresh — bulk edit doesn't move amounts.
+        # Bulk edit (non-transfer path) doesn't move amounts, so skip the
+        # sidebar balance refresh.
         self.statusBar().showMessage(
             f"Updated {len(ids)} transactions", 4000,
         )
@@ -973,6 +1175,43 @@ class RegisterWindow(QMainWindow):
         # refresh the lot whenever the dialog changes anything.
         dialog.categories_changed.connect(self._refresh_categories_view)
         dialog.exec()
+
+    # ── reports ──
+
+    def _on_spending_report(self) -> None:
+        """Open the Spending Over Time report. Non-modal so the user can
+        keep working in the register; instance is held on self so the
+        window stays alive after this method returns."""
+        # Reuse an existing window if one is already open — preferred over
+        # spawning duplicates on repeat clicks.
+        existing = getattr(self, "_spending_report_win", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        win = SpendingReportWindow(self._repo, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.destroyed.connect(self._on_spending_report_closed)
+        self._spending_report_win = win
+        win.show()
+
+    def _on_spending_report_closed(self, _obj=None) -> None:
+        self._spending_report_win = None
+
+    def _on_net_worth(self) -> None:
+        existing = getattr(self, "_net_worth_win", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        win = NetWorthWindow(self._repo, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.destroyed.connect(self._on_net_worth_closed)
+        self._net_worth_win = win
+        win.show()
+
+    def _on_net_worth_closed(self, _obj=None) -> None:
+        self._net_worth_win = None
 
     def _populate_category_combo(self) -> None:
         """Rebuild the filter-bar Category combo. Preserves the

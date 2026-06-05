@@ -14,6 +14,8 @@ without needing the original conversation transcript.
 - **2026-06-05 pivot:** MFL is being rebuilt as a **native desktop application** (PySide6 + SQLite) for Windows-first distribution. See [ADR-008](docs/adr/ADR-008-desktop-ui-framework.md), [ADR-009](docs/adr/ADR-009-storage-engine-for-ledger-data.md), and [ADR-010](docs/adr/ADR-010-transactional-schema-design.md).
 - **Desktop app under `mfl_desktop/` is the live target.** Multi-account register with an All-transactions cross-account view, OFX/QFX/CSV import working end-to-end through the Qt UI, layered architecture (UI → proxy → model → Repository → SQLite). Owner has loaded six months of real data into it (~1,300 transactions) and confirmed the feel.
 - **Basic management round complete (2026-06-05):** new + delete + bulk-edit transaction (Ctrl+E modal with per-field checkboxes); account CRUD (create / edit / delete) with opening balance; payee + category management dialogs with rename / merge / delete (cross-merge/-kind-merge rejected explicitly); category `kind` (income/expense/transfer) with cascade on reparent and direct Change Kind verb; Banktivity-style account folders in the sidebar with balance roll-up; File → Save Copy As… / Open… for `.mfl` snapshots; register search now covers payee/memo/amount/date and is comma-insensitive; category combos in dialogs are searchable typeaheads.
+- **Reports round 1 (2026-06-05):** Reports → Spending Over Time (stacked bar by top-level expense category group, granularity weekly/monthly/quarterly/annually, date range, account/category/Uncategorised filters, average line, strict-outflow semantics per ADR-018); Reports → Net Worth (Pocketsmith-style three-column layout, big total + horizontal proportional bar + colour-coded legend / Assets / Debts, grouped by account type with per-account drill-down, +Asset / +Debt buttons opening the existing AccountDialog).
+- **Transfers (2026-06-05):** category-driven (ADR-020). No dedicated New Transfer verb — picking a `kind='transfer'` category on any flow (New Transaction, inline cell edit, Bulk Edit) prompts for the destination account and creates a partner row sharing one `transfer_id`. Direction inferred from source amount sign. Delete is partner-aware. Migration 0004.
 - **Original PySide6 prototype kept at `prototype_register/`** as a reference for the data-grid pattern; it's not the main app.
 - **Sister app MRL stays RDF-based.** MFL ↔ MRL integration is now at the data-exchange boundary, not shared storage.
 
@@ -210,7 +212,8 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │   ├── migrations/
 │   │   ├── 0001_initial.sql         # ADR-010 schema + seeded categories
 │   │   ├── 0002_category_kind.sql   # ADR-014: kind column + Transfer seed
-│   │   └── 0003_account_folders.sql # ADR-015: account_folder + account.folder_id
+│   │   ├── 0003_account_folders.sql # ADR-015: account_folder + account.folder_id
+│   │   └── 0004_transfers.sql       # ADR-020: txn.transfer_id + partial index
 │   ├── import_engine/               # Lifted from app/core/import_engine/
 │   │   ├── ofx_parser.py            # OFX/QFX — verbatim from v0.1
 │   │   ├── csv_parser.py            # Banktivity / credit-card / generic CSV (syntax bug fixed)
@@ -249,6 +252,7 @@ Items (1)–(3) cluster around a single custom typeahead delegate and should be 
 
 - **Visible "New Transaction" button.** Today the only entry points are the Transaction menu and Ctrl+N. A toolbar / register-pane button would be more discoverable. Owner asked for this during step 1; deferred to a later UI polish pass.
 - **Unlock kind combo on New sub-category.** In the New Category dialog, when a parent is chosen the kind combo is locked to the parent's kind. For mixed-kind structures (e.g. Paycheck with Gross Pay = income and Taxes = expense beneath it), creating a different-kind child is currently two steps (create as inherited kind, then Change Kind). Editing this to leave the kind combo *unlocked* (just defaulting to parent's kind) is the obvious fix when real-world use confirms the need.
+- **Spending Over Time chart visuals.** The QtCharts default style reads "very basic and a bit 1990's". v2 polish: nicer palette (qualitative colors, accessible contrast); modern font and spacing; cleaner axis labels (e.g. `Jan 2026` instead of `2026-01`); tooltips on bar segments; optional "show numbers on bars" toggle; consider a single chart background colour and minimum gridlines. Could also add a Save Chart As Image action.
 
 ### Other deferred items
 
@@ -284,6 +288,9 @@ Items (1)–(3) cluster around a single custom typeahead delegate and should be 
 | ADR-015 | Account folders in the sidebar | **Accepted 2026-06-05** |
 | ADR-016 | File save / open model — auto-commit + Save Copy As snapshots | **Accepted 2026-06-05** |
 | ADR-017 | Bulk edit shape — modal dialog with per-field checkboxes | **Accepted 2026-06-05** |
+| ADR-018 | Reports framework + first chart — Spending Over Time | **Accepted 2026-06-05** |
+| ADR-019 | Net Worth report — three-column Assets / Net Worth / Debts | **Accepted 2026-06-05** |
+| ADR-020 | Account transfers — category-driven, two linked txns sharing one transfer_id | **Accepted 2026-06-05** |
 
 Full index and summaries: [`docs/adr/README.md`](docs/adr/README.md).
 
