@@ -13,6 +13,7 @@ without needing the original conversation transcript.
 - **v0.1 shipped** as a local web app (FastAPI + HTMX + Oxigraph). MVP complete, owner-only. Now in maintenance mode.
 - **2026-06-05 pivot:** MFL is being rebuilt as a **native desktop application** (PySide6 + SQLite) for Windows-first distribution. See [ADR-008](docs/adr/ADR-008-desktop-ui-framework.md), [ADR-009](docs/adr/ADR-009-storage-engine-for-ledger-data.md), and [ADR-010](docs/adr/ADR-010-transactional-schema-design.md).
 - **Desktop app under `mfl_desktop/` is the live target.** Multi-account register with an All-transactions cross-account view, OFX/QFX/CSV import working end-to-end through the Qt UI, layered architecture (UI → proxy → model → Repository → SQLite). Owner has loaded six months of real data into it (~1,300 transactions) and confirmed the feel.
+- **Basic management round complete (2026-06-05):** new + delete + bulk-edit transaction (Ctrl+E modal with per-field checkboxes); account CRUD (create / edit / delete) with opening balance; payee + category management dialogs with rename / merge / delete (cross-merge/-kind-merge rejected explicitly); category `kind` (income/expense/transfer) with cascade on reparent and direct Change Kind verb; Banktivity-style account folders in the sidebar with balance roll-up; File → Save Copy As… / Open… for `.mfl` snapshots; register search now covers payee/memo/amount/date and is comma-insensitive; category combos in dialogs are searchable typeaheads.
 - **Original PySide6 prototype kept at `prototype_register/`** as a reference for the data-grid pattern; it's not the main app.
 - **Sister app MRL stays RDF-based.** MFL ↔ MRL integration is now at the data-exchange boundary, not shared storage.
 
@@ -207,7 +208,9 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │   │   ├── repository.py            # Repository — the ONLY layer that touches SQL
 │   │   └── schema.py                # Migration runner (manages schema_version)
 │   ├── migrations/
-│   │   └── 0001_initial.sql         # ADR-010 schema + seeded categories
+│   │   ├── 0001_initial.sql         # ADR-010 schema + seeded categories
+│   │   ├── 0002_category_kind.sql   # ADR-014: kind column + Transfer seed
+│   │   └── 0003_account_folders.sql # ADR-015: account_folder + account.folder_id
 │   ├── import_engine/               # Lifted from app/core/import_engine/
 │   │   ├── ofx_parser.py            # OFX/QFX — verbatim from v0.1
 │   │   ├── csv_parser.py            # Banktivity / credit-card / generic CSV (syntax bug fixed)
@@ -242,6 +245,11 @@ The register window currently uses standard `QComboBox` delegates for category a
 
 Items (1)–(3) cluster around a single custom typeahead delegate and should be done together. (4) is a separate piece of work.
 
+### Polish backlog from 2026-06-05 basic-management round
+
+- **Visible "New Transaction" button.** Today the only entry points are the Transaction menu and Ctrl+N. A toolbar / register-pane button would be more discoverable. Owner asked for this during step 1; deferred to a later UI polish pass.
+- **Unlock kind combo on New sub-category.** In the New Category dialog, when a parent is chosen the kind combo is locked to the parent's kind. For mixed-kind structures (e.g. Paycheck with Gross Pay = income and Taxes = expense beneath it), creating a different-kind child is currently two steps (create as inherited kind, then Change Kind). Editing this to leave the kind combo *unlocked* (just defaulting to parent's kind) is the obvious fix when real-world use confirms the need.
+
 ### Other deferred items
 
 - **Generic-CSV column mapping UI.** When `parse_and_stage` returns `"map"` the GUI currently shows a "coming soon" message. Build the mapping UI on top of `apply_mapping_and_stage` so unknown bank-CSV formats can be imported with user-supplied column mappings. (Known formats — Banktivity, credit-card, OFX/QFX — already commit silently per the no-dialog feedback rule; the mapping UI is *only* for genuine unknowns.)
@@ -268,8 +276,14 @@ Items (1)–(3) cluster around a single custom typeahead delegate and should be 
 | ADR-007 | Data access patterns (quad vs SPARQL) | Legacy-code only |
 | ADR-008 | Desktop UI framework — PySide6 | **Accepted 2026-06-05** |
 | ADR-009 | Storage engine — SQLite | **Accepted 2026-06-05** |
-
-**ADR-010 — Transactional schema design** is the next planned ADR (account / transaction / lot / valuation / payee / category / rule / import_batch).
+| ADR-010 | Transactional schema design | **Accepted 2026-06-05** |
+| ADR-011 | Account delete policy — hard delete now, archive reserved | **Accepted 2026-06-05** |
+| ADR-012 | Payee name-management policy | **Accepted 2026-06-05** |
+| ADR-013 | Category management policy | **Accepted 2026-06-05** |
+| ADR-014 | Category kind (income/expense/transfer) | **Accepted 2026-06-05** |
+| ADR-015 | Account folders in the sidebar | **Accepted 2026-06-05** |
+| ADR-016 | File save / open model — auto-commit + Save Copy As snapshots | **Accepted 2026-06-05** |
+| ADR-017 | Bulk edit shape — modal dialog with per-field checkboxes | **Accepted 2026-06-05** |
 
 Full index and summaries: [`docs/adr/README.md`](docs/adr/README.md).
 

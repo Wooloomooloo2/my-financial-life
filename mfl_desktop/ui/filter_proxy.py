@@ -1,9 +1,14 @@
 """Filter / sort proxy for the register.
 
-Filters on free-text search (payee + memo), status, and category id. Sorts on
-the underlying value of each column so amounts sort numerically and dates
-chronologically — the source model's formatted strings are not what gets
-compared.
+Filters on free-text search (payee, memo, amount, date), status, and
+category id. Sorts on the underlying value of each column so amounts sort
+numerically and dates chronologically — the source model's formatted
+strings are not what gets compared.
+
+Amount search is comma-insensitive: typing "3250" or "3,250" both match a
+3,250.00 transaction. Both signed and absolute forms of the amount are
+in the haystack so the user doesn't have to think about direction (a
+search for "3250" finds the £3,250 receipt *and* the -£3,250 payment).
 """
 from __future__ import annotations
 
@@ -23,7 +28,9 @@ class TransactionFilterProxy(QSortFilterProxyModel):
         self._category_id: Optional[int] = None
 
     def set_search(self, text: str) -> None:
-        self._search = text.lower().strip()
+        # Strip commas so "3,250" and "3250" both produce the same needle —
+        # the haystack is built without commas too (see filterAcceptsRow).
+        self._search = text.lower().strip().replace(",", "")
         self.invalidateRowsFilter()
 
     def set_status(self, status: str) -> None:
@@ -42,7 +49,15 @@ class TransactionFilterProxy(QSortFilterProxyModel):
         if self._category_id is not None and row.category_id != self._category_id:
             return False
         if self._search:
-            haystack = " ".join(filter(None, [row.payee_name, row.memo])).lower()
+            # Both signed and absolute amount forms are included so a search
+            # for "3250" matches both directions of a 3,250.00 transaction.
+            haystack = " ".join(filter(None, [
+                row.payee_name,
+                row.memo,
+                row.posted_date,
+                f"{row.amount:.2f}",
+                f"{abs(row.amount):.2f}",
+            ])).lower()
             if self._search not in haystack:
                 return False
         return True

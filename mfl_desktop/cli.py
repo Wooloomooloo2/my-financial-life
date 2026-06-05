@@ -27,6 +27,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from mfl_desktop.account_types import ACCOUNT_TYPES
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.import_engine.import_service import ImportService
 
@@ -151,50 +152,15 @@ def cmd_list(args) -> int:
         repo.close()
 
 
-_ACCOUNT_TYPES = {
-    "cash":       ("CashAccount",       "cash",       False),
-    "savings":    ("SavingsAccount",    "cash",       False),
-    "credit":     ("CreditCardAccount", "credit",     True),
-    "investment": ("InvestmentAccount", "investment", False),
-    "property":   ("PropertyAccount",   "property",   False),
-}
-_TYPE_TO_KEY = {
-    "cash":       "cash_std",
-    "savings":    "savings_std",
-    "credit":     "credit_std",
-    "investment": "investment_std",
-    "property":   "property_std",
-}
-
-
 def cmd_add_account(args) -> int:
     repo = Repository(args.db)
     try:
-        class_name, family, is_liability = _ACCOUNT_TYPES[args.type]
-        prefix = f"mrl:{class_name}_"
-        max_n = 0
-        for row in repo.connection.execute(
-            "SELECT iri FROM account WHERE iri LIKE ?", (f"{prefix}%",),
-        ):
-            try:
-                max_n = max(max_n, int(row["iri"][len(prefix):]))
-            except ValueError:
-                pass
-        iri = f"{prefix}{max_n + 1}"
-        repo.connection.execute(
-            "INSERT INTO account "
-            "(iri, name, type, family, currency, is_liability) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                iri, args.name, _TYPE_TO_KEY[args.type],
-                family, args.currency, 1 if is_liability else 0,
-            ),
+        acct = repo.create_account(
+            name=args.name,
+            type_key=args.type,
+            currency=args.currency,
         )
-        repo.commit()
-        print(
-            f"Created {iri}: {args.name!r} ({_TYPE_TO_KEY[args.type]}, "
-            f"{args.currency})"
-        )
+        print(f"Created {acct.iri}: {acct.name!r} ({acct.type}, {acct.currency})")
         return 0
     finally:
         repo.close()
@@ -272,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("name", help="Display name, e.g. 'Joint Savings'")
     p.add_argument(
         "--type", required=True,
-        choices=("cash", "savings", "credit", "investment", "property"),
+        choices=tuple(t.key for t in ACCOUNT_TYPES),
         help="Account type",
     )
     p.add_argument(
