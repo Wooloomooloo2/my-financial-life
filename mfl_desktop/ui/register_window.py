@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui.account_dialog import AccountDialog
+from mfl_desktop.ui.account_summary_window import AccountSummaryWindow
 from mfl_desktop.ui.budget_window import BudgetWindow
 from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
@@ -95,6 +96,13 @@ class RegisterWindow(QMainWindow):
         self._sidebar.customContextMenuRequested.connect(
             self._on_sidebar_context_menu
         )
+        # Double-click an account row to open its Account Summary screen
+        # (ADR-033). Folder rows and 'All transactions' don't summary.
+        self._sidebar.itemDoubleClicked.connect(self._on_sidebar_double_click)
+
+        # Single-instance-per-account registry — opening an account that
+        # already has a summary window raises the existing one (ADR-033).
+        self._account_summary_wins: dict[int, AccountSummaryWindow] = {}
 
         search = QLineEdit()
         search.setPlaceholderText("Search payee, memo, amount, or date…")
@@ -234,10 +242,12 @@ class RegisterWindow(QMainWindow):
         self.setWindowTitle(f"My Financial Life — {filename} — {suffix}")
 
     def _set_account_action_state(self, account_selected: bool) -> None:
-        """Enable Edit/Delete only when a specific account is being viewed."""
+        """Enable Edit/Delete/Summary only when a specific account is being viewed."""
         if hasattr(self, "_edit_account_action"):
             self._edit_account_action.setEnabled(account_selected)
             self._delete_account_action.setEnabled(account_selected)
+        if hasattr(self, "_account_summary_action"):
+            self._account_summary_action.setEnabled(account_selected)
 
     def _set_model(self, model: TransactionTableModel) -> None:
         """Swap the source model and reattach delegates + column widths for
@@ -349,6 +359,17 @@ class RegisterWindow(QMainWindow):
 
         account_menu = self.menuBar().addMenu("&Account")
 
+        self._account_summary_action = QAction("Account &Summary…", self)
+        self._account_summary_action.setShortcut(QKeySequence("Ctrl+I"))
+        self._account_summary_action.triggered.connect(
+            self._on_open_account_summary_for_selection
+        )
+        account_menu.addAction(self._account_summary_action)
+        # Expose on the window so the shortcut fires while the table has focus.
+        self.addAction(self._account_summary_action)
+
+        account_menu.addSeparator()
+
         self._new_account_action = QAction("&New Account…", self)
         self._new_account_action.triggered.connect(self._on_new_account)
         account_menu.addAction(self._new_account_action)
@@ -361,8 +382,9 @@ class RegisterWindow(QMainWindow):
         self._delete_account_action.triggered.connect(self._on_delete_account)
         account_menu.addAction(self._delete_account_action)
 
-        # Edit/Delete are only meaningful when a specific account is selected;
-        # state is kept in sync by _set_account_action_state on view changes.
+        # Edit/Delete/Summary are only meaningful when a specific account
+        # is selected; state is kept in sync by _set_account_action_state
+        # on view changes.
         self._set_account_action_state(account_selected=self._account is not None)
 
         account_menu.addSeparator()
@@ -1366,6 +1388,10 @@ class RegisterWindow(QMainWindow):
             # Make this the current selection so Edit/Delete operate on it.
             self._select_account_in_sidebar(iri)
             menu = QMenu(self._sidebar)
+            # Summary first — it's the verb a Banktivity user reaches for
+            # most often from a sidebar right-click (ADR-033).
+            menu.addAction(self._account_summary_action)
+            menu.addSeparator()
             menu.addAction(self._new_account_action)
             menu.addAction(self._edit_account_action)
             menu.addSeparator()
@@ -1516,6 +1542,48 @@ class RegisterWindow(QMainWindow):
 
     def _on_budget_closed(self, _obj=None) -> None:
         self._budget_win = None
+
+    # ── account summary (ADR-033) ──
+
+    def _on_sidebar_double_click(self, item, _column) -> None:
+        """Double-click on an account row opens its Account Summary
+        screen. Folders + 'All transactions' fall through (folders already
+        toggle expansion via their single-click handler)."""
+        if item is None or item.data(0, KIND_ROLE) != "account":
+            return
+        iri = item.data(0, Qt.UserRole)
+        if iri is None:
+            return
+        acct = self._repo.get_account_by_iri(iri)
+        if acct is None:
+            return
+        self._open_account_summary(acct.id)
+
+    def _on_open_account_summary_for_selection(self) -> None:
+        """Account → Summary…/Ctrl+I handler. Opens the summary for the
+        currently-selected account; no-op when the All-transactions view
+        is showing (the action is disabled in that state but the shortcut
+        could still fire via window focus)."""
+        if self._account is None:
+            return
+        self._open_account_summary(self._account.id)
+
+    def _open_account_summary(self, account_id: int) -> None:
+        existing = self._account_summary_wins.get(account_id)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        win = AccountSummaryWindow(self._repo, account_id, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.destroyed.connect(
+            lambda _obj=None, aid=account_id: self._on_account_summary_closed(aid)
+        )
+        self._account_summary_wins[account_id] = win
+        win.show()
+
+    def _on_account_summary_closed(self, account_id: int) -> None:
+        self._account_summary_wins.pop(account_id, None)
 
     def _populate_category_combo(self) -> None:
         """Rebuild the filter-bar Category combo. Preserves the
