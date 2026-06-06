@@ -47,6 +47,7 @@ from mfl_desktop.ui.delegates import (
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.payees_dialog import PayeesDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
+from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
 from mfl_desktop.ui.schedules_dialog import SchedulesDialog
 from mfl_desktop.ui.sidebar import KIND_ROLE, AccountSidebar
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
@@ -696,9 +697,21 @@ class RegisterWindow(QMainWindow):
         ids = self._selected_txn_ids()
         menu = QMenu(self._table)
         menu.addAction(self._new_txn_action)
+
+        # ADR-027 — Create Schedule From Transaction. Only meaningful for a
+        # single seed row; seed-from-many would have to reconcile differing
+        # accounts / categories / amounts and isn't worth the UX.
+        if len(ids) == 1:
+            menu.addSeparator()
+            sched_act = menu.addAction("Create Schedule From Transaction…")
+            sched_act.triggered.connect(self._on_create_schedule_from_txn)
+
         if len(ids) >= 2:
+            menu.addSeparator()
             bulk_act = menu.addAction(f"Bulk Edit {len(ids)} Transactions…")
             bulk_act.triggered.connect(self._on_bulk_edit)
+
+        menu.addSeparator()
         delete_act = menu.addAction(
             f"Delete {len(ids)} Transactions" if len(ids) > 1
             else "Delete Transaction"
@@ -707,6 +720,107 @@ class RegisterWindow(QMainWindow):
         delete_act.triggered.connect(self._on_delete_transactions)
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
+    def _on_create_schedule_from_txn(self) -> None:
+        """Right-click verb — seed a New Schedule dialog from one selected
+        txn (ADR-027). The dialog's "Next occurrence" field is pre-filled
+        with the first future date at the default cadence (step forward
+        from the source txn until > today). The schedule's anchor and
+        next-due both store that future date; the source txn isn't itself
+        used as the anchor.
+        """
+        ids = self._selected_txn_ids()
+        if len(ids) != 1:
+            return
+
+        # Locate the source TransactionRow — single-row select means a
+        # single proxy index; map to source and read it from the model.
+        selection = self._table.selectionModel()
+        if selection is None:
+            return
+        rows = selection.selectedRows()
+        if len(rows) != 1:
+            return
+        source_idx = self._proxy.mapToSource(rows[0])
+        if not source_idx.isValid():
+            return
+        txn = self._model.row_at(source_idx.row())
+
+        # For a transfer-half row, pre-fill destination = partner's account.
+        transfer_to_id: Optional[int] = None
+        if txn.transfer_id:
+            transfer_to_id = self._repo.get_transfer_partner_account_id(txn.id)
+
+        # Compute the next future occurrence at the default cadence —
+        # step forward from the source txn date by one cadence period at
+        # a time until the result is strictly after today. A May 25 txn
+        # viewed on June 6 settles after one step (June 25); a txn from
+        # months ago iterates as many times as needed.
+        default_cadence = "monthly"
+        today_iso = date.today().isoformat()
+        next_occ = txn.posted_date
+        try:
+            while next_occ <= today_iso:
+                next_occ = self._repo.compute_next_due_date(
+                    anchor_date=txn.posted_date,
+                    cadence=default_cadence,
+                    current_due=next_occ,
+                )
+        except ValueError as e:
+            QMessageBox.critical(
+                self, "Could not compute next occurrence", str(e),
+            )
+            return
+
+        seed = ScheduleSeed(
+            account_id=txn.account_id,
+            payee_name=txn.payee_name or "",
+            category_id=txn.category_id,
+            transfer_to_account_id=transfer_to_id,
+            amount=txn.amount,            # already signed
+            anchor_date=next_occ,         # future date — dialog shows as "Next occurrence"
+            cadence=default_cadence,
+            memo=txn.memo or "",
+        )
+
+        dialog = ScheduleDialog(
+            accounts=self._repo.list_accounts(),
+            categories=self._repo.list_categories_flat(),
+            seed=seed,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        values = dialog.values()
+        if values is None:
+            return
+
+        try:
+            self._repo.create_scheduled_txn(
+                account_id=values.account_id,
+                payee_name=values.payee_name,
+                category_id=values.category_id,
+                transfer_to_account_id=values.transfer_to_account_id,
+                estimated_amount=values.estimated_amount,
+                variable=values.variable,
+                memo=values.memo,
+                cadence=values.cadence,
+                anchor_date=values.anchor_date,
+                next_due_date=values.next_due_date,
+                end_date=values.end_date,
+                auto_post=values.auto_post,
+                notes=values.notes,
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not create schedule", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Could not create schedule", str(e))
+            return
+
+        self.statusBar().showMessage(
+            f"Schedule created · next due {values.next_due_date}", 4000,
+        )
+
     def _on_bulk_edit(self) -> None:
         ids = self._selected_txn_ids()
         if len(ids) < 2:
@@ -714,7 +828,12 @@ class RegisterWindow(QMainWindow):
                 "Bulk edit needs at least 2 selected transactions.", 4000,
             )
             return
-        dialog = BulkEditDialog(self._categories, len(ids), self)
+        dialog = BulkEditDialog(
+            self._categories,
+            len(ids),
+            payee_names=self._repo.list_payee_names(),
+            parent=self,
+        )
         if dialog.exec() != BulkEditDialog.Accepted:
             return
         changes = dialog.values()

@@ -61,7 +61,14 @@ class PayeeTypeaheadDelegate(QStyledItemDelegate):
         completer.setCompletionMode(QCompleter.PopupCompletion)
         completer.setFilterMode(Qt.MatchContains)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setMaxVisibleItems(5)
         editor.setCompleter(completer)
+        # Force the popup wide and tall enough to actually show 5 matches.
+        # Default popup sizing inside a QTableView cell editor sometimes
+        # collapses to a single row tall — explicit minimums avoid that.
+        popup = completer.popup()
+        popup.setMinimumWidth(280)
+        popup.setMinimumHeight(150)
         return editor
 
     def setEditorData(self, editor: QLineEdit, index) -> None:

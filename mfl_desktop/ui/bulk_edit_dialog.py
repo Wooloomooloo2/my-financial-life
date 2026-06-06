@@ -20,6 +20,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QGridLayout,
@@ -46,6 +47,7 @@ class BulkEditDialog(QDialog):
         self,
         categories: list[CategoryChoice],
         selection_count: int,
+        payee_names: Optional[list[str]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -61,6 +63,23 @@ class BulkEditDialog(QDialog):
         self._payee_edit.setEnabled(False)
         self._payee_edit.setPlaceholderText("(leave empty to clear)")
         self._payee_check.toggled.connect(self._payee_edit.setEnabled)
+
+        # Contains-match, case-insensitive completer over existing payees —
+        # same config the register's PayeeTypeaheadDelegate uses (ADR-022).
+        # The dialog isn't long-lived so a snapshot at open-time is fine.
+        if payee_names:
+            completer = QCompleter(payee_names, self._payee_edit)
+            completer.setCompletionMode(QCompleter.PopupCompletion)
+            completer.setFilterMode(Qt.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setMaxVisibleItems(5)
+            self._payee_edit.setCompleter(completer)
+            # Explicit popup size so the 5 matches actually fit — Qt's
+            # default sizing collapses smaller than expected on Windows
+            # when the parent line-edit sits in a modal dialog.
+            popup = completer.popup()
+            popup.setMinimumWidth(280)
+            popup.setMinimumHeight(150)
 
         self._category_check = QCheckBox("Category:")
         self._category_combo = make_category_picker(

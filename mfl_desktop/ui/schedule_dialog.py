@@ -10,6 +10,12 @@ prompt like the New Transaction dialog has).
 The dialog is purely value-producing: accept → caller reads ``values()``,
 cancel → returns None. Matches the shape of NewTransactionDialog and
 BulkEditDialog.
+
+ADR-027 adds the ``seed`` constructor parameter — a ``ScheduleSeed``
+dataclass carrying pre-fill values when the dialog is opened from an
+existing object (today: an existing transaction via right-click in the
+register). The dialog stays in create mode; seed values just fill the
+form so the user can confirm-and-save.
 """
 from __future__ import annotations
 
@@ -60,6 +66,25 @@ _CADENCE_LABELS = {
 
 
 @dataclass(frozen=True)
+class ScheduleSeed:
+    """Pre-fill values for a New Schedule dialog opened from another
+    object (ADR-027).
+
+    All fields are optional — the dialog applies whichever are provided
+    and leaves the rest at their defaults. Amount is signed (negative =
+    outflow), matching the rest of the codebase's sign convention.
+    """
+    account_id: Optional[int] = None
+    payee_name: Optional[str] = None
+    category_id: Optional[int] = None
+    transfer_to_account_id: Optional[int] = None
+    amount: Optional[Decimal] = None
+    anchor_date: Optional[str] = None
+    cadence: Optional[str] = None
+    memo: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ScheduleDialogValues:
     """Validated form values ready to hand to the Repository."""
     account_id: int
@@ -84,6 +109,7 @@ class ScheduleDialog(QDialog):
         categories: list[CategoryChoice],
         default_account_id: Optional[int] = None,
         existing: Optional[ScheduledTxnRow] = None,
+        seed: Optional[ScheduleSeed] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -95,26 +121,39 @@ class ScheduleDialog(QDialog):
         self.setWindowTitle("Edit Schedule" if is_edit else "New Schedule")
         self.setModal(True)
 
+        # Resolve initial values: existing (edit mode) takes precedence over
+        # seed (create-from-txn) which takes precedence over hard defaults.
+        seed = seed if not is_edit else None  # seed irrelevant in edit mode
+
         # ── widgets ──
 
+        initial_account_id = (
+            existing.account_id if is_edit
+            else (
+                (seed.account_id if seed else None)
+                or default_account_id
+                or (accounts[0].id if accounts else None)
+            )
+        )
         self._account_combo = self._build_account_combo(
-            accounts,
-            default_id=(
-                existing.account_id if is_edit
-                else (default_account_id or (accounts[0].id if accounts else None))
-            ),
+            accounts, default_id=initial_account_id,
         )
 
         self._payee_edit = QLineEdit()
         self._payee_edit.setPlaceholderText("Optional")
-        if is_edit:
-            self._payee_edit.setText(existing.payee_name)
+        initial_payee = (
+            existing.payee_name if is_edit
+            else (seed.payee_name if seed else "")
+        )
+        if initial_payee:
+            self._payee_edit.setText(initial_payee)
 
         # Searchable category combo — same shape as the New Transaction dialog.
-        # Default to whatever the existing schedule used, or Uncategorised on
-        # create (id=1).
+        # Default to whatever the existing schedule used, or seed-provided,
+        # or Uncategorised on create (id=1).
         default_category_id = (
-            existing.category_id if is_edit else 1
+            existing.category_id if is_edit
+            else ((seed.category_id if seed else None) or 1)
         )
         self._category_combo = make_category_picker(
             categories, default_id=default_category_id,
@@ -130,17 +169,22 @@ class ScheduleDialog(QDialog):
         # Visibility is toggled by _on_category_changed when the picked
         # category's kind is 'transfer'.
         self._transfer_label = QLabel("Transfer to:")
+        initial_transfer_to = (
+            existing.transfer_to_account_id if is_edit
+            else (seed.transfer_to_account_id if seed else None)
+        )
         self._transfer_to_combo = self._build_account_combo(
-            accounts,
-            default_id=(
-                existing.transfer_to_account_id if is_edit else None
-            ),
+            accounts, default_id=initial_transfer_to,
         )
 
         # Direction + amount: direction encoded in sign, amount entered positive.
+        initial_amount = (
+            existing.estimated_amount if is_edit
+            else (seed.amount if seed else None)
+        )
         self._direction_out = QRadioButton("Money out")
         self._direction_in = QRadioButton("Money in")
-        if is_edit and existing.estimated_amount > 0:
+        if initial_amount is not None and initial_amount > 0:
             self._direction_in.setChecked(True)
         else:
             self._direction_out.setChecked(True)
@@ -159,8 +203,8 @@ class ScheduleDialog(QDialog):
         validator = QDoubleValidator(0.0, 1_000_000_000.0, 2, self)
         validator.setNotation(QDoubleValidator.StandardNotation)
         self._amount_edit.setValidator(validator)
-        if is_edit:
-            self._amount_edit.setText(f"{abs(existing.estimated_amount):.2f}")
+        if initial_amount is not None:
+            self._amount_edit.setText(f"{abs(initial_amount):.2f}")
 
         self._variable_check = QCheckBox(
             "Variable amount — prompt for actual at post time"
@@ -172,7 +216,10 @@ class ScheduleDialog(QDialog):
         self._cadence_combo = QComboBox()
         for key in SCHEDULE_CADENCES:
             self._cadence_combo.addItem(_CADENCE_LABELS[key], userData=key)
-        default_cadence = existing.cadence if is_edit else "monthly"
+        default_cadence = (
+            existing.cadence if is_edit
+            else ((seed.cadence if seed else None) or "monthly")
+        )
         for i in range(self._cadence_combo.count()):
             if self._cadence_combo.itemData(i) == default_cadence:
                 self._cadence_combo.setCurrentIndex(i)
@@ -184,6 +231,8 @@ class ScheduleDialog(QDialog):
         self._anchor_edit.setCalendarPopup(True)
         if is_edit:
             self._anchor_edit.setDate(_qdate(existing.anchor_date))
+        elif seed and seed.anchor_date:
+            self._anchor_edit.setDate(_qdate(seed.anchor_date))
         else:
             self._anchor_edit.setDate(QDate.currentDate())
 
@@ -223,8 +272,12 @@ class ScheduleDialog(QDialog):
 
         self._memo_edit = QLineEdit()
         self._memo_edit.setPlaceholderText("Optional")
-        if is_edit:
-            self._memo_edit.setText(existing.memo)
+        initial_memo = (
+            existing.memo if is_edit
+            else (seed.memo if seed else "")
+        )
+        if initial_memo:
+            self._memo_edit.setText(initial_memo)
 
         self._notes_edit = QPlainTextEdit()
         self._notes_edit.setPlaceholderText("Optional — private notes about this schedule")
@@ -243,7 +296,7 @@ class ScheduleDialog(QDialog):
         form.addRow("Estimated amount:", self._amount_edit)
         form.addRow("", self._variable_check)
         form.addRow("Cadence:", self._cadence_combo)
-        form.addRow("First occurrence (anchor):", self._anchor_edit)
+        form.addRow("Next occurrence:", self._anchor_edit)
         if is_edit:
             form.addRow("Next due date:", self._next_due_edit)
         form.addRow("End date:", _wrap(end_row))
@@ -264,7 +317,7 @@ class ScheduleDialog(QDialog):
         self.resize(460, self.sizeHint().height())
 
         # Initial transfer-row visibility based on whichever category is
-        # currently picked (covers both create and edit modes).
+        # currently picked (covers create-with-seed, create-empty, edit).
         self._on_category_changed()
 
         self._values: Optional[ScheduleDialogValues] = None

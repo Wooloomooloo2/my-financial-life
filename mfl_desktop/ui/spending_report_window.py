@@ -10,22 +10,16 @@ Pies are deliberately absent (the owner's standing rule). Income and
 transfer transactions are excluded by definition — this is a *spending*
 report, where spending is `-amount` on expense-kind categories so refunds
 reduce the net (ADR-014 sign convention).
+
+Renderer is the hand-rolled :class:`SpendingChart` paintEvent widget, per
+ADR-026 (which winnowed the QtCharts / pyqtgraph / custom comparison down
+to the custom variant).
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCharts import (
-    QBarCategoryAxis,
-    QBarSet,
-    QChart,
-    QChartView,
-    QLineSeries,
-    QStackedBarSeries,
-    QValueAxis,
-)
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -42,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.reports import category_group_map
+from mfl_desktop.ui.spending_chart import SpendingChart
 
 # id of the seeded Uncategorised root — its toggle is separate from the
 # category checklist per the user's spec.
@@ -71,14 +66,8 @@ class SpendingReportWindow(QMainWindow):
         self._categories_by_id = {c.id: c for c in self._all_categories}
         self._category_groups = category_group_map(self._all_categories)
 
-        # Build the controls panel and the chart; the first _refresh runs
-        # at the end of __init__ once everything's wired.
         controls = self._build_controls()
-        self._chart = QChart()
-        self._chart.setAnimationOptions(QChart.NoAnimation)
-        self._chart_view = QChartView(self._chart)
-        self._chart_view.setRenderHint(QPainter.Antialiasing)
-
+        self._chart = SpendingChart()
         self._summary_label = QLabel()
         self._summary_label.setStyleSheet(
             "padding: 8px 12px; font-weight: bold;"
@@ -86,7 +75,7 @@ class SpendingReportWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(controls)
-        splitter.addWidget(self._chart_view)
+        splitter.addWidget(self._chart)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([340, 900])
@@ -211,82 +200,40 @@ class SpendingReportWindow(QMainWindow):
 
         self._render(spending, granularity)
 
-    def _render(self, spending: dict[tuple[int, str], int], granularity: str) -> None:
-        # Remove old axes/series.
-        self._chart.removeAllSeries()
-        for axis in list(self._chart.axes()):
-            self._chart.removeAxis(axis)
-
+    def _render(
+        self, spending: dict[tuple[int, str], int], granularity: str,
+    ) -> None:
         buckets = sorted({key[1] for key in spending.keys()})
         if not buckets:
             self._show_empty("No spending in the selected range / filters.")
             return
 
-        # Stable order for legend + colours: largest-total groups first.
+        # Stable stack order: largest-total groups first so colour
+        # assignment is consistent across refreshes.
         group_totals: dict[int, int] = {}
         for (gid, _), val in spending.items():
             group_totals[gid] = group_totals.get(gid, 0) + val
-        groups_sorted = sorted(group_totals.keys(), key=lambda g: -group_totals[g])
-
-        bar_series = QStackedBarSeries()
-        bar_series.setLabelsVisible(False)
-        for gid in groups_sorted:
-            name = (
+        groups_sorted_ids = sorted(group_totals.keys(),
+                                   key=lambda g: -group_totals[g])
+        groups: list[tuple[int, str]] = [
+            (
+                gid,
                 self._categories_by_id[gid].name
-                if gid in self._categories_by_id else f"id={gid}"
+                if gid in self._categories_by_id else f"id={gid}",
             )
-            bs = QBarSet(name)
-            for bucket in buckets:
-                bs.append(spending.get((gid, bucket), 0) / 100.0)
-            bar_series.append(bs)
-        self._chart.addSeries(bar_series)
-
-        x_axis = QBarCategoryAxis()
-        x_axis.append(buckets)
-        self._chart.addAxis(x_axis, Qt.AlignBottom)
-        bar_series.attachAxis(x_axis)
-
-        # Y axis — round upper limit a little above the tallest bar so the
-        # average line doesn't sit on the ceiling when it falls high.
-        bucket_totals_pounds = [
-            sum(spending.get((gid, b), 0) for gid in groups_sorted) / 100.0
-            for b in buckets
+            for gid in groups_sorted_ids
         ]
-        ymax = max(bucket_totals_pounds) * 1.12 if bucket_totals_pounds else 100.0
-        y_axis = QValueAxis()
-        y_axis.setRange(0, ymax)
-        y_axis.setLabelFormat("£%.0f")
-        self._chart.addAxis(y_axis, Qt.AlignLeft)
-        bar_series.attachAxis(y_axis)
 
-        # Average line. QStackedBarSeries uses QBarCategoryAxis on x; a
-        # QLineSeries needs a value axis. Attach an invisible QValueAxis
-        # sharing the same bottom alignment so both axes co-exist; the
-        # line's x range matches the bar positions (0..n-1).
         total_pence = sum(spending.values())
         avg_pence = total_pence / len(buckets)
         avg_pounds = avg_pence / 100.0
 
-        line_series = QLineSeries()
-        line_series.setName(f"Average  £{avg_pounds:,.0f}")
-        line_series.append(0, avg_pounds)
-        line_series.append(len(buckets) - 1, avg_pounds)
-        pen = QPen(Qt.darkGray)
-        pen.setStyle(Qt.DashLine)
-        pen.setWidth(2)
-        line_series.setPen(pen)
-
-        x_axis_val = QValueAxis()
-        x_axis_val.setRange(-0.5, len(buckets) - 0.5)
-        x_axis_val.setVisible(False)
-        self._chart.addAxis(x_axis_val, Qt.AlignBottom)
-        self._chart.addSeries(line_series)
-        line_series.attachAxis(x_axis_val)
-        line_series.attachAxis(y_axis)
-
-        self._chart.setTitle("")
-        self._chart.legend().setVisible(True)
-        self._chart.legend().setAlignment(Qt.AlignRight)
+        self._chart.render(
+            buckets=buckets,
+            groups=groups,
+            spending=spending,
+            avg_pounds=avg_pounds,
+        )
 
         total_pounds = total_pence / 100.0
         gran_word = _GRANULARITY_LABEL_FOR_AVG[granularity]
@@ -298,10 +245,7 @@ class SpendingReportWindow(QMainWindow):
         )
 
     def _show_empty(self, message: str) -> None:
-        self._chart.removeAllSeries()
-        for axis in list(self._chart.axes()):
-            self._chart.removeAxis(axis)
-        self._chart.setTitle("")
+        self._chart.show_empty(message)
         self._summary_label.setText(message)
 
     @staticmethod

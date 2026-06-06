@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui.register_window import RegisterWindow
+from mfl_desktop.ui.theme import apply_theme
 
 DEFAULT_DB = Path("mfl_dev.db")
 
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     app = QApplication(sys.argv)
+    apply_theme(app)
     repo = Repository(args.db)
 
     account_iri = args.account_iri

@@ -93,10 +93,24 @@ class TransactionRow:
 
 @dataclass(frozen=True)
 class PayeeRow:
-    """A payee with the number of transactions currently referring to it."""
+    """A payee with its current usage count and canonical/alias state.
+
+    ADR-028 / ADR-029: a payee row is either *canonical* (``canonical_id``
+    is ``None``) or an *alias* of another payee (``canonical_id`` set).
+    Aliases route through their canonical for display and reporting but
+    keep their own historical txn rows pointing at the alias's id.
+
+    - ``usage_count``: for a canonical, this is the **rolled-up** count
+      (own direct txns + every alias's direct txns). For an alias, just
+      its own direct count. The Payees dialog uses this directly; callers
+      that need the bare direct count can read ``direct_usage_count``.
+    """
     id: int
     name: str
     usage_count: int
+    canonical_id: Optional[int] = None
+    canonical_name: Optional[str] = None
+    direct_usage_count: int = 0
 
 
 CATEGORY_KINDS: tuple[str, ...] = ("income", "expense", "transfer")
@@ -999,31 +1013,176 @@ class Repository:
         return row["id"] if row is not None else None
 
     def list_payee_names(self) -> list[str]:
-        """Names only, sorted case-insensitively. Used by the register's payee
-        typeahead delegate — a lightweight list to feed a QCompleter without
-        the cost of the usage_count subquery."""
+        """Canonical-payee names only, sorted case-insensitively. Feeds the
+        register's payee typeahead delegate + the Bulk Edit dialog's
+        completer. Per ADR-028 / ADR-029 round 1, aliases are deliberately
+        hidden — the user is suggesting the preferred label, not the raw
+        historical strings."""
         cur = self._conn.execute(
             "SELECT name FROM payee "
-            "WHERE archived_at IS NULL "
+            "WHERE archived_at IS NULL AND canonical_id IS NULL "
             "ORDER BY name COLLATE NOCASE"
         )
         return [r["name"] for r in cur]
 
-    def list_payees_with_usage(self) -> list[PayeeRow]:
-        """All payees with their current transaction count, sorted by name.
-        Includes payees with zero transactions (manually added, or left over
-        after deletions)."""
+    def list_canonical_payees(self) -> list[tuple[int, str]]:
+        """All canonical payees as ``(id, name)`` tuples, sorted. Used by
+        the "Make alias of…" picker so the user can choose the target."""
         cur = self._conn.execute(
-            "SELECT p.id, p.name, "
-            "       (SELECT COUNT(*) FROM txn t WHERE t.payee_id = p.id) AS n "
-            "FROM payee p "
-            "WHERE p.archived_at IS NULL "
-            "ORDER BY p.name COLLATE NOCASE"
+            "SELECT id, name FROM payee "
+            "WHERE archived_at IS NULL AND canonical_id IS NULL "
+            "ORDER BY name COLLATE NOCASE"
         )
-        return [
-            PayeeRow(id=r["id"], name=r["name"], usage_count=int(r["n"]))
-            for r in cur
-        ]
+        return [(r["id"], r["name"]) for r in cur]
+
+    def list_aliases_of(self, canonical_id: int) -> list[tuple[int, str]]:
+        """Every alias pointing at ``canonical_id``, as ``(id, name)`` tuples."""
+        cur = self._conn.execute(
+            "SELECT id, name FROM payee "
+            "WHERE canonical_id = ? AND archived_at IS NULL "
+            "ORDER BY name COLLATE NOCASE",
+            (canonical_id,),
+        )
+        return [(r["id"], r["name"]) for r in cur]
+
+    def list_payees_with_usage(self) -> list[PayeeRow]:
+        """All payees with usage counts + canonical/alias state, sorted.
+
+        Returns one row per payee. For canonicals, ``usage_count`` is the
+        **rolled-up** total (direct txns + every alias's direct txns) so
+        the dialog can show "Tesco · 142" even when the txns are split
+        across several aliases. For aliases, ``usage_count`` is the
+        direct count only. ``direct_usage_count`` is always the direct
+        count for callers that need to distinguish.
+
+        Sort: canonicals alphabetically, with each canonical's aliases
+        immediately after it (also alphabetical). Standalone canonicals
+        (no aliases) and aliases of a standalone canonical interleave
+        cleanly. Implementation: pull rows + direct counts in one query,
+        do the rollup + sort in Python (payee table is small)."""
+        cur = self._conn.execute(
+            "SELECT p.id, p.name, p.canonical_id, "
+            "       c.name AS canonical_name, "
+            "       (SELECT COUNT(*) FROM txn t WHERE t.payee_id = p.id) "
+            "           AS direct_cnt "
+            "FROM      payee p "
+            "LEFT JOIN payee c ON c.id = p.canonical_id "
+            "WHERE p.archived_at IS NULL"
+        )
+        raw = list(cur)
+
+        # Roll alias counts up to their canonical.
+        rolled_extra: dict[int, int] = {}
+        for r in raw:
+            if r["canonical_id"] is not None:
+                rolled_extra[r["canonical_id"]] = (
+                    rolled_extra.get(r["canonical_id"], 0)
+                    + int(r["direct_cnt"])
+                )
+
+        # Build PayeeRow list with rolled counts.
+        by_id: dict[int, PayeeRow] = {}
+        for r in raw:
+            direct = int(r["direct_cnt"])
+            is_canonical = r["canonical_id"] is None
+            rolled = (
+                direct + rolled_extra.get(r["id"], 0)
+                if is_canonical else direct
+            )
+            by_id[r["id"]] = PayeeRow(
+                id=r["id"],
+                name=r["name"],
+                usage_count=rolled,
+                canonical_id=r["canonical_id"],
+                canonical_name=r["canonical_name"],
+                direct_usage_count=direct,
+            )
+
+        # Display order: canonical, then its aliases. Group keys are the
+        # canonical's name (case-insensitive) so the order matches what
+        # the user sees alphabetically.
+        canonicals = sorted(
+            (p for p in by_id.values() if p.canonical_id is None),
+            key=lambda p: p.name.lower(),
+        )
+        aliases_by_canonical: dict[int, list[PayeeRow]] = {}
+        for p in by_id.values():
+            if p.canonical_id is not None:
+                aliases_by_canonical.setdefault(p.canonical_id, []).append(p)
+        for lst in aliases_by_canonical.values():
+            lst.sort(key=lambda p: p.name.lower())
+
+        ordered: list[PayeeRow] = []
+        for c in canonicals:
+            ordered.append(c)
+            ordered.extend(aliases_by_canonical.get(c.id, []))
+        # Catch any orphan aliases whose canonical was archived (shouldn't
+        # happen given delete_payees promotes them, but defensive).
+        ordered_ids = {p.id for p in ordered}
+        for p in by_id.values():
+            if p.id not in ordered_ids:
+                ordered.append(p)
+        return ordered
+
+    def set_alias_of(self, alias_id: int, canonical_id: int) -> None:
+        """Make ``alias_id`` an alias of ``canonical_id``.
+
+        Validates the two-level rule (ADR-028): the target must itself be
+        canonical, and the source must not already have aliases of its
+        own. ``alias_id == canonical_id`` is rejected. Commits on success.
+        """
+        if alias_id == canonical_id:
+            raise ValueError("A payee can't be an alias of itself.")
+        target = self._conn.execute(
+            "SELECT canonical_id FROM payee WHERE id = ? AND archived_at IS NULL",
+            (canonical_id,),
+        ).fetchone()
+        if target is None:
+            raise ValueError(
+                f"No active payee with id {canonical_id} to alias to."
+            )
+        if target["canonical_id"] is not None:
+            raise ValueError(
+                "Target is itself an alias — pick its canonical instead "
+                "(aliases of aliases aren't allowed)."
+            )
+        source = self._conn.execute(
+            "SELECT canonical_id FROM payee WHERE id = ? AND archived_at IS NULL",
+            (alias_id,),
+        ).fetchone()
+        if source is None:
+            raise ValueError(f"No active payee with id {alias_id}.")
+        has_children = self._conn.execute(
+            "SELECT 1 FROM payee WHERE canonical_id = ? LIMIT 1",
+            (alias_id,),
+        ).fetchone()
+        if has_children is not None:
+            raise ValueError(
+                "This payee already has its own aliases — promote those "
+                "first, or pick a different source."
+            )
+        try:
+            self._conn.execute(
+                "UPDATE payee SET canonical_id = ? WHERE id = ?",
+                (canonical_id, alias_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def promote_to_canonical(self, payee_id: int) -> None:
+        """Drop a payee's canonical link, making it its own canonical
+        again. No-op for rows that were already canonical."""
+        try:
+            self._conn.execute(
+                "UPDATE payee SET canonical_id = NULL WHERE id = ?",
+                (payee_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
 
     def create_payee(self, name: str) -> int:
         """Insert a new payee. Raises ValueError if the name is blank or
@@ -1076,13 +1235,25 @@ class Repository:
         transactions reassigned. target_id is excluded from source_ids
         defensively, in case the caller passes it.
 
-        Single SQL transaction: either all sources are merged and removed
-        or nothing changes."""
+        ADR-029 round 1: if any source payee has aliases of its own, those
+        aliases are re-pointed onto the target *before* the sources are
+        deleted, so the merge doesn't orphan them via the FK's ON DELETE
+        SET NULL (which would silently promote them to canonical — wrong
+        for a merge, where the user clearly wants them under the target).
+
+        Single SQL transaction: either everything moves and the sources
+        are removed, or nothing changes."""
         sources = [sid for sid in source_ids if sid != target_id]
         if not sources:
             return 0
         placeholders = ",".join("?" * len(sources))
         try:
+            # Re-point any aliases of the sources onto the target first.
+            self._conn.execute(
+                f"UPDATE payee SET canonical_id = ? "
+                f"WHERE canonical_id IN ({placeholders})",
+                (target_id, *sources),
+            )
             cur = self._conn.execute(
                 f"UPDATE txn SET payee_id = ? "
                 f"WHERE payee_id IN ({placeholders})",
@@ -1600,6 +1771,27 @@ class Repository:
                 seen.add(pid)
                 result.append(pid)
         return result
+
+    def get_transfer_partner_account_id(self, txn_id: int) -> Optional[int]:
+        """For a transfer-half txn, return the partner row's account_id.
+
+        Returns ``None`` when ``txn_id`` isn't part of a transfer (or has
+        no surviving partner — shouldn't happen given ADR-020's two-row
+        invariant, but defensive). Used by the "Create Schedule From
+        Transaction" verb (ADR-027) to pre-fill the destination account
+        when seeding a schedule from a transfer txn.
+        """
+        row = self._conn.execute(
+            "SELECT partner.account_id AS account_id "
+            "FROM txn self "
+            "JOIN txn partner "
+            "  ON partner.transfer_id = self.transfer_id "
+            " AND partner.id != self.id "
+            "WHERE self.id = ? AND self.transfer_id IS NOT NULL "
+            "LIMIT 1",
+            (txn_id,),
+        ).fetchone()
+        return row["account_id"] if row else None
 
     def get_default_transfer_category_id(self) -> Optional[int]:
         """The seeded top-level 'Transfer' category (added by migration 0002).
