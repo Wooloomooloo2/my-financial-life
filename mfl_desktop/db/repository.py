@@ -143,6 +143,7 @@ class CategoryChoice:
     parent_name: str   # '' if top-level — used to disambiguate sibling-name collisions
     source: str
     kind: str = "expense"
+    path: str = ""     # full breadcrumb 'Root → Mid → Leaf'; '' falls back to `name` at display time
 
 
 SCHEDULE_CADENCES: tuple[str, ...] = (
@@ -1584,12 +1585,38 @@ class Repository:
     def list_categories_flat(
         self, kinds: Optional[tuple[str, ...]] = None,
     ) -> list[CategoryChoice]:
-        """Return all active categories with their immediate parent name for
-        disambiguation. Sorted by parent then name. The parent_name is the
-        immediate parent only — for deep nesting the full path is not shown.
+        """Return all active categories with both the immediate parent name
+        (for legacy callers) and the full breadcrumb path (ADR-031), used by
+        ``make_category_picker`` so typing any ancestor name reveals all its
+        descendants in the typeahead.
 
         `kinds`, when provided, narrows the result to categories of those
         kinds (e.g. `('transfer',)` for the transfer-target picker)."""
+        # First pass: read every non-archived category so we can build the
+        # full breadcrumb path. Cheap (single SELECT over one table, three
+        # columns, no joins) and avoids a recursive CTE.
+        path_cur = self._conn.execute(
+            "SELECT id, parent_id, name FROM category WHERE archived_at IS NULL"
+        )
+        nodes: dict[int, tuple[Optional[int], str]] = {
+            r["id"]: (r["parent_id"], r["name"]) for r in path_cur
+        }
+        path_of: dict[int, str] = {}
+        for cid in nodes:
+            parts: list[str] = []
+            current: Optional[int] = cid
+            seen: set[int] = set()
+            while current is not None and current not in seen:
+                seen.add(current)
+                node = nodes.get(current)
+                if node is None:
+                    break
+                parent_id, name = node
+                parts.append(name)
+                current = parent_id
+            path_of[cid] = " → ".join(reversed(parts)) if parts else ""
+
+        # Second pass: kind-filtered SELECT, decorated with the path.
         params: list = []
         kind_clause = ""
         if kinds is not None:
@@ -1603,18 +1630,22 @@ class Repository:
             "       COALESCE(p.name, '') AS parent_name "
             "FROM category c "
             "LEFT JOIN category p ON p.id = c.parent_id "
-            f"WHERE c.archived_at IS NULL{kind_clause} "
-            "ORDER BY COALESCE(p.name, ''), c.name",
+            f"WHERE c.archived_at IS NULL{kind_clause}",
             params,
         )
-        return [
+        choices = [
             CategoryChoice(
                 id=r["id"], name=r["name"],
                 parent_name=r["parent_name"], source=r["source"],
                 kind=r["kind"],
+                path=path_of.get(r["id"], r["name"]),
             )
             for r in cur
         ]
+        # Sort by full path so siblings cluster under their parent and
+        # top-levels lead — DFS-style traversal in the dropdown.
+        choices.sort(key=lambda c: c.path.lower())
+        return choices
 
     def update_transaction_payee(
         self, txn_id: int, payee_name: str,

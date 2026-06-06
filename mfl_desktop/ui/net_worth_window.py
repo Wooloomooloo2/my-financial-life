@@ -45,6 +45,7 @@ from mfl_desktop.ui.proportional_bar import BarSegment, ProportionalBar
 _FAMILY_VIEW: list[tuple[str, str, QColor, str]] = [
     ("investment", "Investments",   QColor("#2563eb"), "asset"),
     ("property",   "Property",      QColor("#14b8a6"), "asset"),
+    ("vehicle",    "Vehicles",      QColor("#f59e0b"), "asset"),
     ("cash",       "Cash & Bank",   QColor("#22c55e"), "asset"),
     ("credit",     "Credit Cards",  QColor("#ec4899"), "debt"),
 ]

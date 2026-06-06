@@ -45,6 +45,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QTreeWidget,
@@ -580,10 +582,11 @@ class CategoriesDialog(QDialog):
         single Merge never silently absorbs categories the user did not
         choose (see ADR-012 / ADR-013).
 
-        Combo labels show each selected category's *full path* (e.g.
-        ``Expense → Other``) so when sources span different parents the
-        user can see where each candidate target lives — and where the
-        merged result will end up."""
+        The selection list shows each source's *full path* (e.g.
+        ``Expense → Other``) on its own row so when sources span different
+        parents the user can see where each candidate target lives — and
+        where the merged result will end up. A separate line edit covers
+        the brand-new-top-level case."""
         items = sorted(
             [(cid, self._path_for(cid)) for cid in ids
              if cid in self._nodes_by_id],
@@ -595,36 +598,59 @@ class CategoriesDialog(QDialog):
         picker.setWindowTitle("Choose merge target")
         picker.setModal(True)
         label = QLabel(
-            "Merge into which category? Pick one of the selected categories — "
-            "the full path is shown so you can tell apart same-named "
+            "Merge into which category? Pick one of the selected categories "
+            "below — the full path is shown so you can tell apart same-named "
             "categories under different parents — or type a new name to "
             "merge them all into a brand-new top-level category."
         )
         label.setWordWrap(True)
-        combo = QComboBox()
-        combo.setEditable(True)
-        combo.setInsertPolicy(QComboBox.NoInsert)
+
+        # Visible single-select list of source paths. Replaces the editable
+        # combo that hid all but item 0 behind a dropdown click.
+        list_widget = QListWidget()
+        list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
         for cid, path in items:
-            combo.addItem(path, userData=cid)
+            li = QListWidgetItem(path)
+            li.setData(Qt.UserRole, cid)
+            list_widget.addItem(li)
+        # Double-click on a path acts as confirm.
+        list_widget.itemDoubleClicked.connect(lambda _i: picker.accept())
+
+        new_name_label = QLabel("Or create a brand-new top-level category named:")
+        new_name_edit = QLineEdit()
+        new_name_edit.setPlaceholderText("(leave blank to use the selection above)")
+        # Typing into the new-name field clears any list selection so the
+        # OK handler has an unambiguous signal to work with.
+        new_name_edit.textEdited.connect(
+            lambda _t: list_widget.clearSelection()
+        )
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(picker.accept)
         bb.rejected.connect(picker.reject)
         lay = QVBoxLayout(picker)
         lay.addWidget(label)
-        lay.addWidget(combo)
+        lay.addWidget(list_widget)
+        lay.addWidget(new_name_label)
+        lay.addWidget(new_name_edit)
         lay.addWidget(bb)
-        picker.resize(480, picker.sizeHint().height())
+        picker.resize(480, max(360, picker.sizeHint().height()))
         if picker.exec() != QDialog.Accepted:
             return None
 
-        typed = combo.currentText().strip()
-        if not typed:
-            QMessageBox.warning(picker, "Target required", "Pick a name.")
-            return None
+        # Selection wins if present; otherwise the typed new-name path.
+        current = list_widget.currentItem()
+        if current is not None and not new_name_edit.text().strip():
+            cid = current.data(Qt.UserRole)
+            return (cid, current.text(), False)
 
-        # Pick from the combo: typed text matches one of the displayed paths.
-        if typed in selected_by_path:
-            return (selected_by_path[typed], typed, False)
+        typed = new_name_edit.text().strip()
+        if not typed:
+            QMessageBox.warning(
+                picker, "Target required",
+                "Pick a category from the list or type a new top-level name.",
+            )
+            return None
 
         # Free-typed target — treat as a brand-new top-level category.
         existing_id = self._repo.find_top_level_category_id_by_name(typed)

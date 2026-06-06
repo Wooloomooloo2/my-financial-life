@@ -4,7 +4,7 @@
 This file gives a new Claude session full context to continue development
 without needing the original conversation transcript.
 
-**Last updated:** 2026-06-06 — session shipped visual baseline + paintEvent charts (ADR-026), Create Schedule From Transaction (ADR-027), Payee aliases round 1 (ADR-029 + ADR-012 amendment).
+**Last updated:** 2026-06-06 — session shipped visual baseline + paintEvent charts (ADR-026), Create Schedule From Transaction (ADR-027), Payee aliases round 1 (ADR-029 + ADR-012 amendment), Spending Over Time rollup levels (ADR-030), hierarchical category picker (ADR-031), Vehicle account type (ADR-032).
 
 ---
 
@@ -108,6 +108,7 @@ The Repository contract isolates the rest of the codebase from the storage decis
 | `credit_std` | Credit card | credit | Yes | Transactions SUM |
 | `investment_std` | Investment account | investment | No | Latest valuation |
 | `property_std` | Property | property | No | Latest valuation |
+| `vehicle_std` | Vehicle | vehicle | No | Latest valuation (planned) |
 
 ### Transaction statuses
 
@@ -225,7 +226,8 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │   │   ├── 0004_transfers.sql       # ADR-020: txn.transfer_id + partial index
 │   │   ├── 0005_scheduled_txn.sql   # ADR-023: scheduled_txn template + due-date indexes
 │   │   ├── 0006_budgets.sql         # ADR-024: budget + budget_account + budget_category
-│   │   └── 0007_payee_canonical.sql # ADR-029: payee.canonical_id + partial index
+│   │   ├── 0007_payee_canonical.sql # ADR-029: payee.canonical_id + partial index
+│   │   └── 0008_vehicle_account_type.sql # ADR-032: widen account.type CHECK to include vehicle_std
 │   ├── import_engine/               # Lifted from app/core/import_engine/
 │   │   ├── ofx_parser.py            # OFX/QFX — verbatim from v0.1
 │   │   ├── csv_parser.py            # Banktivity / credit-card / generic CSV (syntax bug fixed)
@@ -298,9 +300,16 @@ Three-round arc planned in **ADR-028** (Proposed). **Round 1 shipped 2026-06-06*
 
 Owner saw the potential of the paintEvent approach (ADR-026) and flagged that reports has a lot more work to do — what shipped under ADR-018 is the floor, not the ceiling. Quoted reactions on the paintEvent landing: "Resizing is cleaner, the default hover over feels a bit more natural." Concrete items raised:
 
-- **Default to top-level category rollup on Spending Over Time.** Today the chart rolls up to the *second* tier (Banktivity-style "group" — `Expense → Groceries → Tesco` rolls to `Groceries`), per `reports.py::category_group_map`. Owner wants the default to be the *top* level — everything under `Expense` rolls to `Expense`. Existing group-tier behaviour should stay available, presumably via a new "Rollup" control on the panel (Top level / Group / Leaf). Implementation surface: a new helper alongside `category_group_map` (e.g. `category_root_map`) plus a rollup control in `spending_report_window.py`. SQL aggregation already returns per-`category_id` so the Python rollup is the only thing that changes.
-- **Hierarchical category pickers (charts, budget, transactions).** Searching for a top-level category name should reveal its descendants in the results, even when the descendant text doesn't match. Typing "Food" should show `Food`, `Food → Dining out`, `Food → Groceries`, `Food → Bars and Restaurants`. Affects: spending-report category checklist, budget setup category combos, register Category typeahead delegate (ADR-022), every category combo built via `make_category_picker`. Likely shape: a `QSortFilterProxyModel` whose `filterAcceptsRow` returns true when any ancestor's name matches the search text, with a tree-view popup variant for the picker (instead of the flat `QCompleter` ADR-022 ships). Needs its own ADR — sub-decisions on whether the result list flattens with breadcrumbs (`Food → Groceries`) or genuinely renders as a tree, and whether the same control is reused for filter-checklists (where multi-select matters) and value-pickers (where single-select matters).
+- ~~**Default to top-level category rollup on Spending Over Time.**~~ Shipped 2026-06-06 as **ADR-030**: new `Rollup:` combo on the report panel with three positions (Top level / Group / Leaf), default flipped from Group → Top level. New `mfl_desktop/reports.py::category_root_map` helper mirrors `category_group_map`; Leaf mode is the identity case. Categories checklist rebuilds on rollup change, all checked, Uncategorised's separate toggle preserved across all three modes.
+- ~~**Hierarchical category pickers (charts, budget, transactions).**~~ Shipped 2026-06-06 as **ADR-031** — flat-with-breadcrumbs approach. `CategoryChoice` gained a `path` field; `Repository.list_categories_flat` builds it via a two-pass walk and sorts the result by path so siblings cluster under their parent. `make_category_picker` uses `c.path` as the display label (5 combo surfaces inherit the fix: transaction dialog, bulk edit, schedule, budget setup, register inline typeahead). New shared `mfl_desktop/reports.py::category_path(nodes_by_id, cid)` helper feeds the spending report's checklist so its labels show full paths too (matters most at Leaf rollup per ADR-030). Tree-popup variant rejected for v1 — flat list matches the payee typeahead pattern and stays consistent with the recently-shipped merge picker.
 - **Broader reports arc.** v0.1 had a dashboard and several views that haven't been ported yet. Owner wants to come back to reports as a thread now that the rendering ceiling is clear — likely a multi-round arc like the budget one. Open questions for the arc planning: which reports to ship, in what order, against which user task (cash flow, income vs spending, category trends, account balance history, net-worth trajectory). Treat as an open thread, not a single ADR.
+
+### Account workflows (2026-06-06)
+
+Owner-raised additions on the same turn as ADR-032 (Vehicle account type). Both probably want their own arc rather than landing as one-shots.
+
+- **Statement reconciliation per account.** Banktivity-style reconcile flow: pick a closing statement date + ending balance, walk through the account's uncleared/cleared transactions ticking off matches, surface running variance against the target, mark the matched set as `Reconciled` (the status already exists per ADR-010). Needs an ADR — UI shape (modal wizard vs side-panel), how mismatches are handled (allow a balancing adjustment txn? force the user to find the error?), how partial reconciliations are saved/resumed, and what happens to imports that arrive after a statement is reconciled. Touches the register (Reconciled status display already exists), the import pipeline (don't re-classify a Reconciled row), and probably gets its own menu under **Account → Reconcile…** with the account picker if more than one is open.
+- **Per-account summary screen.** A "good-looking" landing screen per account — historical balance chart (line, with optional cleared-vs-running variants), top-10 payees over the selected period (bar list with amounts + % of total), top-10 categories over the selected period (same shape). Period selector at the top (last 30 days / quarter / year / YTD / custom). Reuses the paintEvent chart kit (`mfl_desktop/ui/chart_helpers.py`) and the `ProportionalBar` widget; doesn't need new schema (`txn` already carries everything). Opens from the sidebar context menu or double-click on an account row, in a new non-modal `QMainWindow` — single-instance per account so opening twice raises the existing window. Needs an ADR — exact tile/chart layout, balance series semantics (cleared vs running vs both), how net-worth-relevant accounts (investment / property / vehicle) handle "balance" when valuations aren't wired yet, and what happens for accounts with sparse data.
 
 ### Other deferred items
 
@@ -311,6 +320,7 @@ Owner saw the potential of the paintEvent approach (ADR-026) and flagged that re
 - **Category management UI.** Re-parent, rename, archive categories — needed to manage what import-created and to undo path-conflict separations after the fact.
 - **Dashboard.** v0.1 had it; needs porting to Qt — charts per ADR-026 (paintEvent), reusing `mfl_desktop/ui/chart_helpers.py`.
 - **Account / settings management UI.** Add / edit / archive accounts, set base currency.
+- **Valuation pipeline for non-cash accounts.** `valuation` table exists since ADR-010 but isn't wired. Vehicles (ADR-032), property, and investment accounts would all benefit. Mark-to-market source per family type (KBB/Autotrader for vehicles, land-registry/Zillow for property, broker feed for investments).
 - **Packaging.** Single-file `.exe` via PyInstaller per ADR-008.
 
 ---
@@ -349,6 +359,9 @@ Owner saw the potential of the paintEvent approach (ADR-026) and flagged that re
 | ADR-028 | Payee aliases, canonical labels, and the auto-categorisation arc (planning) | **Proposed 2026-06-06** |
 | ADR-029 | Payee aliases round 1 — data model + manual alias UI | **Accepted 2026-06-06** |
 | ADR-012 (amend) | Canonical / alias model + Merge/Alias/Delete verb table | **Accepted 2026-06-06** |
+| ADR-030 | Spending Over Time rollup levels — Top / Group / Leaf | **Accepted 2026-06-06** |
+| ADR-031 | Hierarchical category picker via full-path labels | **Accepted 2026-06-06** |
+| ADR-032 | Vehicle account type and the `vehicle` family | **Accepted 2026-06-06** |
 
 Full index and summaries: [`docs/adr/README.md`](docs/adr/README.md).
 

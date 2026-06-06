@@ -2,9 +2,10 @@
 
 Non-modal QMainWindow with a controls panel on the left and a stacked-bar
 chart on the right. Each bar is one time bucket (week / month / quarter /
-year); each stack segment within a bar is one top-level expense category
-group (per ADR-018 grouping rule). An average line is drawn across the
-chart; a summary strip at the bottom shows period total and average.
+year); each stack segment within a bar is one rollup bucket of expense
+categories — top-level by default, second-tier or leaf optionally (per
+ADR-030). An average line is drawn across the chart; a summary strip at
+the bottom shows period total and average.
 
 Pies are deliberately absent (the owner's standing rule). Income and
 transfer transactions are excluded by definition — this is a *spending*
@@ -35,7 +36,11 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import Repository
-from mfl_desktop.reports import category_group_map
+from mfl_desktop.reports import (
+    category_group_map,
+    category_path,
+    category_root_map,
+)
 from mfl_desktop.ui.spending_chart import SpendingChart
 
 # id of the seeded Uncategorised root — its toggle is separate from the
@@ -52,6 +57,17 @@ _GRANULARITY_LABEL_FOR_AVG = {
     "week": "week", "month": "month", "quarter": "quarter", "year": "year",
 }
 
+# Rollup positions per ADR-030. Default is Top level; Group preserves the
+# ADR-018 rule; Leaf is the identity map (every category is its own bucket).
+_ROLLUP_TOP = "top"
+_ROLLUP_GROUP = "group"
+_ROLLUP_LEAF = "leaf"
+_ROLLUPS = [
+    ("Top level", _ROLLUP_TOP),
+    ("Group",     _ROLLUP_GROUP),
+    ("Leaf",      _ROLLUP_LEAF),
+]
+
 
 class SpendingReportWindow(QMainWindow):
     def __init__(self, repo: Repository, parent=None) -> None:
@@ -64,7 +80,14 @@ class SpendingReportWindow(QMainWindow):
         self._all_accounts = repo.list_accounts()
         self._all_categories = repo.list_category_tree()
         self._categories_by_id = {c.id: c for c in self._all_categories}
-        self._category_groups = category_group_map(self._all_categories)
+
+        # All three rollup maps computed once. The active one is picked
+        # per-refresh from the Rollup combo.
+        self._rollup_maps: dict[str, dict[int, int]] = {
+            _ROLLUP_TOP:   category_root_map(self._all_categories),
+            _ROLLUP_GROUP: category_group_map(self._all_categories),
+            _ROLLUP_LEAF:  {c.id: c.id for c in self._all_categories},
+        }
 
         controls = self._build_controls()
         self._chart = SpendingChart()
@@ -91,6 +114,7 @@ class SpendingReportWindow(QMainWindow):
         # Wire control changes to a debounce-free refresh — at ~1.3k rows
         # the round-trip is well under a frame.
         self._granularity_combo.currentIndexChanged.connect(self._refresh)
+        self._rollup_combo.currentIndexChanged.connect(self._on_rollup_changed)
         self._date_from.dateChanged.connect(self._refresh)
         self._date_to.dateChanged.connect(self._refresh)
         self._accounts_list.itemChanged.connect(self._refresh)
@@ -106,6 +130,11 @@ class SpendingReportWindow(QMainWindow):
         for label, value in _GRANULARITIES:
             self._granularity_combo.addItem(label, userData=value)
         self._granularity_combo.setCurrentIndex(1)  # Monthly default
+
+        self._rollup_combo = QComboBox()
+        for label, value in _ROLLUPS:
+            self._rollup_combo.addItem(label, userData=value)
+        self._rollup_combo.setCurrentIndex(0)  # Top level default (ADR-030)
 
         today = QDate.currentDate()
         self._date_from = QDateEdit()
@@ -127,26 +156,13 @@ class SpendingReportWindow(QMainWindow):
             item.setCheckState(Qt.Checked)
             self._accounts_list.addItem(item)
 
-        # Categories checklist — top-level expense groups only.
-        # Uncategorised has its own toggle below, so it's excluded here.
-        expense_group_ids: set[int] = set()
-        for c in self._all_categories:
-            if c.kind == "expense":
-                expense_group_ids.add(self._category_groups[c.id])
-        expense_group_ids.discard(UNCATEGORISED_ID)
-        expense_groups = sorted(
-            (self._categories_by_id[gid] for gid in expense_group_ids
-             if gid in self._categories_by_id),
-            key=lambda c: c.name.lower(),
-        )
+        # Categories checklist — populated by _rebuild_categories_list
+        # against the active rollup. The widget itself is built empty
+        # here; the initial fill happens once the rollup combo signal
+        # has been wired up (in __init__).
         self._categories_list = QListWidget()
         self._categories_list.setMaximumHeight(220)
-        for g in expense_groups:
-            item = QListWidgetItem(g.name)
-            item.setData(Qt.UserRole, g.id)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
-            self._categories_list.addItem(item)
+        self._rebuild_categories_list(self._current_rollup())
 
         self._include_uncat_check = QCheckBox("Include Uncategorised")
         self._include_uncat_check.setChecked(True)
@@ -154,6 +170,7 @@ class SpendingReportWindow(QMainWindow):
         controls = QWidget()
         form = QFormLayout(controls)
         form.addRow("Granularity:", self._granularity_combo)
+        form.addRow("Rollup:", self._rollup_combo)
         form.addRow("From:", self._date_from)
         form.addRow("To:", self._date_to)
         form.addRow(QLabel("Accounts:"))
@@ -163,10 +180,52 @@ class SpendingReportWindow(QMainWindow):
         form.addRow(self._include_uncat_check)
         return controls
 
+    def _rebuild_categories_list(self, rollup: str) -> None:
+        """Repopulate the Categories checklist with the distinct bucket
+        ids that the active rollup map produces for kind='expense'
+        categories. Uncategorised is always excluded — it has its own
+        toggle below the list. All items default checked; we don't try
+        to preserve unchecked state across rollups because the bucket-id
+        set changes (see ADR-030)."""
+        rollup_map = self._rollup_maps[rollup]
+        expense_bucket_ids: set[int] = set()
+        for c in self._all_categories:
+            if c.kind == "expense":
+                expense_bucket_ids.add(rollup_map[c.id])
+        expense_bucket_ids.discard(UNCATEGORISED_ID)
+        # Full breadcrumb labels (ADR-031) so same-named leaves under
+        # different parents stay distinguishable at Leaf rollup.
+        bucket_entries = sorted(
+            (
+                (gid, category_path(self._categories_by_id, gid))
+                for gid in expense_bucket_ids
+                if gid in self._categories_by_id
+            ),
+            key=lambda pair: pair[1].lower(),
+        )
+        # Block signals to avoid firing itemChanged once per added row.
+        self._categories_list.blockSignals(True)
+        self._categories_list.clear()
+        for gid, path in bucket_entries:
+            item = QListWidgetItem(path)
+            item.setData(Qt.UserRole, gid)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self._categories_list.addItem(item)
+        self._categories_list.blockSignals(False)
+
+    def _current_rollup(self) -> str:
+        return self._rollup_combo.currentData() or _ROLLUP_TOP
+
+    def _on_rollup_changed(self) -> None:
+        self._rebuild_categories_list(self._current_rollup())
+        self._refresh()
+
     # ── refresh / render ──
 
     def _refresh(self) -> None:
         granularity = self._granularity_combo.currentData() or "month"
+        rollup = self._current_rollup()
         date_from = self._date_from.date().toString(Qt.ISODate)
         date_to = self._date_to.date().toString(Qt.ISODate)
         account_ids = self._checked_ids(self._accounts_list)
@@ -183,19 +242,20 @@ class SpendingReportWindow(QMainWindow):
             include_uncategorised=include_uncat,
         )
 
-        # Roll category_id → group_id, filter out groups the user has
-        # unchecked in the categories list. Uncategorised is already
-        # handled by the SQL include_uncategorised flag, so it always
-        # passes the Python filter (it's a group too, just not in the
-        # checklist).
-        checked_group_ids = set(self._checked_ids(self._categories_list))
+        # Roll category_id → bucket_id under the active rollup, filter out
+        # buckets the user has unchecked in the categories list. The
+        # Include-Uncategorised SQL flag already handles Uncategorised,
+        # so it always passes the Python filter (it's a bucket too, just
+        # not in the checklist).
+        rollup_map = self._rollup_maps[rollup]
+        checked_bucket_ids = set(self._checked_ids(self._categories_list))
         spending: dict[tuple[int, str], int] = {}
         for r in rows:
             cid = r["category_id"]
-            gid = self._category_groups.get(cid, cid)
-            if gid != UNCATEGORISED_ID and gid not in checked_group_ids:
+            bid = rollup_map.get(cid, cid)
+            if bid != UNCATEGORISED_ID and bid not in checked_bucket_ids:
                 continue
-            key = (gid, r["bucket"])
+            key = (bid, r["bucket"])
             spending[key] = spending.get(key, 0) + r["spending_pence"]
 
         self._render(spending, granularity)

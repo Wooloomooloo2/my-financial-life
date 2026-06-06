@@ -1,10 +1,16 @@
 """Searchable category combo helper.
 
-Shared by NewTransactionDialog and BulkEditDialog so both pick categories
-the same way. The combo is editable and uses a contains-match QCompleter,
-so typing "groc" reduces the dropdown to anything with "groc" in the
-label — useful once the category list has more than a handful of rows
-(register UX backlog item).
+Shared by NewTransactionDialog, BulkEditDialog, ScheduleDialog,
+BudgetSetupDialog, and the register's CategoryTypeaheadDelegate so every
+surface picks categories the same way.
+
+The combo is editable and uses a contains-match QCompleter, so typing
+"groc" reduces the dropdown to anything with "groc" in the label.
+
+ADR-031: labels are the **full breadcrumb path** (`Food → Groceries →
+Tesco`) instead of `Leaf (ImmediateParent)`, so typing an ancestor name
+("Food") reveals all the ancestor's descendants in the typeahead, and
+same-named leaves under different parents are visually distinct.
 
 The combo's `userData` is the category id; `userData=None` is used for
 the optional "no change" placeholder when one is requested.
@@ -25,10 +31,10 @@ def make_category_picker(
 ) -> QComboBox:
     """Return an editable QComboBox populated with the categories.
 
-    - Labels match the existing convention: `Name (Parent)` when the
-      category has a parent, leaf name otherwise.
+    - Labels are the full breadcrumb path (ADR-031). Top-level rows show
+      just the name; deeper rows show `Parent → Child → …`.
     - Typing filters the dropdown via QCompleter (MatchContains,
-      case-insensitive).
+      case-insensitive) — typing any ancestor name reveals descendants.
     - The user can still click to drop the full list. `setInsertPolicy
       (NoInsert)` keeps free-text entries from being added as bogus
       combo rows.
@@ -38,7 +44,9 @@ def make_category_picker(
     combo.setEditable(True)
     combo.setInsertPolicy(QComboBox.NoInsert)
     for c in categories:
-        label = f"{c.name} ({c.parent_name})" if c.parent_name else c.name
+        # Fall back to `name` if path was empty (defensive — populated by
+        # Repository.list_categories_flat in normal flows).
+        label = c.path or c.name
         combo.addItem(label, userData=c.id)
     if default_id is not None:
         for i in range(combo.count()):

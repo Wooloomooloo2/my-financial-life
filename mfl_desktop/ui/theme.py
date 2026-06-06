@@ -193,9 +193,16 @@ QLineEdit:disabled, QComboBox:disabled, QDateEdit:disabled {{
     color: {COLOR_TEXT_DISABLED};
 }}
 
-QComboBox::drop-down {{
-    border: none;
-    width: 18px;
+/* Inline cell editors inside a register / table view need to fit the row
+   height tightly — the dialog-form padding + border-radius above puffs
+   the editor up so its rounded outline bleeds into the rows above and
+   below. Flatten the variant that lives inside a QAbstractItemView. */
+QAbstractItemView QLineEdit,
+QAbstractItemView QComboBox,
+QAbstractItemView QDateEdit {{
+    padding: 0px 4px;
+    border-radius: 0;
+    border: 1px solid {COLOR_ACCENT};
 }}
 
 QListWidget, QTreeWidget, QTreeView {{
