@@ -14,9 +14,36 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from PySide6.QtCore import QThreadPool, QRunnable
+
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.fx import refresh_latest_into
 from mfl_desktop.ui.register_window import RegisterWindow
 from mfl_desktop.ui.theme import apply_theme
+
+
+class _FxRefreshRunnable(QRunnable):
+    """Background launch refresh (ADR-035). Once-per-day at most; silent
+    on failure so a missing API key or a flaky network never blocks the
+    launch path."""
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__()
+        self._db_path = db_path
+
+    def run(self) -> None:
+        # Use a dedicated Repository connection — the main-thread
+        # Repository's sqlite3 connection isn't safe to share across
+        # threads, and the launch refresh is its own atomic unit.
+        try:
+            bg = Repository(self._db_path)
+            try:
+                refresh_latest_into(bg)
+            finally:
+                bg.close()
+        except Exception:
+            # Swallow — the user can always hit Refresh Now manually.
+            pass
 
 DEFAULT_DB = Path("mfl_dev.db")
 
@@ -57,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
 
     win = RegisterWindow(repo, account_iri)
     win.show()
+
+    # Background launch refresh of FX rates (ADR-035). No-op when no API
+    # key is set, when the last refresh was less than 24h ago, or when
+    # there are no non-USD accounts to fetch rates for.
+    QThreadPool.globalInstance().start(_FxRefreshRunnable(args.db))
+
     return app.exec()
 
 

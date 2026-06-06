@@ -40,6 +40,8 @@ from mfl_desktop.ui.budget_window import BudgetWindow
 from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
 from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
+from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
+from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
     CategoryTypeaheadDelegate,
     PayeeTypeaheadDelegate,
@@ -54,6 +56,12 @@ from mfl_desktop.ui.sidebar import KIND_ROLE, AccountSidebar
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
+from mfl_desktop.ui.transfer_match_dialogs import (
+    BulkRowAnalysis,
+    BulkTransferReviewDialog,
+    TransferMatchConfirmDialog,
+    TransferMatchPickerDialog,
+)
 
 STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
@@ -407,6 +415,20 @@ class RegisterWindow(QMainWindow):
         self._manage_schedules_action.triggered.connect(self._on_manage_schedules)
         manage_menu.addAction(self._manage_schedules_action)
 
+        self._manage_currencies_action = QAction("Cu&rrencies…", self)
+        self._manage_currencies_action.triggered.connect(self._on_manage_currencies)
+        manage_menu.addAction(self._manage_currencies_action)
+
+        self._reconcile_transfers_action = QAction(
+            "&Reconcile Transfers…", self,
+        )
+        self._reconcile_transfers_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self._reconcile_transfers_action.triggered.connect(
+            self._on_reconcile_transfers,
+        )
+        manage_menu.addAction(self._reconcile_transfers_action)
+        self.addAction(self._reconcile_transfers_action)
+
         reports_menu = self.menuBar().addMenu("&Reports")
 
         self._spending_report_action = QAction("&Spending Over Time…", self)
@@ -547,10 +569,31 @@ class RegisterWindow(QMainWindow):
             # back and pick the destination from bulk edit, or re-set
             # the category to trigger the prompt again).
             return
+
+        # ADR-036: run the matcher before manufacturing a partner.
+        # The other side may already exist on the destination account
+        # (very common after importing both ends of a transfer separately
+        # at setup time). If a candidate is offered and the user accepts
+        # it, we link instead of creating a duplicate inflow.
+        chosen = self._offer_transfer_match(
+            source_row=row, other_account_id=other_id,
+        )
+        if chosen == "cancelled":
+            return
         try:
-            self._repo.convert_to_transfer(
-                txn_id=row.id, other_account_id=other_id,
-            )
+            if isinstance(chosen, int):
+                # User accepted an existing candidate; chosen is its txn id.
+                self._repo.link_transfer(
+                    source_txn_id=row.id,
+                    candidate_txn_id=chosen,
+                    category_id=row.category_id,
+                )
+                message = "Linked to existing transaction"
+            else:
+                self._repo.convert_to_transfer(
+                    txn_id=row.id, other_account_id=other_id,
+                )
+                message = "Transfer partner created"
         except Exception as e:
             QMessageBox.critical(
                 self, "Could not create transfer partner", str(e),
@@ -558,7 +601,7 @@ class RegisterWindow(QMainWindow):
             return
         self._model.reload()
         self._refresh_sidebar_balances()
-        self.statusBar().showMessage("Transfer partner created", 4000)
+        self.statusBar().showMessage(message, 4000)
 
     # ── inline category create (ADR-022) ──
 
@@ -627,6 +670,66 @@ class RegisterWindow(QMainWindow):
             if c.id == category_id:
                 return c.kind
         return None
+
+    def _offer_transfer_match(self, *, source_row, other_account_id: int):
+        """Run the transfer matcher (ADR-036) for one source row.
+
+        Returns one of:
+
+        - ``"cancelled"`` — user dismissed the picker; caller should bail
+          out of the whole flow.
+        - an ``int`` — txn id of the candidate the user chose to link to.
+        - ``None`` — fall through to today's create-partner behaviour
+          (zero candidates, or user picked "Create new" in the picker).
+
+        The source's account name / amount / date / payee come from the
+        register row; the source's currency is looked up via the
+        Repository. The matcher applies the configured ±N-day window and
+        FX tolerance from ``setting`` (defaults 3 days / 1%).
+        """
+        try:
+            candidates = self._repo.find_transfer_candidates(
+                source_txn_id=source_row.id,
+                other_account_id=other_account_id,
+            )
+        except Exception as e:
+            # If the matcher itself errors (e.g. missing FX rate for a
+            # cross-currency case), fall back silently to create-partner
+            # — the user still gets a working transfer; we surface the
+            # reason via the status bar so it's not invisible.
+            self.statusBar().showMessage(
+                f"Could not search for matches: {e}", 6000,
+            )
+            return None
+        if not candidates:
+            return None
+        src_currency = (
+            self._repo.get_account_currency(source_row.account_id) or ""
+        )
+        if len(candidates) == 1:
+            dlg = TransferMatchConfirmDialog(
+                candidate=candidates[0],
+                source_account=source_row.account_name,
+                source_amount=source_row.amount,
+                source_currency=src_currency,
+                source_date=source_row.posted_date,
+                source_payee=source_row.payee_name,
+                parent=self,
+            )
+        else:
+            dlg = TransferMatchPickerDialog(
+                candidates=candidates,
+                source_account=source_row.account_name,
+                source_amount=source_row.amount,
+                source_currency=src_currency,
+                source_date=source_row.posted_date,
+                source_payee=source_row.payee_name,
+                parent=self,
+            )
+        if dlg.exec() != QDialog.Accepted:
+            return "cancelled"
+        picked = dlg.result_candidate()
+        return picked.txn_id if picked is not None else None
 
     def _prompt_destination_account(
         self,
@@ -889,11 +992,15 @@ class RegisterWindow(QMainWindow):
             )
             if other_id is None:
                 return
+
+            # ADR-036 bulk path: apply phase-1 field updates (payee /
+            # status / memo) first, then run the matcher per row, then
+            # let the user resolve via the review dialog, then write
+            # decisions atomically via bulk_match_or_create_transfers.
             try:
-                self._repo.bulk_set_category_and_convert(
+                self._repo.bulk_update_transactions(
                     ids,
                     category_id=new_category_id,
-                    other_account_id=other_id,
                     payee_name=changes.get("payee_name", self._repo._UNSET),
                     status=changes.get("status", self._repo._UNSET),
                     memo=changes.get("memo", self._repo._UNSET),
@@ -901,13 +1008,86 @@ class RegisterWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(
                     self, "Bulk transfer failed",
-                    f"The change was not applied:\n\n{e}",
+                    f"The category / field update was not applied:\n\n{e}",
+                )
+                return
+
+            # Build per-row matcher analyses for the review dialog.
+            row_lookup = {}
+            for i in range(self._model.rowCount()):
+                r = self._model.row_at(i)
+                row_lookup[r.id] = r
+            other_name = ""
+            other_acct = self._repo.get_account_by_id(other_id)
+            if other_acct is not None:
+                other_name = other_acct.name
+            analyses: list[BulkRowAnalysis] = []
+            matcher_errors: list[str] = []
+            for tid in ids:
+                row = row_lookup.get(tid)
+                if row is None:
+                    continue
+                src_currency = (
+                    self._repo.get_account_currency(row.account_id) or ""
+                )
+                try:
+                    candidates = self._repo.find_transfer_candidates(
+                        source_txn_id=tid,
+                        other_account_id=other_id,
+                    )
+                except Exception as e:
+                    candidates = []
+                    matcher_errors.append(f"#{tid}: {e}")
+                analyses.append(BulkRowAnalysis(
+                    source_txn_id=tid,
+                    source_account_id=row.account_id,
+                    source_account_name=row.account_name,
+                    source_amount=row.amount,
+                    source_currency=src_currency,
+                    source_date=row.posted_date,
+                    source_payee=row.payee_name,
+                    candidates=candidates,
+                ))
+
+            if matcher_errors:
+                # Surface non-fatal matcher errors (e.g. missing FX rate
+                # on cross-currency rows) without blocking — those rows
+                # default to "Create new" in the review.
+                self.statusBar().showMessage(
+                    f"Matcher skipped {len(matcher_errors)} row(s) "
+                    f"due to errors; will default to Create new.",
+                    6000,
+                )
+
+            review = BulkTransferReviewDialog(
+                analyses=analyses,
+                other_account_id=other_id,
+                other_account_name=other_name,
+                category_id=new_category_id,
+                parent=self,
+            )
+            if review.exec() != QDialog.Accepted:
+                # User cancelled — but phase-1 field updates already
+                # landed (category etc.). Reload so the register reflects
+                # them; rows just don't become transfers.
+                self._model.reload()
+                self._refresh_sidebar_balances()
+                return
+            plan = review.values()
+            try:
+                result = self._repo.bulk_match_or_create_transfers(plan)
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Bulk transfer failed",
+                    f"The transfer pairing was not applied:\n\n{e}",
                 )
                 return
             self._model.reload()
             self._refresh_sidebar_balances()
             self.statusBar().showMessage(
-                f"Converted {len(ids)} transactions to transfers", 4000,
+                f"Linked {result.linked} · created {result.created} "
+                f"transfer{'s' if result.linked + result.created != 1 else ''}",
+                4000,
             )
             return
 
@@ -1460,6 +1640,26 @@ class RegisterWindow(QMainWindow):
         # refresh the model + sidebar after any successful mutation.
         dialog.schedules_changed.connect(self._on_schedules_changed)
         dialog.exec()
+
+    def _on_manage_currencies(self) -> None:
+        """Open Manage → Currencies… (ADR-035). The dialog persists its
+        own edits to ``setting`` and ``fx_rate``; we just hand it the
+        Repository and let it run."""
+        dialog = CurrenciesDialog(self._repo, parent=self)
+        dialog.exec()
+
+    def _on_reconcile_transfers(self) -> None:
+        """Open Manage → Reconcile Transfers… (ADR-037).
+
+        The dialog writes through ``Repository.bulk_match_or_create_transfers``
+        on Apply. We refresh the model + sidebar after the dialog closes
+        in case any pairs were linked (delete-partner-aware queries
+        already use transfer_id so the register reflects the change
+        without further intervention)."""
+        dialog = TransferReconcileDialog(self._repo, parent=self)
+        dialog.exec()
+        self._model.reload()
+        self._refresh_sidebar_balances()
 
     def _on_schedules_changed(self) -> None:
         self._model.reload()

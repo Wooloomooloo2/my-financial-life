@@ -228,6 +228,143 @@ class ScheduledTxnRow:
     archived_at: Optional[str]
 
 
+# Provenance of a transfer's exchange rate (per ADR-035). 'derived' = back-
+# derived from the two txn amounts (or rate=1.0 for same-currency).
+# 'manual' = the user typed it. 'fx_rate' = looked up from the fx_rate table
+# at posting time.
+TRANSFER_RATE_SOURCES: tuple[str, ...] = ("derived", "manual", "fx_rate")
+
+
+@dataclass(frozen=True)
+class TransferRow:
+    """The parent row for one transfer pair (ADR-035).
+
+    ``iri`` matches the shared ``txn.transfer_id`` on the two half-rows.
+    ``rate`` is the quote-per-base used at posting time — i.e.
+    ``to_amount_magnitude = from_amount_magnitude * rate``. Same-currency
+    transfers carry ``rate=Decimal('1')`` with ``rate_source='derived'``.
+    The two txn amounts on either side remain the truth-of-money; this
+    row is the truth-of-intent (what rate was used).
+    """
+    iri: str
+    from_account_id: int
+    to_account_id: int
+    rate: Decimal
+    rate_source: str
+    created_at: str
+
+
+# Strength bins used by both the single-flow matcher (ADR-036) and the
+# reconcile dialog (ADR-037). Score thresholds live in transfer_reconcile.
+TRANSFER_STRENGTHS: tuple[str, ...] = ("Strong", "Good", "Possible")
+
+
+@dataclass(frozen=True)
+class TransferCandidate:
+    """A potential other-side txn that the matcher considered (ADR-036).
+
+    Returned by ``Repository.find_transfer_candidates`` for the single-
+    flow path (one source row, multiple maybe-partners). Score is
+    informational ordering — the matcher never auto-decides; the user
+    confirms via the picker / confirm dialog.
+
+    ``amount`` is signed in the candidate's account currency.
+    ``expected_amount`` is the magnitude (always positive) the matcher
+    expected to find on the candidate side given the source's amount and
+    the FX rate for the date (or |source.amount| for same-currency).
+    """
+    txn_id: int
+    account_id: int
+    account_name: str
+    account_currency: str
+    posted_date: str
+    amount: Decimal
+    payee_name: str
+    category_id: int
+    days_apart: int             # signed: positive = later than source
+    amount_mismatch_pct: float
+    currencies_match: bool
+    expected_amount: Decimal
+    score: int
+    strength: str
+
+
+@dataclass(frozen=True)
+class TransferPair:
+    """One greedy-matched pair across two accounts (ADR-037).
+
+    Returned by ``Repository.find_transfer_pairs`` for the reconcile
+    dialog. ``source_*`` is always the outflow side (negative-amount txn
+    on its account); ``target_*`` is always the inflow side. ``days_apart``
+    is the unsigned magnitude.
+
+    ``implied_rate`` is the rate back-derived from the actual two amounts
+    (``|target_amount| / |source_amount|``); ``spot_rate`` is what the FX
+    table said for that day (or 1.0 for same-currency). The deviation
+    surfaces in the dialog as an at-a-glance sanity check.
+    """
+    source_txn_id: int
+    source_account_id: int
+    source_amount: Decimal
+    source_currency: str
+    source_posted_date: str
+    source_payee: str
+    target_txn_id: int
+    target_account_id: int
+    target_amount: Decimal
+    target_currency: str
+    target_posted_date: str
+    target_payee: str
+    days_apart: int
+    implied_rate: Optional[Decimal]
+    spot_rate: Optional[Decimal]
+    rate_deviation_pct: Optional[float]
+    score: int
+    strength: str
+
+
+@dataclass(frozen=True)
+class LinkExisting:
+    """Bulk-edit / reconcile decision: link source to an existing
+    candidate row (ADR-036). The candidate's category is rewritten to
+    ``category_id`` at link time — that's the whole point."""
+    source_txn_id: int
+    candidate_txn_id: int
+    category_id: int
+    rate: Optional[Decimal] = None
+    rate_source: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CreateNew:
+    """Bulk-edit / reconcile decision: manufacture a fresh partner row
+    on ``other_account_id`` (ADR-036). ``to_amount`` / ``rate`` /
+    ``rate_source`` follow the same two-of-three rule as
+    ``Repository.create_transfer``."""
+    source_txn_id: int
+    other_account_id: int
+    category_id: int
+    to_amount: Optional[Decimal] = None
+    rate: Optional[Decimal] = None
+    rate_source: Optional[str] = None
+
+
+# Union of the two decision shapes; consumed by
+# ``Repository.bulk_match_or_create_transfers``.
+BulkTransferDecision = LinkExisting | CreateNew
+
+
+@dataclass(frozen=True)
+class BulkTransferResult:
+    """Summary of a bulk transfer operation. ``linked`` counts existing-
+    row matches; ``created`` counts manufactured partner rows. The IRIs
+    are returned in plan order so the caller can correlate to source rows
+    if it needs to follow up (e.g. select-and-scroll-to in the register)."""
+    linked: int
+    created: int
+    transfer_iris: list[str]
+
+
 # ── Identifier helpers (ADR-006) ────────────────────────────────────────────
 
 
@@ -1848,26 +1985,51 @@ class Repository:
         from_account_id: int,
         to_account_id: int,
         posted_date: str,
-        amount: Decimal,        # positive magnitude
+        amount: Decimal,                # positive magnitude in from-account currency
         category_id: int,
         memo: str = "",
         status: str = "Pending",
+        to_amount: Optional[Decimal] = None,    # positive magnitude in to-account currency
+        rate: Optional[Decimal] = None,         # quote per base (from → to)
+        rate_source: Optional[str] = None,      # 'manual' | 'fx_rate' | 'derived'
     ) -> tuple[int, int]:
-        """Create a transfer between two accounts as two linked txns.
+        """Create a transfer between two accounts as two linked txns + a
+        parent ``transfer`` row.
 
-        Both rows share one `transfer_id` IRI so the delete path (and any
-        future report logic) can treat them as a single operation. The
-        source's payee is "Transfer to <dest>"; the destination's is
-        "Transfer from <source>" — that gives the register a self-
-        documenting display without a special UI marker.
+        Both txns share one ``transfer_id`` IRI; the parent row records the
+        exchange rate that was used at posting time so the historical
+        intent survives later edits to either half. The source's payee is
+        "Transfer to <dest>"; the destination's is "Transfer from <source>"
+        — gives the register a self-documenting display without a special
+        UI marker.
+
+        **Same-currency** (``from_account.currency == to_account.currency``):
+        ``rate=1.0``, ``rate_source='derived'`` are filled in automatically;
+        ``to_amount`` defaults to ``amount``. Passing inconsistent values
+        is rejected.
+
+        **Cross-currency** (currencies differ): the two-of-three rule on
+        ``amount`` / ``to_amount`` / ``rate``:
+
+        - If ``to_amount`` and ``rate`` are both given, they must agree
+          (within 0.1%); ``rate_source`` defaults to ``'manual'``.
+        - If only ``to_amount`` is given, ``rate`` is back-derived; source
+          defaults to ``'derived'``.
+        - If only ``rate`` is given, ``to_amount = amount × rate``; source
+          defaults to ``'manual'``.
+        - If neither is given, the FX rate is looked up from the ``fx_rate``
+          table for ``posted_date`` (nearest-prior fallback per ADR-035);
+          source defaults to ``'fx_rate'``. Raises ``ValueError`` if no
+          rate is available.
 
         Validation:
         - source and destination must differ;
         - amount must be > 0;
-        - status must be a valid txn.status enum value.
+        - status must be a valid txn.status enum value;
+        - any supplied rate / to_amount must be > 0.
 
-        Atomic — either both rows are inserted or neither is. Returns the
-        ``(source_txn_id, destination_txn_id)`` pair.
+        Atomic — either both txn halves and the parent row land or nothing
+        lands. Returns the ``(source_txn_id, destination_txn_id)`` pair.
         """
         if from_account_id == to_account_id:
             raise ValueError("Source and destination accounts must differ.")
@@ -1875,17 +2037,70 @@ class Repository:
             raise ValueError("Transfer amount must be greater than zero.")
         if status not in ("Pending", "Uncleared", "Cleared", "Reconciled"):
             raise ValueError(f"Invalid status: {status!r}")
+        if to_amount is not None and to_amount <= 0:
+            raise ValueError("to_amount must be greater than zero.")
+        if rate is not None and rate <= 0:
+            raise ValueError("rate must be greater than zero.")
 
-        # Look up account names for the payee labels.
+        # Look up both accounts in one query — used for both name labelling
+        # and currency-aware rate resolution.
         rows = self._conn.execute(
-            "SELECT id, name FROM account WHERE id IN (?, ?)",
+            "SELECT id, name, currency FROM account WHERE id IN (?, ?)",
             (from_account_id, to_account_id),
         ).fetchall()
-        names = {r["id"]: r["name"] for r in rows}
-        if from_account_id not in names or to_account_id not in names:
+        by_id = {r["id"]: r for r in rows}
+        if from_account_id not in by_id or to_account_id not in by_id:
             raise ValueError("Unknown account id passed to create_transfer.")
-        from_name = names[from_account_id]
-        to_name = names[to_account_id]
+        from_name = by_id[from_account_id]["name"]
+        to_name = by_id[to_account_id]["name"]
+        from_ccy = by_id[from_account_id]["currency"]
+        to_ccy = by_id[to_account_id]["currency"]
+
+        # Resolve the rate / to_amount / rate_source triple per the rules above.
+        if from_ccy == to_ccy:
+            if to_amount is not None and abs(to_amount - amount) > Decimal("0.005"):
+                raise ValueError(
+                    "to_amount must equal amount for a same-currency transfer."
+                )
+            if rate is not None and abs(rate - Decimal("1")) > Decimal("0.0001"):
+                raise ValueError(
+                    "rate must be 1 for a same-currency transfer."
+                )
+            resolved_to_amount = amount
+            resolved_rate = Decimal("1")
+            resolved_source = rate_source or "derived"
+        else:
+            if to_amount is not None and rate is not None:
+                implied = amount * rate
+                tol = to_amount * Decimal("0.001")
+                if abs(implied - to_amount) > tol:
+                    raise ValueError(
+                        "Supplied rate and to_amount are inconsistent."
+                    )
+                resolved_to_amount = to_amount
+                resolved_rate = rate
+                resolved_source = rate_source or "manual"
+            elif to_amount is not None:
+                resolved_to_amount = to_amount
+                resolved_rate = to_amount / amount
+                resolved_source = rate_source or "derived"
+            elif rate is not None:
+                resolved_to_amount = amount * rate
+                resolved_rate = rate
+                resolved_source = rate_source or "manual"
+            else:
+                looked, _, _ = self.get_fx_rate_nearest(
+                    posted_date, from_ccy, to_ccy,
+                )
+                if looked is None:
+                    raise ValueError(
+                        f"No FX rate available for {from_ccy} → {to_ccy} "
+                        f"on or before {posted_date}; supply a rate or "
+                        f"to_amount, or refresh rates first."
+                    )
+                resolved_rate = looked
+                resolved_to_amount = amount * looked
+                resolved_source = rate_source or "fx_rate"
 
         transfer_iri = new_transfer_iri()
         try:
@@ -1903,13 +2118,20 @@ class Repository:
             )
             dest_id = self._insert_transfer_half(
                 account_id=to_account_id,
-                amount=amount,
+                amount=resolved_to_amount,
                 payee_id=payee_from,
                 category_id=category_id,
                 status=status,
                 memo=memo,
                 posted_date=posted_date,
                 transfer_id=transfer_iri,
+            )
+            self._insert_transfer_parent(
+                iri=transfer_iri,
+                from_account_id=from_account_id,
+                to_account_id=to_account_id,
+                rate=resolved_rate,
+                rate_source=resolved_source,
             )
             self.commit()
             return source_id, dest_id
@@ -1922,19 +2144,25 @@ class Repository:
         *,
         txn_id: int,
         other_account_id: int,
+        to_amount: Optional[Decimal] = None,
+        rate: Optional[Decimal] = None,
+        rate_source: Optional[str] = None,
     ) -> int:
         """Pair an existing txn with a new partner row to form a transfer.
 
-        Generates one shared `transfer_id`, applies it to the existing txn,
-        and inserts a partner on `other_account_id` with the opposite-sign
-        amount. The partner's payee reads "Transfer from <source>"; the
-        existing txn's payee is left alone so any meaningful import-derived
-        payee survives. Atomic — either both rows have the transfer_id and
-        the partner exists or nothing changed. Returns the partner txn id.
+        Generates one shared ``transfer_id``, applies it to the existing
+        txn, inserts a partner on ``other_account_id`` with the opposite-
+        sign amount, and writes the transfer parent row recording the
+        exchange rate that was used (ADR-035). Cross-currency: pass
+        ``to_amount`` or ``rate`` to override the FX-table lookup. Atomic.
+        Returns the partner txn id.
         """
         try:
-            partner_id = self._convert_to_transfer_unbatched(
+            partner_id, _ = self._convert_to_transfer_unbatched(
                 txn_id, other_account_id,
+                to_amount=to_amount,
+                rate=rate,
+                rate_source=rate_source,
             )
             self.commit()
             return partner_id
@@ -1947,16 +2175,21 @@ class Repository:
         txn_ids: list[int],
         other_account_id: int,
     ) -> list[int]:
-        """Convert each of `txn_ids` into a transfer paired with a fresh
-        partner on `other_account_id`. Each pair gets its own
-        `transfer_id` — they're independent transfers, just submitted as
-        one batch. All-or-nothing: any failure rolls back every change.
-        Returns the partner ids in the order they were created."""
+        """Convert each of ``txn_ids`` into a transfer paired with a fresh
+        partner on ``other_account_id``. Each pair gets its own
+        ``transfer_id`` and parent row. All-or-nothing: any failure rolls
+        back every change. Returns partner ids in input order.
+
+        Cross-currency rates come from the FX table (per-txn lookup at
+        each row's posted_date). For per-row rate overrides use
+        ``bulk_match_or_create_transfers`` with explicit ``CreateNew``
+        decisions instead.
+        """
         if not txn_ids:
             return []
         try:
             partner_ids = [
-                self._convert_to_transfer_unbatched(tid, other_account_id)
+                self._convert_to_transfer_unbatched(tid, other_account_id)[0]
                 for tid in txn_ids
             ]
             self.commit()
@@ -2017,7 +2250,7 @@ class Repository:
                     (value or None, *txn_ids),
                 )
             partner_ids = [
-                self._convert_to_transfer_unbatched(tid, other_account_id)
+                self._convert_to_transfer_unbatched(tid, other_account_id)[0]
                 for tid in txn_ids
             ]
             self.commit()
@@ -2028,13 +2261,26 @@ class Repository:
 
     def _convert_to_transfer_unbatched(
         self, txn_id: int, other_account_id: int,
-    ) -> int:
+        *,
+        to_amount: Optional[Decimal] = None,
+        rate: Optional[Decimal] = None,
+        rate_source: Optional[str] = None,
+    ) -> tuple[int, str]:
         """Internal helper used by both single and bulk convert. Does NOT
-        commit — caller is responsible for the transaction boundary."""
+        commit — caller is responsible for the transaction boundary.
+
+        Cross-currency aware (ADR-035): when the source's account currency
+        and ``other_account_id``'s currency differ, the partner's amount
+        is computed from ``to_amount`` / ``rate`` (using the same two-of-
+        three rule as ``create_transfer``) or looked up from ``fx_rate``.
+        The transfer parent row records the rate that was used.
+
+        Returns ``(partner_txn_id, transfer_iri)``.
+        """
         row = self._conn.execute(
             "SELECT t.id, t.account_id, t.amount, t.posted_date, "
             "       t.category_id, t.status, t.memo, t.transfer_id, "
-            "       a.name AS account_name "
+            "       a.name AS account_name, a.currency AS account_currency "
             "FROM txn t "
             "JOIN account a ON a.id = t.account_id "
             "WHERE t.id = ?",
@@ -2055,6 +2301,74 @@ class Repository:
             raise ValueError(
                 "Cannot convert a zero-amount transaction to a transfer."
             )
+        if to_amount is not None and to_amount <= 0:
+            raise ValueError("to_amount must be greater than zero.")
+        if rate is not None and rate <= 0:
+            raise ValueError("rate must be greater than zero.")
+
+        other_acct = self.get_account_by_id(other_account_id)
+        if other_acct is None:
+            raise ValueError(
+                f"Unknown destination account id {other_account_id}"
+            )
+
+        src_amount_pence = int(row["amount"])
+        src_magnitude = abs(pence_to_decimal(src_amount_pence))
+        src_ccy = row["account_currency"]
+        dst_ccy = other_acct.currency
+
+        # Resolve rate / partner magnitude / rate_source.
+        if src_ccy == dst_ccy:
+            if to_amount is not None and abs(to_amount - src_magnitude) > Decimal("0.005"):
+                raise ValueError(
+                    "to_amount must equal the source magnitude for "
+                    "same-currency transfers."
+                )
+            partner_magnitude = src_magnitude
+            resolved_rate = Decimal("1")
+            resolved_source = rate_source or "derived"
+        else:
+            if to_amount is not None and rate is not None:
+                implied = src_magnitude * rate
+                tol = to_amount * Decimal("0.001")
+                if abs(implied - to_amount) > tol:
+                    raise ValueError(
+                        "Supplied rate and to_amount are inconsistent."
+                    )
+                partner_magnitude = to_amount
+                resolved_rate = rate
+                resolved_source = rate_source or "manual"
+            elif to_amount is not None:
+                partner_magnitude = to_amount
+                resolved_rate = to_amount / src_magnitude
+                resolved_source = rate_source or "derived"
+            elif rate is not None:
+                partner_magnitude = src_magnitude * rate
+                resolved_rate = rate
+                resolved_source = rate_source or "manual"
+            else:
+                looked, _, _ = self.get_fx_rate_nearest(
+                    row["posted_date"], src_ccy, dst_ccy,
+                )
+                if looked is None:
+                    raise ValueError(
+                        f"No FX rate available for {src_ccy} → {dst_ccy} "
+                        f"on or before {row['posted_date']}; supply a rate "
+                        f"or to_amount, or refresh rates first."
+                    )
+                partner_magnitude = src_magnitude * looked
+                resolved_rate = looked
+                resolved_source = rate_source or "fx_rate"
+
+        # Partner sign opposes the source's sign (the partner row is the
+        # other side of the same money movement).
+        if src_amount_pence < 0:
+            partner_amount = partner_magnitude
+            from_id, to_id = row["account_id"], other_account_id
+        else:
+            partner_amount = -partner_magnitude
+            from_id, to_id = other_account_id, row["account_id"]
+
         transfer_iri = new_transfer_iri()
         self._conn.execute(
             "UPDATE txn SET transfer_id = ? WHERE id = ?",
@@ -2066,7 +2380,6 @@ class Repository:
             f"Transfer from {row['account_name']}"
         )
         partner_iri = new_transaction_iri()
-        partner_amount_pence = -int(row["amount"])
         cur = self._conn.execute(
             "INSERT INTO txn "
             "(iri, account_id, posted_date, amount, payee_id, category_id, "
@@ -2074,11 +2387,18 @@ class Repository:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
             (
                 partner_iri, other_account_id, row["posted_date"],
-                partner_amount_pence, partner_payee_id, row["category_id"],
-                row["status"], row["memo"], transfer_iri,
+                decimal_to_pence(partner_amount), partner_payee_id,
+                row["category_id"], row["status"], row["memo"], transfer_iri,
             ),
         )
-        return cur.lastrowid
+        self._insert_transfer_parent(
+            iri=transfer_iri,
+            from_account_id=from_id,
+            to_account_id=to_id,
+            rate=resolved_rate,
+            rate_source=resolved_source,
+        )
+        return cur.lastrowid, transfer_iri
 
     def _insert_transfer_half(
         self,
@@ -2104,6 +2424,816 @@ class Repository:
             ),
         )
         return cur.lastrowid
+
+    def _insert_transfer_parent(
+        self,
+        *,
+        iri: str,
+        from_account_id: int,
+        to_account_id: int,
+        rate: Decimal,
+        rate_source: str,
+    ) -> None:
+        """Insert one row into the ``transfer`` parent table (ADR-035).
+
+        Does NOT commit — the caller's transaction boundary holds. Used by
+        every code path that creates a transfer pair (create_transfer,
+        _convert_to_transfer_unbatched, _link_transfer_unbatched, the
+        transfer branch of post_scheduled_txn).
+        """
+        if rate_source not in TRANSFER_RATE_SOURCES:
+            raise ValueError(
+                f"Invalid rate_source {rate_source!r}; "
+                f"expected one of {TRANSFER_RATE_SOURCES}."
+            )
+        if rate <= 0:
+            raise ValueError("Transfer rate must be greater than zero.")
+        self._conn.execute(
+            "INSERT INTO transfer "
+            "(iri, from_account_id, to_account_id, rate, rate_source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                iri, from_account_id, to_account_id,
+                float(rate), rate_source,
+            ),
+        )
+
+    def get_transfer(self, iri: str) -> Optional[TransferRow]:
+        """Look up a transfer parent row by its IRI (the shared ``txn.transfer_id``)."""
+        row = self._conn.execute(
+            "SELECT iri, from_account_id, to_account_id, rate, rate_source, "
+            "       created_at "
+            "FROM transfer WHERE iri = ?",
+            (iri,),
+        ).fetchone()
+        if row is None:
+            return None
+        return TransferRow(
+            iri=row["iri"],
+            from_account_id=int(row["from_account_id"]),
+            to_account_id=int(row["to_account_id"]),
+            rate=Decimal(str(row["rate"])),
+            rate_source=row["rate_source"],
+            created_at=row["created_at"],
+        )
+
+    def update_transfer_rate(
+        self,
+        iri: str,
+        *,
+        rate: Decimal,
+        rate_source: str,
+    ) -> None:
+        """Override the recorded exchange rate on a transfer parent row.
+
+        Used by a future Edit Transfer dialog and by manual cross-currency
+        adjustments. Does NOT rewrite either half-row's amount — those are
+        the source of truth for what hit each account's statement. This
+        only updates the *intent* metadata on the parent row.
+        """
+        if rate_source not in TRANSFER_RATE_SOURCES:
+            raise ValueError(
+                f"Invalid rate_source {rate_source!r}; "
+                f"expected one of {TRANSFER_RATE_SOURCES}."
+            )
+        if rate <= 0:
+            raise ValueError("Transfer rate must be greater than zero.")
+        try:
+            self._conn.execute(
+                "UPDATE transfer SET rate = ?, rate_source = ? WHERE iri = ?",
+                (float(rate), rate_source, iri),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── Settings (key/value, ADR-035) ──────────────────────────────────────
+
+    def get_setting(
+        self, key: str, default: Optional[str] = None,
+    ) -> Optional[str]:
+        """Read a flat key/value from the ``setting`` table.
+
+        Returns the stored string, or ``default`` if the key is absent or
+        has an explicit empty value. Callers that want an empty string
+        treated as a real value should read the row directly.
+        """
+        row = self._conn.execute(
+            "SELECT value FROM setting WHERE key = ?", (key,),
+        ).fetchone()
+        if row is None:
+            return default
+        v = row["value"]
+        if v is None or v == "":
+            return default
+        return v
+
+    def set_setting(self, key: str, value: Optional[str]) -> None:
+        """Upsert a flat key/value into the ``setting`` table. Empty value
+        stores an empty string (use this to clear without removing the row)."""
+        try:
+            self._conn.execute(
+                "INSERT INTO setting (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value if value is not None else ""),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── Foreign-exchange rates (ADR-035) ───────────────────────────────────
+
+    def upsert_fx_rate(
+        self,
+        *,
+        date: str,
+        base: str,
+        quote: str,
+        rate: Decimal,
+        source: str = "manual",
+    ) -> None:
+        """Insert or update one FX rate row.
+
+        Same-currency upserts are a no-op (the conversion path early-exits
+        on equal currencies; storing rate=1 self-pairs would just be noise).
+        """
+        b = (base or "").strip().upper()
+        q = (quote or "").strip().upper()
+        if not b or not q:
+            raise ValueError("Currency codes cannot be empty.")
+        if rate <= 0:
+            raise ValueError("Rate must be greater than zero.")
+        if source not in ("manual", "openexchangerates", "derived"):
+            raise ValueError(f"Invalid rate source {source!r}.")
+        if b == q:
+            return
+        try:
+            self._conn.execute(
+                "INSERT INTO fx_rate (date, base, quote, rate, source) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(date, base, quote) DO UPDATE SET "
+                "  rate = excluded.rate, source = excluded.source",
+                (date, b, q, float(rate), source),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def get_fx_rate_on(
+        self, on_date: str, base: str, quote: str,
+    ) -> Optional[Decimal]:
+        """Exact-date bilateral lookup. Returns None if missing."""
+        b = base.strip().upper()
+        q = quote.strip().upper()
+        if b == q:
+            return Decimal("1")
+        row = self._conn.execute(
+            "SELECT rate FROM fx_rate "
+            "WHERE date = ? AND base = ? AND quote = ?",
+            (on_date, b, q),
+        ).fetchone()
+        return Decimal(str(row["rate"])) if row is not None else None
+
+    def get_fx_rate_nearest(
+        self, on_date: str, base: str, quote: str,
+    ) -> tuple[Optional[Decimal], Optional[str], bool]:
+        """Walk the six-step lookup chain (ADR-035 §missing-rate policy):
+
+        1. Exact bilateral ``(on_date, base, quote)``.
+        2. Exact inverse — we have ``quote → base`` on that date; return
+           ``1 / rate`` (covers the common case where every provider rate
+           is stored ``USD → X`` and the caller asks for ``X → USD``).
+        3. Exact USD-pivot — derives the cross-rate from ``USD → base``
+           and ``USD → quote`` on the same date (when neither side is USD).
+        4. Nearest-prior bilateral.
+        5. Nearest-prior inverse.
+        6. Nearest-prior USD-pivot.
+
+        Returns ``(rate, rate_date_used, was_fallback)``. ``rate_date_used``
+        is the date of the row(s) that fed the lookup — None when nothing
+        was found. ``was_fallback`` is True when the rate came from a
+        prior-date row (steps 4-6), False when it came from exact date.
+        Same-currency returns ``(Decimal('1'), on_date, False)`` immediately.
+        """
+        b = base.strip().upper()
+        q = quote.strip().upper()
+        if b == q:
+            return Decimal("1"), on_date, False
+
+        # 1. Exact bilateral.
+        row = self._conn.execute(
+            "SELECT rate FROM fx_rate "
+            "WHERE date = ? AND base = ? AND quote = ?",
+            (on_date, b, q),
+        ).fetchone()
+        if row is not None:
+            return Decimal(str(row["rate"])), on_date, False
+
+        # 2. Exact inverse — stored quote → base; return reciprocal.
+        row = self._conn.execute(
+            "SELECT rate FROM fx_rate "
+            "WHERE date = ? AND base = ? AND quote = ?",
+            (on_date, q, b),
+        ).fetchone()
+        if row is not None and float(row["rate"]) > 0:
+            return Decimal("1") / Decimal(str(row["rate"])), on_date, False
+
+        # 3. Exact USD-pivot (when neither side is USD).
+        if b != "USD" and q != "USD":
+            row = self._conn.execute(
+                "SELECT b.rate AS brate, q.rate AS qrate "
+                "FROM fx_rate b JOIN fx_rate q "
+                "  ON q.date = b.date AND q.base = 'USD' AND q.quote = ? "
+                "WHERE b.base = 'USD' AND b.quote = ? AND b.date = ?",
+                (q, b, on_date),
+            ).fetchone()
+            if row is not None and row["brate"] and float(row["brate"]) > 0:
+                cross = Decimal(str(row["qrate"])) / Decimal(str(row["brate"]))
+                return cross, on_date, False
+
+        # 4. Nearest-prior bilateral.
+        row = self._conn.execute(
+            "SELECT date, rate FROM fx_rate "
+            "WHERE base = ? AND quote = ? AND date <= ? "
+            "ORDER BY date DESC LIMIT 1",
+            (b, q, on_date),
+        ).fetchone()
+        if row is not None:
+            return Decimal(str(row["rate"])), row["date"], True
+
+        # 5. Nearest-prior inverse.
+        row = self._conn.execute(
+            "SELECT date, rate FROM fx_rate "
+            "WHERE base = ? AND quote = ? AND date <= ? "
+            "ORDER BY date DESC LIMIT 1",
+            (q, b, on_date),
+        ).fetchone()
+        if row is not None and float(row["rate"]) > 0:
+            return (
+                Decimal("1") / Decimal(str(row["rate"])),
+                row["date"],
+                True,
+            )
+
+        # 6. Nearest-prior USD-pivot — find the latest date where both
+        # USD → base and USD → quote exist on or before on_date.
+        if b != "USD" and q != "USD":
+            row = self._conn.execute(
+                "SELECT b.date AS bdate, b.rate AS brate, q.rate AS qrate "
+                "FROM fx_rate b JOIN fx_rate q "
+                "  ON q.date = b.date AND q.base = 'USD' AND q.quote = ? "
+                "WHERE b.base = 'USD' AND b.quote = ? AND b.date <= ? "
+                "ORDER BY b.date DESC LIMIT 1",
+                (q, b, on_date),
+            ).fetchone()
+            if row is not None and row["brate"] and float(row["brate"]) > 0:
+                cross = Decimal(str(row["qrate"])) / Decimal(str(row["brate"]))
+                return cross, row["bdate"], True
+
+        return None, None, True
+
+    def convert_amount(
+        self,
+        amount: Decimal,
+        *,
+        from_ccy: str,
+        to_ccy: str,
+        on_date: str,
+    ) -> tuple[Optional[Decimal], bool]:
+        """Convert ``amount`` from ``from_ccy`` to ``to_ccy`` on ``on_date``.
+
+        Returns ``(converted_amount, was_fallback)``. Same-currency returns
+        ``(amount, False)`` without touching the database. When no rate
+        exists at all (not even a prior fallback), returns ``(None, True)``
+        — the caller decides whether to surface "rate missing" or treat as
+        zero. The converted amount is *not* rounded; callers that need
+        currency-precision rounding apply ``Decimal.quantize`` themselves.
+        """
+        f = from_ccy.strip().upper()
+        t = to_ccy.strip().upper()
+        if f == t:
+            return amount, False
+        rate, _, fb = self.get_fx_rate_nearest(on_date, f, t)
+        if rate is None:
+            return None, True
+        return amount * rate, fb
+
+    def list_distinct_currencies(self) -> list[str]:
+        """Every currency code in use on a non-archived account, sorted.
+        Feeds the report display-currency selector."""
+        cur = self._conn.execute(
+            "SELECT DISTINCT currency FROM account "
+            "WHERE archived_at IS NULL ORDER BY currency"
+        )
+        return [r["currency"] for r in cur]
+
+    def list_known_rate_pairs(self) -> list[tuple[str, str]]:
+        """Every distinct (base, quote) we've ever stored a rate for, sorted."""
+        cur = self._conn.execute(
+            "SELECT DISTINCT base, quote FROM fx_rate "
+            "ORDER BY base, quote"
+        )
+        return [(r["base"], r["quote"]) for r in cur]
+
+    def get_account_currency(self, account_id: int) -> Optional[str]:
+        """Single-column lookup of an account's currency. Returns None if
+        the account doesn't exist. Cheap; used heavily by the matcher and
+        report conversion paths."""
+        row = self._conn.execute(
+            "SELECT currency FROM account WHERE id = ?", (account_id,),
+        ).fetchone()
+        return row["currency"] if row is not None else None
+
+    # ── Transfer matching (ADR-036) and reconcile (ADR-037) ───────────────
+
+    def _matcher_settings(
+        self,
+        window_days: Optional[int],
+        fx_tolerance_pct: Optional[float],
+    ) -> tuple[int, float]:
+        """Read defaults from ``setting`` when kwargs are None. Centralised
+        so single-flow + bulk + reconcile all converge on one source of
+        truth for the tunables."""
+        if window_days is None:
+            v = self.get_setting("transfer_match_window_days")
+            window_days = int(v) if v else 3
+        if fx_tolerance_pct is None:
+            v = self.get_setting("transfer_fx_tolerance_pct")
+            fx_tolerance_pct = float(v) if v else 1.0
+        return window_days, fx_tolerance_pct
+
+    def find_transfer_candidates(
+        self,
+        *,
+        source_txn_id: int,
+        other_account_id: int,
+        window_days: Optional[int] = None,
+        fx_tolerance_pct: Optional[float] = None,
+    ) -> list[TransferCandidate]:
+        """Look for an existing other-side row that could pair with the
+        source. Used by the single-flow matcher (ADR-036) when the user
+        marks a row as transfer and picks a destination account.
+
+        Returns the candidates that pass the hard filters (opposite sign,
+        unmatched, within date window, amount within tolerance), sorted
+        by score desc. Empty list when nothing matches — caller falls
+        through to the create-new path.
+        """
+        from mfl_desktop.transfer_reconcile import (
+            score_candidate, strength_for_score,
+        )
+
+        window_days, fx_tolerance_pct = self._matcher_settings(
+            window_days, fx_tolerance_pct,
+        )
+
+        src = self._conn.execute(
+            "SELECT t.id, t.account_id, t.amount, t.posted_date, t.transfer_id, "
+            "       COALESCE(p.name, '') AS payee_name "
+            "FROM txn t LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE t.id = ?",
+            (source_txn_id,),
+        ).fetchone()
+        if src is None:
+            raise ValueError(f"No transaction with id {source_txn_id}")
+        if src["transfer_id"] is not None:
+            raise ValueError(
+                f"Source transaction {source_txn_id} is already a transfer."
+            )
+        if src["account_id"] == other_account_id:
+            raise ValueError("Other account must differ from source account.")
+
+        src_acct = self.get_account_by_id(src["account_id"])
+        other_acct = self.get_account_by_id(other_account_id)
+        if src_acct is None or other_acct is None:
+            raise ValueError("Unknown account id.")
+
+        src_amount_pence = int(src["amount"])
+        if src_amount_pence == 0:
+            return []
+        src_magnitude = abs(pence_to_decimal(src_amount_pence))
+        src_payee = src["payee_name"]
+        src_date = date.fromisoformat(src["posted_date"])
+        currencies_match = src_acct.currency == other_acct.currency
+
+        # Expected magnitude on the candidate side.
+        if currencies_match:
+            expected_magnitude = src_magnitude
+        else:
+            spot, _, _ = self.get_fx_rate_nearest(
+                src["posted_date"], src_acct.currency, other_acct.currency,
+            )
+            if spot is None:
+                # Cross-currency with no rate anywhere — can't match.
+                return []
+            expected_magnitude = src_magnitude * spot
+
+        amount_sign_sql = "t.amount > 0" if src_amount_pence < 0 else "t.amount < 0"
+        d_min = (src_date - timedelta(days=window_days)).isoformat()
+        d_max = (src_date + timedelta(days=window_days)).isoformat()
+
+        cur = self._conn.execute(
+            f"SELECT t.id, t.account_id, t.amount, t.posted_date, "
+            f"       t.category_id, "
+            f"       COALESCE(p.name, '') AS payee_name "
+            f"FROM txn t LEFT JOIN payee p ON p.id = t.payee_id "
+            f"WHERE t.account_id = ? AND t.transfer_id IS NULL "
+            f"  AND {amount_sign_sql} "
+            f"  AND t.posted_date BETWEEN ? AND ?",
+            (other_account_id, d_min, d_max),
+        )
+
+        candidates: list[TransferCandidate] = []
+        for r in cur:
+            cand_magnitude = abs(pence_to_decimal(int(r["amount"])))
+            if expected_magnitude > 0:
+                mismatch_pct = (
+                    abs(float(cand_magnitude - expected_magnitude))
+                    / float(expected_magnitude) * 100.0
+                )
+            else:
+                mismatch_pct = 0.0
+            # Hard filters: same-currency near-exact; cross-currency within
+            # fx_tolerance × 5 (anything wider isn't really a transfer).
+            if currencies_match and mismatch_pct > 0.01:
+                continue
+            if not currencies_match and mismatch_pct > fx_tolerance_pct * 5.0:
+                continue
+            cand_date = date.fromisoformat(r["posted_date"])
+            days_apart = (cand_date - src_date).days
+            score = score_candidate(
+                days_apart=days_apart,
+                amount_mismatch_pct=mismatch_pct,
+                currencies_match=currencies_match,
+                src_payee=src_payee,
+                tgt_payee=r["payee_name"],
+            )
+            candidates.append(TransferCandidate(
+                txn_id=int(r["id"]),
+                account_id=int(r["account_id"]),
+                account_name=other_acct.name,
+                account_currency=other_acct.currency,
+                posted_date=r["posted_date"],
+                amount=pence_to_decimal(int(r["amount"])),
+                payee_name=r["payee_name"],
+                category_id=int(r["category_id"]),
+                days_apart=days_apart,
+                amount_mismatch_pct=mismatch_pct,
+                currencies_match=currencies_match,
+                expected_amount=expected_magnitude,
+                score=score,
+                strength=strength_for_score(score),
+            ))
+        candidates.sort(
+            key=lambda c: (-c.score, abs(c.days_apart), c.txn_id),
+        )
+        return candidates
+
+    def link_transfer(
+        self,
+        *,
+        source_txn_id: int,
+        candidate_txn_id: int,
+        category_id: int,
+        rate: Optional[Decimal] = None,
+        rate_source: Optional[str] = None,
+    ) -> str:
+        """Link two existing unmatched rows into one transfer pair (ADR-036).
+
+        Atomic: writes a fresh ``transfer_id`` IRI on both rows, rewrites
+        both rows' ``category_id`` to ``category_id`` (the rewrite is the
+        whole point — the source's chosen transfer category propagates to
+        the other half), and inserts the ``transfer`` parent row.
+
+        When ``rate`` is None: same-currency uses 1.0; cross-currency
+        back-derives the rate from the two magnitudes (rate = target /
+        source magnitude). ``rate_source`` defaults to ``'derived'``;
+        callers passing a user-typed rate should set ``'manual'``.
+
+        Returns the new transfer IRI.
+        """
+        try:
+            iri = self._link_transfer_unbatched(
+                source_txn_id=source_txn_id,
+                candidate_txn_id=candidate_txn_id,
+                category_id=category_id,
+                rate=rate,
+                rate_source=rate_source,
+            )
+            self.commit()
+            return iri
+        except Exception:
+            self.rollback()
+            raise
+
+    def _link_transfer_unbatched(
+        self,
+        *,
+        source_txn_id: int,
+        candidate_txn_id: int,
+        category_id: int,
+        rate: Optional[Decimal] = None,
+        rate_source: Optional[str] = None,
+    ) -> str:
+        """Internal helper. Does NOT commit; caller owns the transaction
+        boundary. Returns the new transfer IRI."""
+        src = self._conn.execute(
+            "SELECT id, account_id, amount, transfer_id "
+            "FROM txn WHERE id = ?",
+            (source_txn_id,),
+        ).fetchone()
+        cand = self._conn.execute(
+            "SELECT id, account_id, amount, transfer_id "
+            "FROM txn WHERE id = ?",
+            (candidate_txn_id,),
+        ).fetchone()
+        if src is None:
+            raise ValueError(f"No source transaction with id {source_txn_id}")
+        if cand is None:
+            raise ValueError(
+                f"No candidate transaction with id {candidate_txn_id}"
+            )
+        if src["transfer_id"] is not None:
+            raise ValueError(
+                f"Source {source_txn_id} is already part of a transfer."
+            )
+        if cand["transfer_id"] is not None:
+            raise ValueError(
+                f"Candidate {candidate_txn_id} is already part of a transfer."
+            )
+        if src["account_id"] == cand["account_id"]:
+            raise ValueError(
+                "Source and candidate must be on different accounts."
+            )
+        if (int(src["amount"]) < 0) == (int(cand["amount"]) < 0):
+            raise ValueError(
+                "Source and candidate amounts must have opposite signs "
+                "to form a transfer pair."
+            )
+        if rate is not None and rate <= 0:
+            raise ValueError("rate must be greater than zero.")
+
+        src_ccy = self.get_account_currency(src["account_id"])
+        cand_ccy = self.get_account_currency(cand["account_id"])
+        src_magnitude = abs(pence_to_decimal(int(src["amount"])))
+        cand_magnitude = abs(pence_to_decimal(int(cand["amount"])))
+
+        # Determine from/to: outflow (amount<0) is the source side.
+        if int(src["amount"]) < 0:
+            from_id = src["account_id"]
+            to_id = cand["account_id"]
+            from_magnitude = src_magnitude
+            to_magnitude = cand_magnitude
+        else:
+            from_id = cand["account_id"]
+            to_id = src["account_id"]
+            from_magnitude = cand_magnitude
+            to_magnitude = src_magnitude
+
+        if rate is None:
+            if src_ccy == cand_ccy:
+                resolved_rate = Decimal("1")
+                resolved_source = rate_source or "derived"
+            elif from_magnitude > 0:
+                resolved_rate = to_magnitude / from_magnitude
+                resolved_source = rate_source or "derived"
+            else:
+                resolved_rate = Decimal("1")
+                resolved_source = rate_source or "derived"
+        else:
+            resolved_rate = rate
+            resolved_source = rate_source or "manual"
+
+        transfer_iri = new_transfer_iri()
+        self._conn.execute(
+            "UPDATE txn SET transfer_id = ?, category_id = ? WHERE id = ?",
+            (transfer_iri, category_id, source_txn_id),
+        )
+        self._conn.execute(
+            "UPDATE txn SET transfer_id = ?, category_id = ? WHERE id = ?",
+            (transfer_iri, category_id, candidate_txn_id),
+        )
+        self._insert_transfer_parent(
+            iri=transfer_iri,
+            from_account_id=from_id,
+            to_account_id=to_id,
+            rate=resolved_rate,
+            rate_source=resolved_source,
+        )
+        return transfer_iri
+
+    def bulk_match_or_create_transfers(
+        self,
+        plan: list[BulkTransferDecision],
+    ) -> BulkTransferResult:
+        """Apply a batch of mixed link / create-new decisions atomically
+        (ADR-036). Each entry is a ``LinkExisting`` or ``CreateNew``;
+        single SQL transaction; any failure rolls back the whole batch.
+        """
+        if not plan:
+            return BulkTransferResult(
+                linked=0, created=0, transfer_iris=[],
+            )
+        linked = 0
+        created = 0
+        iris: list[str] = []
+        try:
+            for decision in plan:
+                if isinstance(decision, LinkExisting):
+                    iri = self._link_transfer_unbatched(
+                        source_txn_id=decision.source_txn_id,
+                        candidate_txn_id=decision.candidate_txn_id,
+                        category_id=decision.category_id,
+                        rate=decision.rate,
+                        rate_source=decision.rate_source,
+                    )
+                    linked += 1
+                    iris.append(iri)
+                elif isinstance(decision, CreateNew):
+                    # Stamp the chosen category on the source row first;
+                    # _convert_to_transfer_unbatched copies the source's
+                    # category onto the partner, so this propagates
+                    # cleanly. Bulk-edit phase 1 may already have done
+                    # this, but being defensive is cheap.
+                    self._conn.execute(
+                        "UPDATE txn SET category_id = ? WHERE id = ?",
+                        (decision.category_id, decision.source_txn_id),
+                    )
+                    _, iri = self._convert_to_transfer_unbatched(
+                        decision.source_txn_id,
+                        decision.other_account_id,
+                        to_amount=decision.to_amount,
+                        rate=decision.rate,
+                        rate_source=decision.rate_source,
+                    )
+                    created += 1
+                    iris.append(iri)
+                else:
+                    raise ValueError(
+                        f"Unknown transfer decision type: "
+                        f"{type(decision).__name__}"
+                    )
+            self.commit()
+            return BulkTransferResult(
+                linked=linked, created=created, transfer_iris=iris,
+            )
+        except Exception:
+            self.rollback()
+            raise
+
+    def find_transfer_pairs(
+        self,
+        *,
+        account_a_id: int,
+        account_b_id: int,
+        window_days: Optional[int] = None,
+        fx_tolerance_pct: Optional[float] = None,
+    ) -> list[TransferPair]:
+        """Pair every unmatched row on ``account_a_id`` with the best
+        opposite-sign candidate on ``account_b_id`` (ADR-037).
+
+        Greedy: walk score-desc, each source / target row claimed at
+        most once. Returns the resulting pairs (Strong → Good → Possible).
+        Anything that didn't pair (no opposite-sign row in window /
+        amount tolerance / spot rate available) is filtered out — the
+        caller surfaces those separately by re-querying for unmatched
+        rows after the dialog applies.
+        """
+        from mfl_desktop.transfer_reconcile import (
+            score_candidate, strength_for_score, greedy_pair,
+        )
+
+        if account_a_id == account_b_id:
+            raise ValueError("Source and target accounts must differ.")
+        window_days, fx_tolerance_pct = self._matcher_settings(
+            window_days, fx_tolerance_pct,
+        )
+
+        a_acct = self.get_account_by_id(account_a_id)
+        b_acct = self.get_account_by_id(account_b_id)
+        if a_acct is None or b_acct is None:
+            raise ValueError("Unknown account id.")
+
+        a_rows = self._conn.execute(
+            "SELECT t.id, t.posted_date, t.amount, "
+            "       COALESCE(p.name, '') AS payee_name "
+            "FROM txn t LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE t.account_id = ? AND t.transfer_id IS NULL "
+            "ORDER BY t.posted_date",
+            (account_a_id,),
+        ).fetchall()
+        b_rows = self._conn.execute(
+            "SELECT t.id, t.posted_date, t.amount, "
+            "       COALESCE(p.name, '') AS payee_name "
+            "FROM txn t LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE t.account_id = ? AND t.transfer_id IS NULL "
+            "ORDER BY t.posted_date",
+            (account_b_id,),
+        ).fetchall()
+
+        currencies_match = a_acct.currency == b_acct.currency
+        candidates: list[TransferPair] = []
+
+        for ar in a_rows:
+            a_date = date.fromisoformat(ar["posted_date"])
+            a_amount = int(ar["amount"])
+            if a_amount == 0:
+                continue
+            for br in b_rows:
+                b_amount = int(br["amount"])
+                if b_amount == 0:
+                    continue
+                b_date = date.fromisoformat(br["posted_date"])
+                days_apart_signed = (b_date - a_date).days
+                if abs(days_apart_signed) > window_days:
+                    continue
+                if (a_amount < 0) == (b_amount < 0):
+                    continue  # same sign, can't be a transfer pair
+
+                # Source = outflow side.
+                if a_amount < 0:
+                    src_row, tgt_row = ar, br
+                    src_acct, tgt_acct = a_acct, b_acct
+                else:
+                    src_row, tgt_row = br, ar
+                    src_acct, tgt_acct = b_acct, a_acct
+
+                src_magnitude = abs(pence_to_decimal(int(src_row["amount"])))
+                tgt_magnitude = abs(pence_to_decimal(int(tgt_row["amount"])))
+                if src_magnitude <= 0:
+                    continue
+                implied_rate = tgt_magnitude / src_magnitude
+
+                if currencies_match:
+                    spot_rate: Optional[Decimal] = Decimal("1")
+                    rate_deviation: Optional[float] = 0.0
+                    amount_mismatch_pct = (
+                        abs(float(tgt_magnitude - src_magnitude))
+                        / float(src_magnitude) * 100.0
+                    )
+                else:
+                    spot, _, _ = self.get_fx_rate_nearest(
+                        src_row["posted_date"],
+                        src_acct.currency, tgt_acct.currency,
+                    )
+                    if spot is None:
+                        # Without a spot rate we can't reasonably score
+                        # a cross-currency pair; skip rather than mislead.
+                        continue
+                    spot_rate = spot
+                    rate_deviation = float(
+                        (implied_rate - spot_rate) / spot_rate
+                    ) * 100.0
+                    expected_tgt = src_magnitude * spot_rate
+                    amount_mismatch_pct = (
+                        abs(float(tgt_magnitude - expected_tgt))
+                        / float(expected_tgt) * 100.0
+                    )
+                # Hard filters
+                if currencies_match and amount_mismatch_pct > 0.01:
+                    continue
+                if not currencies_match and amount_mismatch_pct > fx_tolerance_pct * 5.0:
+                    continue
+
+                src_date = date.fromisoformat(src_row["posted_date"])
+                tgt_date = date.fromisoformat(tgt_row["posted_date"])
+                days_apart_abs = abs((tgt_date - src_date).days)
+                score = score_candidate(
+                    days_apart=days_apart_abs,
+                    amount_mismatch_pct=amount_mismatch_pct,
+                    currencies_match=currencies_match,
+                    src_payee=src_row["payee_name"],
+                    tgt_payee=tgt_row["payee_name"],
+                )
+                candidates.append(TransferPair(
+                    source_txn_id=int(src_row["id"]),
+                    source_account_id=src_acct.id,
+                    source_amount=pence_to_decimal(int(src_row["amount"])),
+                    source_currency=src_acct.currency,
+                    source_posted_date=src_row["posted_date"],
+                    source_payee=src_row["payee_name"],
+                    target_txn_id=int(tgt_row["id"]),
+                    target_account_id=tgt_acct.id,
+                    target_amount=pence_to_decimal(int(tgt_row["amount"])),
+                    target_currency=tgt_acct.currency,
+                    target_posted_date=tgt_row["posted_date"],
+                    target_payee=tgt_row["payee_name"],
+                    days_apart=days_apart_abs,
+                    implied_rate=implied_rate,
+                    spot_rate=spot_rate,
+                    rate_deviation_pct=rate_deviation,
+                    score=score,
+                    strength=strength_for_score(score),
+                ))
+
+        return greedy_pair(
+            candidates,
+            source_key=lambda p: p.source_txn_id,
+            target_key=lambda p: p.target_txn_id,
+        )
 
     # ── Scheduled transactions (ADR-023) ──
 
@@ -2432,38 +3562,85 @@ class Repository:
                     )
                 # Direction: estimated_amount sign tells us which side is the
                 # source. Negative → schedule's own account is the source.
+                # The magnitude carried by the schedule is in *the schedule's
+                # account currency*, which is the source side when the
+                # estimate is negative and the destination side when it's
+                # positive.
                 if amount < 0:
                     from_id = sched.account_id
                     to_id = sched.transfer_to_account_id
+                    known_from_magnitude: Optional[Decimal] = abs(amount)
+                    known_to_magnitude: Optional[Decimal] = None
                 else:
                     from_id = sched.transfer_to_account_id
                     to_id = sched.account_id
+                    known_from_magnitude = None
+                    known_to_magnitude = abs(amount)
+
+                from_acct_row = self._conn.execute(
+                    "SELECT name, currency FROM account WHERE id = ?",
+                    (from_id,),
+                ).fetchone()
+                to_acct_row = self._conn.execute(
+                    "SELECT name, currency FROM account WHERE id = ?",
+                    (to_id,),
+                ).fetchone()
+                from_name = from_acct_row["name"]
+                to_name = to_acct_row["name"]
+                from_ccy = from_acct_row["currency"]
+                to_ccy = to_acct_row["currency"]
+
+                if from_ccy == to_ccy:
+                    if known_from_magnitude is None:
+                        known_from_magnitude = known_to_magnitude
+                    if known_to_magnitude is None:
+                        known_to_magnitude = known_from_magnitude
+                    used_rate = Decimal("1")
+                    used_rate_source = "derived"
+                else:
+                    looked, _, _ = self.get_fx_rate_nearest(
+                        posted_date, from_ccy, to_ccy,
+                    )
+                    if looked is None:
+                        raise ValueError(
+                            f"No FX rate available for {from_ccy} → "
+                            f"{to_ccy} on or before {posted_date}; refresh "
+                            f"rates or edit the schedule."
+                        )
+                    used_rate = looked
+                    used_rate_source = "fx_rate"
+                    if known_from_magnitude is None:
+                        # Schedule is inflow; we know to_magnitude.
+                        known_from_magnitude = known_to_magnitude / looked
+                    else:
+                        known_to_magnitude = known_from_magnitude * looked
+
                 # create_transfer commits internally; replicate its work
                 # inline so we can include the schedule update in the same
                 # transaction.
                 transfer_iri = new_transfer_iri()
-                from_name = self._conn.execute(
-                    "SELECT name FROM account WHERE id = ?", (from_id,),
-                ).fetchone()["name"]
-                to_name = self._conn.execute(
-                    "SELECT name FROM account WHERE id = ?", (to_id,),
-                ).fetchone()["name"]
                 payee_to = self.get_or_create_payee(f"Transfer to {to_name}")
                 payee_from = self.get_or_create_payee(
                     f"Transfer from {from_name}"
                 )
-                magnitude = abs(amount)
                 source_id = self._insert_transfer_half(
-                    account_id=from_id, amount=-magnitude,
+                    account_id=from_id, amount=-known_from_magnitude,
                     payee_id=payee_to, category_id=sched.category_id,
                     status="Pending", memo=sched.memo,
                     posted_date=posted_date, transfer_id=transfer_iri,
                 )
                 self._insert_transfer_half(
-                    account_id=to_id, amount=magnitude,
+                    account_id=to_id, amount=known_to_magnitude,
                     payee_id=payee_from, category_id=sched.category_id,
                     status="Pending", memo=sched.memo,
                     posted_date=posted_date, transfer_id=transfer_iri,
+                )
+                self._insert_transfer_parent(
+                    iri=transfer_iri,
+                    from_account_id=from_id,
+                    to_account_id=to_id,
+                    rate=used_rate,
+                    rate_source=used_rate_source,
                 )
                 inserted_id = source_id
             else:
