@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QTableView,
@@ -56,6 +57,7 @@ from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
 from mfl_desktop.ui.schedules_dialog import SchedulesDialog
 from mfl_desktop.ui.sidebar import KIND_ROLE, Sidebar
+from mfl_desktop.ui.statements_window import StatementsWindow
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.new_report_dialog import NewReportDialog
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
@@ -172,6 +174,13 @@ class RegisterWindow(QMainWindow):
         filter_bar.addSpacing(12)
         filter_bar.addWidget(QLabel("Category:"))
         filter_bar.addWidget(self._category_combo, stretch=1)
+        filter_bar.addSpacing(12)
+        # Reconcile button — opens the statement history for the current
+        # account (ADR-040). Disabled in all-transactions mode, in lockstep
+        # with the Account → Reconcile… menu action.
+        self._reconcile_btn = QPushButton("Reconcile…")
+        self._reconcile_btn.clicked.connect(self._on_reconcile_for_selection)
+        filter_bar.addWidget(self._reconcile_btn)
 
         # ── table ──
 
@@ -312,6 +321,10 @@ class RegisterWindow(QMainWindow):
             self._delete_account_action.setEnabled(account_selected)
         if hasattr(self, "_account_summary_action"):
             self._account_summary_action.setEnabled(account_selected)
+        if hasattr(self, "_reconcile_action"):
+            self._reconcile_action.setEnabled(account_selected)
+        if hasattr(self, "_reconcile_btn"):
+            self._reconcile_btn.setEnabled(account_selected)
 
     def _set_model(self, model: TransactionTableModel) -> None:
         """Swap the source model and reattach delegates + column widths for
@@ -340,6 +353,8 @@ class RegisterWindow(QMainWindow):
         # old model is dropped when self._model is reassigned, taking
         # its connection with it.
         self._model.dataChanged.connect(self._on_model_data_changed)
+        # ADR-040: confirm before an inline edit lands on a reconciled row.
+        self._model.reconciled_edit_guard = self._confirm_reconciled_edit
 
         col_index = {name: i for i, (_, name, _) in enumerate(self._model.COLUMNS)}
         # Clear all delegates then reattach where applicable, since column
@@ -464,6 +479,17 @@ class RegisterWindow(QMainWindow):
         account_menu.addAction(self._account_summary_action)
         # Expose on the window so the shortcut fires while the table has focus.
         self.addAction(self._account_summary_action)
+
+        # ADR-040: Reconcile… opens the statement history for the selected
+        # account. Ctrl+Alt+R avoids Ctrl+B (Budget) and Ctrl+Shift+R
+        # (Reconcile Transfers).
+        self._reconcile_action = QAction("&Reconcile…", self)
+        self._reconcile_action.setShortcut(QKeySequence("Ctrl+Alt+R"))
+        self._reconcile_action.triggered.connect(
+            self._on_reconcile_for_selection
+        )
+        account_menu.addAction(self._reconcile_action)
+        self.addAction(self._reconcile_action)
 
         account_menu.addSeparator()
 
@@ -2291,6 +2317,45 @@ class RegisterWindow(QMainWindow):
 
     def _on_account_summary_closed(self, account_id: int) -> None:
         self._account_summary_wins.pop(account_id, None)
+
+    # ── reconciliation (ADR-040) ──
+
+    def _on_reconcile_for_selection(self) -> None:
+        """Account → Reconcile… / Ctrl+Alt+R / register Reconcile button.
+        Opens the statement history for the selected account; no-op in the
+        all-transactions view (the action/button are disabled there, but the
+        shortcut could still fire via window focus)."""
+        if self._account is None:
+            return
+        dialog = StatementsWindow(self._repo, self._account, parent=self)
+        dialog.statements_changed.connect(self._on_statements_changed)
+        dialog.exec()
+
+    def _on_statements_changed(self) -> None:
+        """A close / reopen / delete changed txn statuses — refresh the
+        register and sidebar so Reconciled rows and balances are current."""
+        self._model.reload()
+        self._refresh_sidebar_balances()
+
+    def _confirm_reconciled_edit(self, txn_id: int) -> bool:
+        """Model gate: warn before an inline edit lands on a reconciled row.
+        Returns True to allow the edit, False to reject it."""
+        stmt = self._repo.get_statement_for_txn(txn_id)
+        when = ""
+        if stmt is not None:
+            try:
+                d = date.fromisoformat(stmt.end_date)
+                when = f" dated {d.day} {d.strftime('%b %Y')}"
+            except ValueError:
+                when = ""
+        resp = QMessageBox.question(
+            self, "Reconciled transaction",
+            f"This transaction is reconciled to a statement{when}.\n\n"
+            "Changing it may put that statement out of balance. "
+            "Change anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        return resp == QMessageBox.Yes
 
     def _populate_category_combo(self) -> None:
         """Rebuild the filter-bar Category combo, scoped to the

@@ -400,6 +400,56 @@ class ReportRow:
     created_at: str
 
 
+@dataclass(frozen=True)
+class StatementRow:
+    """One reconciliation period for an account (ADR-040).
+
+    ``status`` is ``'open'`` (in progress, resumable) or ``'reconciled'``
+    (closed). There is no separate "with variance" status — a statement
+    that closed with a residual, or one that drifted afterwards because a
+    reconciled row's amount was edited or deleted, is detected live via
+    ``residual``:
+
+    - ``residual`` = (``ending_balance`` − ``starting_balance``) − net of the
+      currently-linked (ticked) rows. This is the "Missing" figure on the
+      check-off screen and the out-of-balance signal on the history list.
+    - ``closing_variance`` is only the snapshot of ``residual`` taken at the
+      moment of close, kept for reference.
+
+    ``txn_count`` and ``residual`` are computed in the listing queries, so
+    they reflect the current state of the linked transactions.
+    """
+    id: int
+    iri: str
+    account_id: int
+    start_date: str
+    end_date: str
+    starting_balance: Decimal
+    ending_balance: Decimal
+    status: str
+    closing_variance: Decimal
+    notes: Optional[str]
+    created_at: str
+    reconciled_at: Optional[str]
+    txn_count: int = 0
+    residual: Decimal = Decimal("0.00")
+
+    @property
+    def change_in_balance(self) -> Decimal:
+        return self.ending_balance - self.starting_balance
+
+    @property
+    def is_balanced(self) -> bool:
+        """True when the linked rows tie the statement out (residual == 0)."""
+        return self.residual == Decimal("0.00")
+
+    @property
+    def is_out_of_balance(self) -> bool:
+        """A closed statement whose linked rows no longer tie out — shown as
+        'Out of balance' on the history list."""
+        return self.status == "reconciled" and not self.is_balanced
+
+
 # ── Identifier helpers (ADR-006) ────────────────────────────────────────────
 
 
@@ -429,6 +479,10 @@ def new_report_iri() -> str:
 
 def new_report_folder_iri() -> str:
     return f"mfl:ReportFolder_{uuid.uuid4().hex[:8]}"
+
+
+def new_statement_iri() -> str:
+    return f"mfl:Statement_{uuid.uuid4().hex[:8]}"
 
 
 # ── Repository ──────────────────────────────────────────────────────────────
@@ -1509,6 +1563,10 @@ class Repository:
 
         Matches on account, exact amount in pence (sign-preserving for
         direction), and posted date within ±window_days.
+
+        Reconciled rows are excluded (ADR-040): once a row is matched to a
+        closed statement, an import must not silently re-classify it as a
+        potential match and alter its status/amount.
         """
         try:
             d = date.fromisoformat(posted_date)
@@ -1524,6 +1582,7 @@ class Repository:
             "  AND t.amount = ? "
             "  AND t.posted_date BETWEEN ? AND ? "
             "  AND t.import_hash IS NULL "
+            "  AND t.status != 'Reconciled' "
             "LIMIT 1",
             (account_id, decimal_to_pence(amount), d_minus, d_plus),
         ).fetchone()
@@ -4565,3 +4624,436 @@ class Repository:
         except Exception:
             self.rollback()
             raise
+
+    # ── Statement reconciliation (ADR-040) ──
+
+    # Shared SELECT prefix: each statement row carries its live txn_count and
+    # residual_pence, computed from the statement_txn join so they reflect the
+    # CURRENT state of the linked rows (this is what makes "out of balance"
+    # detection free — an edited/deleted reconciled row changes residual_pence
+    # without any per-edit bookkeeping). Callers append a WHERE/ORDER clause.
+    _STATEMENT_SELECT = (
+        "SELECT s.id, s.iri, s.account_id, s.start_date, s.end_date, "
+        "       s.starting_balance_pence, s.ending_balance_pence, "
+        "       s.status, s.closing_variance_pence, s.notes, "
+        "       s.created_at, s.reconciled_at, "
+        "       (SELECT COUNT(*) FROM statement_txn st "
+        "        WHERE st.statement_id = s.id) AS txn_count, "
+        "       (s.ending_balance_pence - s.starting_balance_pence) "
+        "       - COALESCE((SELECT SUM(t.amount) FROM statement_txn st "
+        "                   JOIN txn t ON t.id = st.txn_id "
+        "                   WHERE st.statement_id = s.id), 0) "
+        "       AS residual_pence "
+        "FROM statement s "
+    )
+
+    def _row_to_statement(self, row) -> StatementRow:
+        return StatementRow(
+            id=int(row["id"]), iri=row["iri"],
+            account_id=int(row["account_id"]),
+            start_date=row["start_date"], end_date=row["end_date"],
+            starting_balance=pence_to_decimal(row["starting_balance_pence"]),
+            ending_balance=pence_to_decimal(row["ending_balance_pence"]),
+            status=row["status"],
+            closing_variance=pence_to_decimal(row["closing_variance_pence"]),
+            notes=row["notes"],
+            created_at=row["created_at"],
+            reconciled_at=row["reconciled_at"],
+            txn_count=int(row["txn_count"]),
+            residual=pence_to_decimal(row["residual_pence"]),
+        )
+
+    def get_statement(self, statement_id: int) -> Optional[StatementRow]:
+        row = self._conn.execute(
+            self._STATEMENT_SELECT + "WHERE s.id = ?", (statement_id,),
+        ).fetchone()
+        return self._row_to_statement(row) if row is not None else None
+
+    def get_open_statement(self, account_id: int) -> Optional[StatementRow]:
+        """The account's single open (in-progress) statement, if any."""
+        row = self._conn.execute(
+            self._STATEMENT_SELECT
+            + "WHERE s.account_id = ? AND s.status = 'open' "
+            + "ORDER BY s.id DESC LIMIT 1",
+            (account_id,),
+        ).fetchone()
+        return self._row_to_statement(row) if row is not None else None
+
+    def list_statements_for_account(
+        self, account_id: int,
+    ) -> list[StatementRow]:
+        """All statements for an account, newest closing date first — the
+        history list."""
+        cur = self._conn.execute(
+            self._STATEMENT_SELECT
+            + "WHERE s.account_id = ? "
+            + "ORDER BY s.end_date DESC, s.id DESC",
+            (account_id,),
+        )
+        return [self._row_to_statement(r) for r in cur]
+
+    def get_last_statement_ending(self, account_id: int) -> Optional[Decimal]:
+        """Ending balance of the most recent *reconciled* statement, used to
+        auto-fill the next statement's starting balance. None if the account
+        has never been reconciled (the dialog then falls back to the current
+        recorded balance, or 0)."""
+        row = self._conn.execute(
+            "SELECT ending_balance_pence FROM statement "
+            "WHERE account_id = ? AND status = 'reconciled' "
+            "ORDER BY end_date DESC, id DESC LIMIT 1",
+            (account_id,),
+        ).fetchone()
+        return pence_to_decimal(row["ending_balance_pence"]) if row else None
+
+    def list_reconcilable_txns(
+        self, account_id: int, *, include_statement_id: Optional[int] = None,
+    ) -> list[TransactionRow]:
+        """Transactions eligible to appear on a reconciliation: every row on
+        the account not already Reconciled to a closed statement, regardless
+        of date (so old stragglers can still be caught — ADR-040 amendment).
+        Rows ticked into a still-open statement are included (their status is
+        unchanged until close), so a resumed pass shows them.
+
+        ``include_statement_id`` additionally pulls in rows already reconciled
+        to *that* statement, so viewing / reopening a closed statement shows
+        its own (Reconciled) rows rather than an empty list. Returned in
+        statement order (date asc); ``running_balance`` is 0 (not meaningful
+        here)."""
+        sid = include_statement_id if include_statement_id is not None else -1
+        cur = self._conn.execute(
+            "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
+            "       t.posted_date, t.amount, "
+            "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
+            "       t.category_id, COALESCE(c.name, '') AS category_name, "
+            "       t.status, COALESCE(t.memo, '') AS memo, "
+            "       t.transfer_id "
+            "FROM txn t "
+            "JOIN      account a  ON a.id = t.account_id "
+            "LEFT JOIN payee p    ON p.id = t.payee_id "
+            "LEFT JOIN category c ON c.id = t.category_id "
+            "WHERE t.account_id = ? "
+            "  AND (t.status != 'Reconciled' OR t.statement_id = ?) "
+            "ORDER BY t.posted_date ASC, t.id ASC",
+            (account_id, sid),
+        )
+        return [
+            TransactionRow(
+                id=r["id"], iri=r["iri"],
+                account_id=r["account_id"], account_name=r["account_name"],
+                posted_date=r["posted_date"],
+                amount=pence_to_decimal(r["amount"]),
+                payee_id=r["payee_id"], payee_name=r["payee_name"],
+                category_id=r["category_id"], category_name=r["category_name"],
+                status=r["status"], memo=r["memo"],
+                running_balance=Decimal("0.00"),
+                transfer_id=r["transfer_id"],
+            )
+            for r in cur
+        ]
+
+    def list_cleared_unreconciled_txns(self, account_id: int) -> list[int]:
+        """Txn ids on the account currently in 'Cleared' status — the
+        pre-tick set for "Automatically select Cleared Transactions"."""
+        cur = self._conn.execute(
+            "SELECT id FROM txn "
+            "WHERE account_id = ? AND status = 'Cleared' "
+            "ORDER BY posted_date ASC, id ASC",
+            (account_id,),
+        )
+        return [int(r["id"]) for r in cur]
+
+    def get_statement_tick_ids(self, statement_id: int) -> set[int]:
+        """The set of txn ids currently ticked into a statement (open or
+        closed) — used to pre-check rows when resuming or viewing."""
+        cur = self._conn.execute(
+            "SELECT txn_id FROM statement_txn WHERE statement_id = ?",
+            (statement_id,),
+        )
+        return {int(r["txn_id"]) for r in cur}
+
+    def _statement_residual_pence(self, statement_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT (s.ending_balance_pence - s.starting_balance_pence) "
+            "       - COALESCE((SELECT SUM(t.amount) FROM statement_txn st "
+            "                   JOIN txn t ON t.id = st.txn_id "
+            "                   WHERE st.statement_id = s.id), 0) "
+            "       AS residual_pence "
+            "FROM statement s WHERE s.id = ?",
+            (statement_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No statement with id {statement_id}.")
+        return int(row["residual_pence"])
+
+    def statement_residual(self, statement_id: int) -> Decimal:
+        """The live "Missing" figure: (ending − starting) − net of the ticked
+        rows. Zero means the statement balances."""
+        return pence_to_decimal(self._statement_residual_pence(statement_id))
+
+    def create_statement(
+        self, *,
+        account_id: int,
+        start_date: str,
+        end_date: str,
+        starting_balance: Decimal,
+        ending_balance: Decimal,
+    ) -> StatementRow:
+        """Create a new open statement. Raises ``ValueError`` if the date
+        range is inverted, if the account already has an open statement (only
+        one in-progress reconciliation per account), or if a statement already
+        exists on ``end_date`` (UNIQUE(account_id, end_date))."""
+        if end_date < start_date:
+            raise ValueError("Statement end date is before its start date.")
+        existing = self.get_open_statement(account_id)
+        if existing is not None:
+            raise ValueError(
+                "This account already has an open statement "
+                f"(ending {existing.end_date}). Finish or delete it first."
+            )
+        iri = new_statement_iri()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO statement "
+                "(iri, account_id, start_date, end_date, "
+                " starting_balance_pence, ending_balance_pence, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'open')",
+                (iri, account_id, start_date, end_date,
+                 decimal_to_pence(starting_balance),
+                 decimal_to_pence(ending_balance)),
+            )
+            self.commit()
+        except sqlite3.IntegrityError as e:
+            self.rollback()
+            raise ValueError(
+                f"Could not create statement: a statement ending {end_date} "
+                f"already exists on this account ({e})"
+            ) from e
+        except Exception:
+            self.rollback()
+            raise
+        row = self.get_statement(int(cur.lastrowid))
+        assert row is not None  # we just inserted it
+        return row
+
+    def update_statement(
+        self,
+        statement_id: int,
+        *,
+        start_date=_UNSET,
+        end_date=_UNSET,
+        starting_balance=_UNSET,
+        ending_balance=_UNSET,
+    ) -> StatementRow:
+        """Edit a statement's dates / balances (the history Edit… verb).
+        Allowed on open and reconciled statements — editing a closed
+        statement's balances simply re-derives its residual (which may flip
+        it to / from out-of-balance). Uses ``self._UNSET`` (see
+        :meth:`update_report` for why the sentinel must be ``self``-qualified
+        inside the body)."""
+        sets: list[str] = []
+        params: list = []
+        if start_date is not self._UNSET:
+            sets.append("start_date = ?")
+            params.append(start_date)
+        if end_date is not self._UNSET:
+            sets.append("end_date = ?")
+            params.append(end_date)
+        if starting_balance is not self._UNSET:
+            sets.append("starting_balance_pence = ?")
+            params.append(decimal_to_pence(starting_balance))
+        if ending_balance is not self._UNSET:
+            sets.append("ending_balance_pence = ?")
+            params.append(decimal_to_pence(ending_balance))
+        if not sets:
+            row = self.get_statement(statement_id)
+            if row is None:
+                raise ValueError(f"No statement with id {statement_id}.")
+            return row
+        params.append(statement_id)
+        try:
+            self._conn.execute(
+                f"UPDATE statement SET {', '.join(sets)} WHERE id = ?", params,
+            )
+            self.commit()
+        except sqlite3.IntegrityError as e:
+            self.rollback()
+            raise ValueError(f"Could not update statement: {e}") from e
+        except Exception:
+            self.rollback()
+            raise
+        row = self.get_statement(statement_id)
+        if row is None:
+            raise ValueError(f"No statement with id {statement_id}.")
+        return row
+
+    def set_statement_ticks(
+        self, statement_id: int, txn_ids: list[int],
+    ) -> None:
+        """Replace the ticked-row set for an open statement. Idempotent —
+        called on every "Save & finish later". Raises if the statement is
+        already closed."""
+        stmt = self.get_statement(statement_id)
+        if stmt is None:
+            raise ValueError(f"No statement with id {statement_id}.")
+        if stmt.status != "open":
+            raise ValueError("Cannot change ticks on a closed statement.")
+        try:
+            self._conn.execute(
+                "DELETE FROM statement_txn WHERE statement_id = ?",
+                (statement_id,),
+            )
+            self._conn.executemany(
+                "INSERT INTO statement_txn (statement_id, txn_id) "
+                "VALUES (?, ?)",
+                [(statement_id, tid) for tid in txn_ids],
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def close_statement(
+        self,
+        statement_id: int,
+        *,
+        ticked_ids: Optional[list[int]] = None,
+        notes: Optional[str] = None,
+    ) -> StatementRow:
+        """Close (reconcile) a statement in one atomic step: persist the final
+        ticked set (if ``ticked_ids`` is given), stamp every ticked row
+        ``status='Reconciled'`` + ``statement_id``, snapshot the residual into
+        ``closing_variance_pence``, and set ``status='reconciled'`` +
+        ``reconciled_at``.
+
+        Closing is allowed even with a non-zero residual (ADR-040 amendment):
+        the statement just shows as out of balance on the history list. Raises
+        if the statement is already closed."""
+        stmt = self.get_statement(statement_id)
+        if stmt is None:
+            raise ValueError(f"No statement with id {statement_id}.")
+        if stmt.status != "open":
+            raise ValueError("Statement is already closed.")
+        try:
+            if ticked_ids is not None:
+                self._conn.execute(
+                    "DELETE FROM statement_txn WHERE statement_id = ?",
+                    (statement_id,),
+                )
+                self._conn.executemany(
+                    "INSERT INTO statement_txn (statement_id, txn_id) "
+                    "VALUES (?, ?)",
+                    [(statement_id, tid) for tid in ticked_ids],
+                )
+            # Stamp the linked rows Reconciled and point them at this statement.
+            self._conn.execute(
+                "UPDATE txn SET status = 'Reconciled', statement_id = ? "
+                "WHERE id IN (SELECT txn_id FROM statement_txn "
+                "             WHERE statement_id = ?)",
+                (statement_id, statement_id),
+            )
+            residual_pence = self._statement_residual_pence(statement_id)
+            self._conn.execute(
+                "UPDATE statement SET status = 'reconciled', "
+                "  closing_variance_pence = ?, notes = ?, "
+                "  reconciled_at = datetime('now') "
+                "WHERE id = ?",
+                (residual_pence, notes, statement_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        row = self.get_statement(statement_id)
+        assert row is not None
+        return row
+
+    def reopen_statement(self, statement_id: int) -> StatementRow:
+        """Reopen a closed statement for editing. Every linked row reverts to
+        ``'Cleared'`` and its ``statement_id`` is cleared; the tick set
+        (``statement_txn``) is kept so rows show pre-ticked on resume. The
+        statement goes back to ``status='open'`` with ``closing_variance``
+        reset and ``reconciled_at`` cleared.
+
+        Note: rows that were Pending/Uncleared at reconcile time come back as
+        Cleared — accepted per ADR-040."""
+        stmt = self.get_statement(statement_id)
+        if stmt is None:
+            raise ValueError(f"No statement with id {statement_id}.")
+        if stmt.status != "reconciled":
+            raise ValueError("Statement is not closed.")
+        try:
+            self._conn.execute(
+                "UPDATE txn SET status = 'Cleared', statement_id = NULL "
+                "WHERE statement_id = ?",
+                (statement_id,),
+            )
+            self._conn.execute(
+                "UPDATE statement SET status = 'open', "
+                "  closing_variance_pence = 0, reconciled_at = NULL "
+                "WHERE id = ?",
+                (statement_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        row = self.get_statement(statement_id)
+        assert row is not None
+        return row
+
+    def delete_statement(self, statement_id: int) -> None:
+        """Delete a statement (history Delete… verb). Any rows currently
+        Reconciled to it revert to ``'Cleared'``; the statement and its tick
+        rows are removed (``statement_txn`` cascades). No-op-safe if already
+        gone."""
+        try:
+            self._conn.execute(
+                "UPDATE txn SET status = 'Cleared', statement_id = NULL "
+                "WHERE statement_id = ?",
+                (statement_id,),
+            )
+            self._conn.execute(
+                "DELETE FROM statement WHERE id = ?", (statement_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def cancel_open_statement(self, statement_id: int) -> None:
+        """Discard an open statement (Cancel → Discard on a pass started this
+        session). Touches no txn — an open statement's ticks never changed any
+        row's status. No-op if the statement is already gone; raises if it is
+        closed (use :meth:`delete_statement` for that)."""
+        stmt = self.get_statement(statement_id)
+        if stmt is None:
+            return
+        if stmt.status != "open":
+            raise ValueError("Use delete_statement for a closed statement.")
+        try:
+            self._conn.execute(
+                "DELETE FROM statement WHERE id = ?", (statement_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def is_reconciled(self, txn_id: int) -> bool:
+        """True if the txn is currently Reconciled to a closed statement —
+        the gate for the "change anyway?" confirm on inline edits."""
+        row = self._conn.execute(
+            "SELECT 1 FROM txn WHERE id = ? AND status = 'Reconciled'",
+            (txn_id,),
+        ).fetchone()
+        return row is not None
+
+    def get_statement_for_txn(self, txn_id: int) -> Optional[StatementRow]:
+        """The statement a row is reconciled to (for the edit-warning copy),
+        or None if it isn't linked to one."""
+        row = self._conn.execute(
+            "SELECT statement_id FROM txn WHERE id = ?", (txn_id,),
+        ).fetchone()
+        if row is None or row["statement_id"] is None:
+            return None
+        return self.get_statement(int(row["statement_id"]))

@@ -59,6 +59,12 @@ class TransactionTableModel(QAbstractTableModel):
             self.COLUMNS_SINGLE if account_id is not None else self.COLUMNS_ALL
         )
         self._rows: list[TransactionRow] = []
+        # Optional gate (ADR-040): set by the window to a callable
+        # ``(txn_id) -> bool``. When a reconciled row is about to be edited
+        # inline, the model asks the gate; a False answer rejects the edit.
+        # Left None (no gate) means edits always proceed — keeps the model
+        # usable headless / in tests without a UI confirm.
+        self.reconciled_edit_guard = None
 
     def reload(self) -> None:
         self.beginResetModel()
@@ -130,6 +136,12 @@ class TransactionTableModel(QAbstractTableModel):
             return False
 
         row = self._rows[index.row()]
+        if (
+            self.reconciled_edit_guard is not None
+            and self._repo.is_reconciled(row.id)
+            and not self.reconciled_edit_guard(row.id)
+        ):
+            return False
         updated = self._apply_edit(row, col_name, value)
         if updated is None:
             return False

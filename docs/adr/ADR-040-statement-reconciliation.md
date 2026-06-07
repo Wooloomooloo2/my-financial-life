@@ -243,3 +243,105 @@ Clicking the row:
 - **Reconciliation reports** (e.g. "show me the variance history across my accounts"). Out of scope; can be added as a saved-report type later under ADR-039's planning umbrella.
 - **Read-only sharing of a reconciled statement** (export to PDF / CSV) — out of scope; tracked as a polish item.
 - **Bank-feed integration that auto-reconciles** — out of scope; MFL doesn't do live bank feeds.
+
+---
+
+## Amendment — 2026-06-07 (Banktivity-aligned UI + simplified close model)
+
+**Status:** Accepted. Supersedes the conflicting parts of the original decision below; everything not contradicted here still stands. Migration 0011 has **not** shipped yet, so the schema is revised *in place* rather than via a follow-on ALTER.
+
+The owner supplied the concrete Banktivity reconciliation UX (three reference screenshots: Statements history list, the dates/balances entry screen, and the check-off screen with a live "Missing" counter) plus answers to three design forks. This amendment locks the as-to-be-built shape.
+
+### What changed and why
+
+**1. A statement is a date *range* with both a starting and an ending balance.**
+The original schema stored a single `statement_date` + `ending_balance_pence`. Banktivity's entry screen collects **Starting Date / Ending Date** and **Starting Balance / Ending Balance**, showing the **Change in balance** (= ending − starting) as a derived figure. The starting balance is **auto-populated from the previous reconciliation's ending balance** (`get_last_statement_ending`), and is editable for the first-ever statement. This makes the period self-describing and lets the history list show START/END per row.
+
+**2. "Missing" replaces "Variance," and is the live correctness signal.**
+On the check-off screen, **Missing = (ending − starting) − (net of ticked rows)**. (Algebraically identical to the old `ending − cleared_total`, but framed against the *change in balance* the way the screenshot presents it.) When Missing hits £0.00 the statement ties out. Displayed top-right with a green check at zero, amber/red otherwise. The check-off list also shows running **WITHDRAWALS / CHECKS / DEPOSITS** subtotals of the ticked set, and amounts render in **two columns (Withdrawal | Deposit)** rather than one signed column, matching the screenshot.
+
+**3. Auto-select cleared transactions.**
+The entry screen carries an **"Automatically select [Cleared Transactions]"** control. On entering the check-off page, all currently-`Cleared`, not-yet-reconciled rows are **pre-ticked** (`list_cleared_unreconciled_txns`). The user then adjusts. (The dropdown reserves room for future modes — "None", "All" — but round 1 ships only "Cleared Transactions" and "None".)
+
+**4. The check-off list shows ALL unreconciled rows, any date** (fork answer #3). Old stragglers from before the statement window are still tickable; the date range drives the auto-select default and the header display, not a hard filter on the list.
+
+**5. Single Save button; closing with a non-zero Missing is allowed and *flagged*, not blocked** (fork answers #1 + #2). This is the biggest simplification:
+- **Save** is the only primary action. If Missing = £0.00 → the statement closes cleanly (`status='reconciled'`, every ticked row → `Reconciled`). If Missing ≠ £0.00 → it **still closes**, but `closing_variance_pence` records the residual and the history row is flagged (see below). No separate "Reconcile" button.
+- **Add Transaction** is available *while reconciling* — it opens the existing New-Transaction dialog pinned to this account; the new row appears in the list (auto-ticked). This is how a user fixes a known-missing line (a bank fee, an un-entered cheque) without leaving the screen, and it **replaces ADR-040's auto "Add adjustment" mechanism entirely**.
+- **Resume** is preserved without a second primary button: **Cancel** with unsaved ticks offers *Discard* vs *Save & finish later* (`status='open'`). Open statements surface as "in progress" on the history list. Only one open statement per account (unchanged).
+
+  Consequently the **auto-adjustment txn is dropped**: the `adjustment_txn_id` column, the `AdjustmentSpec` dataclass, the close-time adjustment form, and the seeded system **Adjustment category are all removed** from the design. A user who wants an adjustment line just uses Add Transaction and categorises it themselves.
+
+**6. "Out of balance" is a computed history state, not a stored status** (closes the owner's requirement: *"if the amount is changed on a reconciled transaction, the statement history will show it as out of balance"*). The `reconciled_with_variance` enum value is dropped; `status` is just `'open' | 'reconciled'`. The history list derives each closed statement's tie-out **live**: `residual = (ending − starting) − (current net of linked rows)`. If `residual == 0` → green "Reconciled"; if `residual != 0` → amber **"Out of balance · £X"** (this fires both for statements deliberately closed with a Missing amount *and* for ones that drifted later because a reconciled row's amount was edited or a linked row was deleted). Computing it live means every edit path is covered for free — inline amount edit, bulk edit, delete — with no need to hook each one. `closing_variance_pence` is retained only as the at-close snapshot.
+
+**7. Three entry points, all opening the Statements history surface:**
+- a visible **Reconcile** button on the register pane (new — the register had no toolbar; this introduces a small action button alongside it),
+- the per-account summary's reserved **RECONCILE ›** row,
+- **Account → Reconcile…** (Ctrl+Alt+R, unchanged).
+
+  All three open the **Statements history window** for the current account (account-mode only; disabled in all-transactions mode). From there **"Make a new statement"** launches the two-page wizard; clicking a statement opens it (read-only when reconciled, with **Reopen for editing**); **Edit…** re-opens the dates/balances page; **Delete…** removes the statement and reverts its linked rows to `Cleared`.
+
+### Revised schema (migration 0011_reconciliation.sql)
+
+```sql
+CREATE TABLE statement (
+    id                     INTEGER PRIMARY KEY,
+    iri                    TEXT NOT NULL UNIQUE,
+    account_id             INTEGER NOT NULL
+                           REFERENCES account(id) ON DELETE CASCADE,
+    start_date             TEXT NOT NULL,
+    end_date               TEXT NOT NULL,
+    starting_balance_pence INTEGER NOT NULL,
+    ending_balance_pence   INTEGER NOT NULL,
+    status                 TEXT NOT NULL
+                           CHECK (status IN ('open', 'reconciled')),
+    closing_variance_pence INTEGER NOT NULL DEFAULT 0,  -- at-close snapshot of Missing
+    notes                  TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    reconciled_at          TEXT,
+    UNIQUE(account_id, end_date)
+);
+
+CREATE TABLE statement_txn (
+    statement_id  INTEGER NOT NULL REFERENCES statement(id) ON DELETE CASCADE,
+    txn_id        INTEGER NOT NULL REFERENCES txn(id)        ON DELETE CASCADE,
+    PRIMARY KEY (statement_id, txn_id)
+);
+
+ALTER TABLE txn ADD COLUMN statement_id INTEGER
+    REFERENCES statement(id) ON DELETE SET NULL;
+
+CREATE INDEX idx_txn_statement ON txn(statement_id);
+```
+
+Dropped vs the original 0011 sketch: `statement_date` (→ `start_date` + `end_date`), the `reconciled_with_variance` status, `adjustment_txn_id`, and the `INSERT … Adjustment category` seed. Added: `start_date`, `starting_balance_pence`.
+
+### Revised repository surface
+
+Changed/added relative to the original list:
+- `create_statement(*, account_id, start_date, end_date, starting_balance, ending_balance) -> StatementRow` — status `'open'`; raises if an open statement already exists.
+- `get_last_statement_ending(account_id) -> Optional[int]` — most recent reconciled statement's ending balance, to auto-fill the next starting balance (falls back to the account's current recorded balance, else 0).
+- `list_cleared_unreconciled_txns(account_id) -> list[int]` — txn ids to pre-tick for "Automatically select Cleared Transactions".
+- `list_reconcilable_txns(account_id) -> list[TransactionRow]` — all not-yet-reconciled rows + any linked to the currently-open statement (so resume works); any date.
+- `update_statement(statement_id, *, start_date, end_date, starting_balance, ending_balance) -> StatementRow` — the Edit… verb (open statements, or a reconciled one being corrected).
+- `delete_statement(statement_id) -> None` — the Delete… verb; reverts every linked row to `Cleared`, removes the statement + its join rows.
+- `statement_residual(statement_id) -> int` — `(ending − starting) − current_net_of_linked`; 0 ⇒ balanced. Drives the history out-of-balance display.
+- `close_statement(statement_id, *, notes=None) -> StatementRow` — stamps ticked rows `Reconciled` + `statement_id`, sets `status='reconciled'`, stores `closing_variance_pence = statement_residual(...)` and `reconciled_at`. No adjustment parameter.
+- `reopen_statement`, `get_open_statement`, `get_statement`, `list_statements_for_account`, `set_statement_ticks`, `cancel_open_statement`, `is_reconciled(txn_id)` — unchanged from the original ADR (minus the adjustment handling in reopen).
+
+### Revised files-touched
+
+| File | Change |
+|---|---|
+| `mfl_desktop/migrations/0011_reconciliation.sql` | New — revised schema above (no Adjustment seed) |
+| `mfl_desktop/db/repository.py` | `StatementRow` dataclass + the methods above |
+| `mfl_desktop/ui/reconcile_wizard.py` | New — two-page wizard: (1) dates + balances + auto-select, (2) check-off with Missing/subtotals/Withdrawal+Deposit columns/Add Transaction/Save |
+| `mfl_desktop/ui/statements_window.py` | New — per-account Statements history (Make new / Edit… / Delete… / status icon / START+END / count); opens the wizard |
+| `mfl_desktop/ui/register_window.py` | Reconcile button on the register pane + Account → Reconcile… (Ctrl+Alt+R) + the reconciled-row edit-warning helper |
+| `mfl_desktop/ui/account_summary_window.py` | RECONCILE row opens the Statements window |
+| `mfl_desktop/import_engine/import_service.py` | Skip `Reconciled` rows in the potential-match path |
+| `CLAUDE_CONTEXT.md` | Status line + ADR-table note that 0011/ADR-040 shipped with this amendment |
+
+### Carried-over decisions unchanged by this amendment
+
+Transfer pairs reconcile independently per side; cross-currency accounts reconcile in native currency (no conversion); reconciled rows are import-immutable and editable only via a confirm; reopen reverts linked rows to `Cleared` (lossy on prior Pending/Uncleared, accepted); one open statement per account.

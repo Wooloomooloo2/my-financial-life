@@ -65,6 +65,7 @@ from mfl_desktop.account_summary import (
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui.balance_flow_chart import BalanceFlowChart
 from mfl_desktop.ui.custom_period_dialog import CustomPeriodDialog
+from mfl_desktop.ui.statements_window import StatementsWindow
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow,
     TxnListFilter,
@@ -553,8 +554,9 @@ class AccountSummaryWindow(QMainWindow):
         return panel
 
     def _build_reconcile_placeholder(self) -> QWidget:
-        """Banktivity-style 'NO STATEMENTS · RECONCILE ›' row. Click opens
-        an info dialog explaining the feature is on the way."""
+        """Banktivity-style statement row (ADR-040). The status text reflects
+        the account's statement state; the button opens the statement history
+        (:class:`StatementsWindow`)."""
         row = QFrame()
         row.setStyleSheet(
             "QFrame { border: 1px solid #e5e7eb; border-radius: 6px; "
@@ -564,12 +566,12 @@ class AccountSummaryWindow(QMainWindow):
         h.setContentsMargins(10, 8, 10, 8)
         h.setSpacing(8)
 
-        status = QLabel("NO STATEMENTS")
-        status.setStyleSheet(
+        self._statements_status_lbl = QLabel("NO STATEMENTS")
+        self._statements_status_lbl.setStyleSheet(
             "color: #6b7280; letter-spacing: 1px; font-size: 9pt; "
             "background: transparent; border: none;"
         )
-        h.addWidget(status)
+        h.addWidget(self._statements_status_lbl)
         h.addStretch(1)
 
         reconcile_btn = QPushButton("RECONCILE ›")
@@ -581,7 +583,32 @@ class AccountSummaryWindow(QMainWindow):
         reconcile_btn.setCursor(Qt.PointingHandCursor)
         reconcile_btn.clicked.connect(self._on_reconcile_clicked)
         h.addWidget(reconcile_btn)
+        self._refresh_statements_row()
         return row
+
+    def _refresh_statements_row(self) -> None:
+        """Update the statement-row status text from the account's statements.
+        Safe to call before the row is built (guards on the attribute)."""
+        if not hasattr(self, "_statements_status_lbl"):
+            return
+        statements = self._repo.list_statements_for_account(self._account_id)
+        if not statements:
+            self._statements_status_lbl.setText("NO STATEMENTS")
+            return
+        open_stmt = next((s for s in statements if s.status == "open"), None)
+        if open_stmt is not None:
+            d = date.fromisoformat(open_stmt.end_date)
+            self._statements_status_lbl.setText(
+                f"IN PROGRESS · {d.day} {d.strftime('%b %Y')}"
+            )
+            return
+        out = sum(1 for s in statements if s.is_out_of_balance)
+        last = statements[0]  # newest end_date first
+        d = date.fromisoformat(last.end_date)
+        text = f"LAST RECONCILED · {d.day} {d.strftime('%b %Y')}"
+        if out:
+            text += f" · {out} OUT OF BALANCE"
+        self._statements_status_lbl.setText(text)
 
     def _build_separator(self) -> QFrame:
         sep = QFrame()
@@ -665,6 +692,7 @@ class AccountSummaryWindow(QMainWindow):
             return
         self._account = account
         self.setWindowTitle(f"{account.name} · Summary")
+        self._refresh_statements_row()
 
         txns = self._repo.list_transactions_for_account(self._account_id)
         opening_balance = self._account.opening_balance
@@ -885,13 +913,12 @@ class AccountSummaryWindow(QMainWindow):
         )
 
     def _on_reconcile_clicked(self) -> None:
-        QMessageBox.information(
-            self,
-            "Reconciliation",
-            "Statement reconciliation is coming in a future release.\n\n"
-            "When it lands, this button will open the reconcile flow for "
-            f"{self._account.name}.",
-        )
+        dialog = StatementsWindow(self._repo, self._account, parent=self)
+        dialog.statements_changed.connect(self._refresh_statements_row)
+        dialog.exec()
+        # Statuses / balances may have changed (a close stamps rows
+        # Reconciled); re-pull everything on this screen.
+        self.reload()
 
     # ── drill-down to TransactionsListWindow (ADR-034) ──
 
