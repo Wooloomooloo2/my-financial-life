@@ -71,6 +71,10 @@ Named graphs:
 
 ## Running locally
 
+The live application is the native desktop app under `mfl_desktop/` (PySide6 +
+SQLite). The legacy v0.1 web app (`main.py` + `app/`) is maintenance-only — see
+[Legacy web app](#legacy-web-app-v01) below.
+
 ### Prerequisites
 - Python 3.13+
 - Git
@@ -81,23 +85,64 @@ Named graphs:
 git clone https://github.com/Wooloomooloo2/my-financial-life.git
 cd my-financial-life
 python -m venv .venv
+```
 
-# Windows
-.venv\Scripts\activate
+Activate the virtual environment:
 
+```powershell
+# Windows — PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bat
+:: Windows — cmd.exe
+.venv\Scripts\activate.bat
+```
+
+```bash
 # macOS / Linux
 source .venv/bin/activate
+```
 
+> **PowerShell note:** use `.\.venv\Scripts\Activate.ps1` (with the `.\` prefix
+> and the `.ps1` extension). The bare `.venv\Scripts\activate` form only works
+> in cmd.exe — in PowerShell it errors with *"The module '.venv' could not be
+> loaded."* If activation is blocked by execution policy, run
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry.
+
+Install dependencies, create the database, and launch:
+
+```bash
+pip install -r mfl_desktop/requirements.txt
+
+# Create the SQLite database (mfl_dev.db) and seed a Person + first account
+python -m mfl_desktop.cli init
+
+# Launch the desktop app
+python -m mfl_desktop
+```
+
+By default the app uses `mfl_dev.db` in the current directory. Pass
+`--db PATH` to either command to use a different file.
+
+### First run
+1. Add your accounts (sidebar context menu → New Account, or the Account menu)
+2. Import a bank file (OFX / QFX / CSV) or add transactions manually
+3. Set a base currency and any FX API key under **Manage → Currencies…**
+
+---
+
+## Legacy web app (v0.1)
+
+The original FastAPI + Oxigraph web app still lives at `main.py` + `app/` and is
+kept for reference only — no new features. To run it:
+
+```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-Open `http://127.0.0.1:8000` in your browser.
-
-### First run
-1. Go to Settings and enter your name and base currency
-2. Add your first account under Accounts
-3. Import a bank file (OFX or CSV) or add transactions manually
+Then open `http://127.0.0.1:8000` in your browser.
 
 ---
 
