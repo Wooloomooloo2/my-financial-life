@@ -16,11 +16,11 @@ acceptance, distinct from cancel which surfaces as ``QDialog.Rejected``).
 """
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QDoubleValidator, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
     QTableWidget,
@@ -368,6 +369,14 @@ class BulkRowAnalysis:
     The dialog shows a per-row picker only when ``candidates`` has more
     than one entry (the ambiguous case); otherwise the default decision
     is unambiguous and the row renders as a single summary line.
+
+    ``dest_currency`` is the destination account's currency.
+    ``fx_prefill_amount`` is the pre-computed magnitude (positive,
+    Decimal) for the partner side per ADR-035's nearest-rate lookup;
+    ``None`` when no rate exists. Both feed the cross-currency
+    destination-amount column (ADR-035 amendment 2026-06-07). For
+    same-currency rows ``dest_currency == source_currency`` and the
+    column stays blank for that row.
     """
     source_txn_id: int
     source_account_id: int
@@ -377,6 +386,8 @@ class BulkRowAnalysis:
     source_date: str
     source_payee: str
     candidates: list[TransferCandidate]
+    dest_currency: str = ""
+    fx_prefill_amount: Optional[Decimal] = None
 
 
 class BulkTransferReviewDialog(QDialog):
@@ -418,6 +429,16 @@ class BulkTransferReviewDialog(QDialog):
         self._category_id = category_id
         # row index → QComboBox (None for non-ambiguous rows)
         self._row_combos: dict[int, Optional[object]] = {}
+        # row index → QLineEdit for the destination-amount input (only
+        # populated on cross-currency rows; ADR-035 amendment).
+        self._row_amount_fields: dict[int, Optional[QLineEdit]] = {}
+
+        # Whether any row crosses currencies — drives the extra
+        # "Dest amount" column.
+        self._has_cross_currency = any(
+            a.dest_currency and a.dest_currency != a.source_currency
+            for a in analyses
+        )
 
         # Bucket counts
         will_link = sum(1 for a in analyses if len(a.candidates) == 1)
@@ -444,12 +465,15 @@ class BulkTransferReviewDialog(QDialog):
         outer.addWidget(summary)
 
         # Table of source rows with per-row decision in the last column.
-        # 5 cols: source date / source amount / source payee / arrow /
-        #         decision widget (label OR combo)
-        self._table = QTableWidget(len(analyses), 5, self)
-        self._table.setHorizontalHeaderLabels(
-            ["Date", "Amount", "Payee", "→", "Match to"]
-        )
+        # 5 cols normally (Date / Amount / Payee / → / Match to); an
+        # extra "Dest amount" column appears when any row crosses
+        # currencies (ADR-035 amendment 2026-06-07).
+        col_count = 6 if self._has_cross_currency else 5
+        self._table = QTableWidget(len(analyses), col_count, self)
+        headers = ["Date", "Amount", "Payee", "→", "Match to"]
+        if self._has_cross_currency:
+            headers.append("Dest amount")
+        self._table.setHorizontalHeaderLabels(headers)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setSelectionMode(QAbstractItemView.NoSelection)
         self._table.verticalHeader().setVisible(False)
@@ -459,6 +483,8 @@ class BulkTransferReviewDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.Stretch)
+        if self._has_cross_currency:
+            header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
 
         for i, a in enumerate(analyses):
             self._table.setItem(i, 0, QTableWidgetItem(a.source_date))
@@ -474,6 +500,8 @@ class BulkTransferReviewDialog(QDialog):
             arrow.setTextAlignment(Qt.AlignCenter)
             self._table.setItem(i, 3, arrow)
             self._populate_decision_cell(i, a)
+            if self._has_cross_currency:
+                self._populate_dest_amount_cell(i, a)
 
         self._table.resizeRowsToContents()
         outer.addWidget(self._table, 1)
@@ -496,6 +524,42 @@ class BulkTransferReviewDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def _populate_dest_amount_cell(
+        self, row: int, a: BulkRowAnalysis,
+    ) -> None:
+        """Render col 5 — the destination-amount input column. Only
+        cross-currency rows get an editable input; same-currency rows
+        show a dash for symmetry (no input needed, the repository's
+        same-currency early-exit picks the source magnitude). The input
+        is pre-filled from ``fx_prefill_amount`` when available."""
+        if not a.dest_currency or a.dest_currency == a.source_currency:
+            dash = QTableWidgetItem("—")
+            dash.setTextAlignment(Qt.AlignCenter)
+            self._table.setItem(row, 5, dash)
+            self._row_amount_fields[row] = None
+            return
+        edit = QLineEdit()
+        validator = QDoubleValidator(0.0, 1_000_000_000.0, 4, edit)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        edit.setValidator(validator)
+        edit.setPlaceholderText(a.dest_currency)
+        edit.setAlignment(Qt.AlignRight)
+        if a.fx_prefill_amount is not None:
+            edit.setText(f"{a.fx_prefill_amount:.2f}")
+            edit.setToolTip(
+                f"Pre-filled from stored {a.source_currency} → "
+                f"{a.dest_currency} rate. Edit if your statement shows "
+                f"a different amount."
+            )
+        else:
+            edit.setToolTip(
+                f"No stored {a.source_currency} → {a.dest_currency} "
+                f"rate. Enter the {a.dest_currency} amount that hit "
+                f"the destination account."
+            )
+        self._table.setCellWidget(row, 5, edit)
+        self._row_amount_fields[row] = edit
 
     def _populate_decision_cell(self, row: int, a: BulkRowAnalysis) -> None:
         if len(a.candidates) == 0:
@@ -532,10 +596,35 @@ class BulkTransferReviewDialog(QDialog):
         self._table.setCellWidget(row, 4, combo)
         self._row_combos[row] = combo
 
+    def _row_to_amount(self, row: int, a: BulkRowAnalysis) -> Optional[Decimal]:
+        """Read the cross-currency destination-amount input for a row,
+        or ``None`` if the row is same-currency / has no input. Falls
+        back to the FX pre-fill if the user blanked the field; surfaces
+        the user's typed value otherwise. Bad text → falls back to
+        pre-fill too (the validator should have caught it, but be
+        defensive at submit time)."""
+        if not a.dest_currency or a.dest_currency == a.source_currency:
+            return None
+        field = self._row_amount_fields.get(row)
+        if field is None:
+            return a.fx_prefill_amount
+        text = field.text().strip()
+        if not text:
+            return a.fx_prefill_amount
+        try:
+            value = Decimal(text)
+        except InvalidOperation:
+            return a.fx_prefill_amount
+        if value <= 0:
+            return a.fx_prefill_amount
+        return value
+
     def values(self) -> list[BulkTransferDecision]:
         """Build the decision plan in input order. For non-ambiguous rows
         the default applies; for ambiguous rows the combo's current
-        selection feeds the LinkExisting / CreateNew choice."""
+        selection feeds the LinkExisting / CreateNew choice. Cross-
+        currency CreateNew rows additionally carry the user-entered (or
+        FX-pre-filled) ``to_amount`` per ADR-035 amendment 2026-06-07."""
         decisions: list[BulkTransferDecision] = []
         for i, a in enumerate(self._analyses):
             combo = self._row_combos.get(i)
@@ -552,6 +641,7 @@ class BulkTransferReviewDialog(QDialog):
                         source_txn_id=a.source_txn_id,
                         other_account_id=self._other_account_id,
                         category_id=self._category_id,
+                        to_amount=self._row_to_amount(i, a),
                     ))
             else:
                 chosen_id = combo.currentData()
@@ -560,6 +650,7 @@ class BulkTransferReviewDialog(QDialog):
                         source_txn_id=a.source_txn_id,
                         other_account_id=self._other_account_id,
                         category_id=self._category_id,
+                        to_amount=self._row_to_amount(i, a),
                     ))
                 else:
                     decisions.append(LinkExisting(

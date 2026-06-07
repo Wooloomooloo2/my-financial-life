@@ -39,6 +39,9 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import Repository, ScheduledTxnRow
 from mfl_desktop.ui.schedule_dialog import ScheduleDialog
+from mfl_desktop.ui.transfer_destination_dialog import (
+    TransferDestinationDialog,
+)
 
 
 _CADENCE_LABELS = {
@@ -359,8 +362,60 @@ class SchedulesDialog(QDialog):
             if confirm != QMessageBox.Yes:
                 return
 
+        # ADR-035 amendment 2026-06-07: for cross-currency transfer
+        # schedules, give the user a chance to supply the partner-side
+        # amount before posting so the path doesn't depend on a stored
+        # FX rate. The other account is fixed by the schedule, so the
+        # dialog opens with the combo locked to transfer_to_account_id.
+        to_amount: Optional[Decimal] = None
+        if (
+            sched.category_kind == "transfer"
+            and sched.transfer_to_account_id is not None
+        ):
+            source_acct = self._repo.get_account_by_id(sched.account_id)
+            dest_acct = self._repo.get_account_by_id(
+                sched.transfer_to_account_id,
+            )
+            if (
+                source_acct is not None
+                and dest_acct is not None
+                and source_acct.currency != dest_acct.currency
+            ):
+                effective_amount = (
+                    actual if actual is not None else sched.estimated_amount
+                )
+                dialog = TransferDestinationDialog(
+                    repo=self._repo,
+                    source_account=source_acct,
+                    source_magnitude=abs(effective_amount),
+                    source_signed_display=effective_amount,
+                    posted_date=sched.next_due_date,
+                    exclude_account_ids=set(),
+                    locked_account_id=sched.transfer_to_account_id,
+                    title="Cross-currency transfer",
+                    intro=(
+                        "This transfer crosses currencies — confirm the "
+                        "amount on the other account's side."
+                    ),
+                    parent=self,
+                )
+                if dialog.exec() != QDialog.Accepted:
+                    return
+                choice = dialog.values()
+                if choice is None:
+                    return
+                # The dialog's other_amount is "magnitude on the
+                # transfer_to_account_id side" (in its currency), which
+                # is exactly what post_scheduled_txn's to_amount means
+                # regardless of inflow/outflow direction.
+                to_amount = choice.other_amount
+
         try:
-            self._repo.post_scheduled_txn(ids[0], actual_amount=actual)
+            self._repo.post_scheduled_txn(
+                ids[0],
+                actual_amount=actual,
+                to_amount=to_amount,
+            )
         except ValueError as e:
             QMessageBox.warning(self, "Could not post", str(e))
             return

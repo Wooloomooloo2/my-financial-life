@@ -19,6 +19,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -28,6 +29,11 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.account_types import ACCOUNT_TYPES, by_storage
+from mfl_desktop.currencies import (
+    ISO_4217_CODES,
+    ISO_4217_CURRENCIES,
+    currency_label,
+)
 from mfl_desktop.db.repository import AccountSummary
 
 
@@ -76,11 +82,37 @@ class AccountDialog(QDialog):
                 "this account and create a new one."
             )
 
-        self._currency_edit = QLineEdit()
-        self._currency_edit.setMaxLength(3)
-        self._currency_edit.setPlaceholderText("GBP")
-        # Force uppercase as the user types.
-        self._currency_edit.textChanged.connect(self._uppercase_currency)
+        # Editable typeahead combo seeded with the ISO 4217 active-currency
+        # list. The user types the code (or the currency name — the
+        # MatchContains filter on the QCompleter matches against the
+        # full "CODE — Name" label so typing "dollar" narrows to all
+        # dollar variants) and picks. Free-text entries that aren't in
+        # the list are rejected on save with a hint — see _on_accept.
+        # If we're editing an existing account whose stored code isn't
+        # in the current ISO list (legacy data from before this dialog
+        # tightened), the existing code is added at the top as a one-off
+        # so the dialog can round-trip without forcing the user to
+        # re-pick on every save.
+        self._currency_combo = QComboBox()
+        self._currency_combo.setEditable(True)
+        self._currency_combo.setInsertPolicy(QComboBox.NoInsert)
+        existing_code = existing.currency.strip().upper() if is_edit else ""
+        if existing_code and existing_code not in ISO_4217_CODES:
+            self._currency_combo.addItem(currency_label(existing_code), existing_code)
+        for code, _name in ISO_4217_CURRENCIES:
+            self._currency_combo.addItem(currency_label(code), code)
+        completer = self._currency_combo.completer()
+        if completer is not None:
+            completer.setCompletionMode(QCompleter.PopupCompletion)
+            completer.setFilterMode(Qt.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+        # Uppercase the user's typing in the line-edit half so the
+        # combo's match logic doesn't care about case ("usd" → "USD"
+        # in place; the QCompleter filter is also case-insensitive so
+        # this is belt-and-braces).
+        line_edit = self._currency_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.textChanged.connect(self._uppercase_currency)
 
         self._opening_edit = QLineEdit()
         self._opening_edit.setAlignment(Qt.AlignRight)
@@ -92,10 +124,10 @@ class AccountDialog(QDialog):
         # Prefill in edit mode.
         if is_edit:
             self._name_edit.setText(existing.name)
-            self._currency_edit.setText(existing.currency)
+            self._set_currency(existing.currency)
             self._opening_edit.setText(f"{existing.opening_balance:.2f}")
         else:
-            self._currency_edit.setText("GBP")
+            self._set_currency("GBP")
             self._opening_edit.setText("0.00")
 
         # ── layout ──
@@ -103,7 +135,7 @@ class AccountDialog(QDialog):
         form = QFormLayout()
         form.addRow("Name:", self._name_edit)
         form.addRow("Type:", self._type_combo)
-        form.addRow("Currency:", self._currency_edit)
+        form.addRow("Currency:", self._currency_combo)
         form.addRow("Opening balance:", self._opening_edit)
 
         buttons = QDialogButtonBox(
@@ -121,14 +153,56 @@ class AccountDialog(QDialog):
 
     # ── helpers ──
 
+    def _set_currency(self, code: str) -> None:
+        """Pre-select the combo to ``code``. If the code is in the ISO
+        list (the normal case), the matching row is selected. If it's a
+        legacy non-ISO code already on an existing account, the constructor
+        added a one-off row at the top so this still selects it cleanly."""
+        target = code.strip().upper()
+        for i in range(self._currency_combo.count()):
+            if self._currency_combo.itemData(i) == target:
+                self._currency_combo.setCurrentIndex(i)
+                return
+        # Defensive: shouldn't happen because the ctor added a one-off
+        # row for any non-ISO existing code, but if it does, fall back
+        # to typing the code into the line-edit so the user sees what's
+        # stored.
+        self._currency_combo.setEditText(target)
+
     def _uppercase_currency(self, text: str) -> None:
+        """Force the line-edit half of the combo to uppercase as the user
+        types. The QCompleter's case-insensitive filter would still match
+        either way, but uppercase-on-type makes the field's visual state
+        match the stored code, which avoids a "did I save 'gbp' or 'GBP'?"
+        moment when the dialog re-opens."""
+        line_edit = self._currency_combo.lineEdit()
+        if line_edit is None:
+            return
         upper = text.upper()
-        if upper != text:
-            cursor = self._currency_edit.cursorPosition()
-            self._currency_edit.blockSignals(True)
-            self._currency_edit.setText(upper)
-            self._currency_edit.setCursorPosition(cursor)
-            self._currency_edit.blockSignals(False)
+        if upper == text:
+            return
+        cursor = line_edit.cursorPosition()
+        line_edit.blockSignals(True)
+        line_edit.setText(upper)
+        line_edit.setCursorPosition(cursor)
+        line_edit.blockSignals(False)
+
+    def _resolve_currency_choice(self) -> str:
+        """Map the combo's current state to a 3-letter code. The order
+        matters: if the user picked a real dropdown row, ``currentData``
+        carries the code; if they free-typed, we parse the first three
+        letters of ``currentText`` as the candidate code (the combo
+        shows "USD — US Dollar" so a partial match might leave the text
+        in that state; using the first three uppercase letters is the
+        safe parse). The validator in ``_on_accept`` rejects anything
+        that isn't in the ISO list, so this is just a recovery path."""
+        data = self._currency_combo.currentData()
+        if isinstance(data, str) and len(data) == 3:
+            return data.strip().upper()
+        text = self._currency_combo.currentText().strip().upper()
+        if " " in text:
+            text = text.split(" ", 1)[0]
+        return text[:3]
 
     def _on_accept(self) -> None:
         name = self._name_edit.text().strip()
@@ -136,11 +210,13 @@ class AccountDialog(QDialog):
             QMessageBox.warning(self, "Name required", "Enter an account name.")
             return
 
-        currency = self._currency_edit.text().strip().upper()
-        if len(currency) != 3 or not currency.isalpha():
+        currency = self._resolve_currency_choice()
+        if currency not in ISO_4217_CODES:
             QMessageBox.warning(
-                self, "Invalid currency",
-                "Currency must be a 3-letter ISO code (e.g. GBP, USD, EUR).",
+                self, "Unknown currency",
+                f"{currency or '(empty)'} isn't an active ISO 4217 currency "
+                f"code. Pick one from the dropdown — typing a code (USD, "
+                f"GBP, EUR…) or part of the currency name narrows the list.",
             )
             return
 

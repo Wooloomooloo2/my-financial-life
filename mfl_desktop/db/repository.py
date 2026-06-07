@@ -1828,6 +1828,122 @@ class Repository:
         )
         self.commit()
 
+    def update_transaction_amount(
+        self, txn_id: int, new_signed_amount: Decimal,
+    ) -> Decimal:
+        """Update a transaction's signed amount.
+
+        Non-transfer rows: simple update. Sign is taken from the caller's
+        value (a deposit corrected from +50 to -50 is allowed).
+
+        Transfer-half rows: preserves the row's existing sign — the
+        direction of a transfer is encoded by its source/destination
+        accounts on the ``transfer`` parent row, so flipping a half-row's
+        sign would un-pair it from the partner. The caller's magnitude
+        replaces the existing magnitude. Same-currency transfers also
+        sync the partner's magnitude (the two halves must agree).
+        Cross-currency transfers leave the partner's amount alone and
+        recompute ``transfer.rate`` from the two final magnitudes;
+        ``rate_source`` becomes ``'derived'``.
+
+        Atomic. Returns the value actually stored on this row (may
+        differ from input on a transfer-sign flip — sign is coerced
+        back to the original)."""
+        if new_signed_amount == 0:
+            raise ValueError("Transaction amount must not be zero.")
+        row = self._conn.execute(
+            "SELECT id, account_id, amount, transfer_id "
+            "FROM txn WHERE id = ?",
+            (txn_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No transaction with id {txn_id}")
+        existing_pence = int(row["amount"])
+        existing_sign = -1 if existing_pence < 0 else 1
+        transfer_iri = row["transfer_id"]
+
+        try:
+            if transfer_iri is None:
+                # Non-transfer: store exactly what the caller asked for.
+                self._conn.execute(
+                    "UPDATE txn SET amount = ? WHERE id = ?",
+                    (decimal_to_pence(new_signed_amount), txn_id),
+                )
+                self.commit()
+                return new_signed_amount
+
+            # Transfer half — preserve this row's sign; treat caller's
+            # value as the new magnitude regardless of the sign they
+            # typed.
+            new_magnitude = abs(new_signed_amount)
+            stored_signed = new_magnitude * existing_sign
+            self._conn.execute(
+                "UPDATE txn SET amount = ? WHERE id = ?",
+                (decimal_to_pence(stored_signed), txn_id),
+            )
+            partner = self._conn.execute(
+                "SELECT id, account_id, amount FROM txn "
+                "WHERE transfer_id = ? AND id != ?",
+                (transfer_iri, txn_id),
+            ).fetchone()
+            if partner is None:
+                # Defensive: half-row with no partner shouldn't happen
+                # (delete is partner-aware) but if it does, just commit
+                # the single-side change.
+                self.commit()
+                return stored_signed
+
+            this_ccy = self.get_account_currency(row["account_id"])
+            partner_ccy = self.get_account_currency(partner["account_id"])
+            partner_existing_pence = int(partner["amount"])
+            partner_sign = -1 if partner_existing_pence < 0 else 1
+
+            if this_ccy == partner_ccy:
+                # Same currency — partner magnitude must match.
+                partner_new_signed = new_magnitude * partner_sign
+                self._conn.execute(
+                    "UPDATE txn SET amount = ? WHERE id = ?",
+                    (decimal_to_pence(partner_new_signed), partner["id"]),
+                )
+                # Rate stays 1.0 / 'derived' by default; refresh anyway
+                # in case a manual override had drifted.
+                self._conn.execute(
+                    "UPDATE transfer SET rate = 1.0, rate_source = 'derived' "
+                    "WHERE iri = ?",
+                    (transfer_iri,),
+                )
+            else:
+                # Cross-currency — partner amount unchanged; recompute
+                # rate from the two stored magnitudes. transfer.rate
+                # convention: to_magnitude = from_magnitude × rate, with
+                # from_account_id / to_account_id on the parent row.
+                partner_magnitude = abs(pence_to_decimal(partner_existing_pence))
+                tparent = self._conn.execute(
+                    "SELECT from_account_id, to_account_id "
+                    "FROM transfer WHERE iri = ?",
+                    (transfer_iri,),
+                ).fetchone()
+                if tparent is not None:
+                    if int(tparent["from_account_id"]) == int(row["account_id"]):
+                        from_mag = new_magnitude
+                        to_mag = partner_magnitude
+                    else:
+                        from_mag = partner_magnitude
+                        to_mag = new_magnitude
+                    if from_mag > 0:
+                        new_rate = to_mag / from_mag
+                        self._conn.execute(
+                            "UPDATE transfer "
+                            "SET rate = ?, rate_source = 'derived' "
+                            "WHERE iri = ?",
+                            (float(new_rate), transfer_iri),
+                        )
+            self.commit()
+            return stored_signed
+        except Exception:
+            self.rollback()
+            raise
+
     # Sentinel used by bulk_update_transactions to distinguish "don't change
     # this field" from "set this field to None/empty" — passing None for a
     # nullable column like memo means "clear it", so we can't use None as
@@ -2317,7 +2433,10 @@ class Repository:
         src_ccy = row["account_currency"]
         dst_ccy = other_acct.currency
 
-        # Resolve rate / partner magnitude / rate_source.
+        # Step 1 — resolve the partner side's magnitude and a tentative
+        # rate in the caller's convention ("partner per src"). The caller
+        # supplies either ``to_amount`` (= partner magnitude), ``rate``
+        # (= partner per src), both (must agree), or neither (FX lookup).
         if src_ccy == dst_ccy:
             if to_amount is not None and abs(to_amount - src_magnitude) > Decimal("0.005"):
                 raise ValueError(
@@ -2325,7 +2444,7 @@ class Repository:
                     "same-currency transfers."
                 )
             partner_magnitude = src_magnitude
-            resolved_rate = Decimal("1")
+            caller_rate = Decimal("1")
             resolved_source = rate_source or "derived"
         else:
             if to_amount is not None and rate is not None:
@@ -2336,15 +2455,15 @@ class Repository:
                         "Supplied rate and to_amount are inconsistent."
                     )
                 partner_magnitude = to_amount
-                resolved_rate = rate
+                caller_rate = rate
                 resolved_source = rate_source or "manual"
             elif to_amount is not None:
                 partner_magnitude = to_amount
-                resolved_rate = to_amount / src_magnitude
+                caller_rate = to_amount / src_magnitude
                 resolved_source = rate_source or "derived"
             elif rate is not None:
                 partner_magnitude = src_magnitude * rate
-                resolved_rate = rate
+                caller_rate = rate
                 resolved_source = rate_source or "manual"
             else:
                 looked, _, _ = self.get_fx_rate_nearest(
@@ -2357,17 +2476,34 @@ class Repository:
                         f"or to_amount, or refresh rates first."
                     )
                 partner_magnitude = src_magnitude * looked
-                resolved_rate = looked
+                caller_rate = looked
                 resolved_source = rate_source or "fx_rate"
 
-        # Partner sign opposes the source's sign (the partner row is the
-        # other side of the same money movement).
+        # Step 2 — direction. Partner sign opposes the source's sign
+        # (the partner row is the other side of the same money movement);
+        # from / to ids reflect actual money flow.
         if src_amount_pence < 0:
+            # Outflow: money leaves the source's account, arrives at the
+            # partner. from=src, to=partner.
             partner_amount = partner_magnitude
             from_id, to_id = row["account_id"], other_account_id
+            from_magnitude, to_magnitude = src_magnitude, partner_magnitude
         else:
+            # Inflow: money arrives at the source's account from the
+            # partner. from=partner, to=src.
             partner_amount = -partner_magnitude
             from_id, to_id = other_account_id, row["account_id"]
+            from_magnitude, to_magnitude = partner_magnitude, src_magnitude
+
+        # Step 3 — convert caller's "partner per src" rate to the
+        # transfer table's "to per from" convention. For outflow these
+        # match (src=from, partner=to); for inflow they invert. Using
+        # the magnitudes is more numerically stable than dividing
+        # ``caller_rate``.
+        if from_magnitude > 0:
+            resolved_rate = to_magnitude / from_magnitude
+        else:
+            resolved_rate = caller_rate
 
         transfer_iri = new_transfer_iri()
         self._conn.execute(
@@ -3513,6 +3649,7 @@ class Repository:
         self,
         schedule_id: int,
         actual_amount: Optional[Decimal] = None,
+        to_amount: Optional[Decimal] = None,
     ) -> int:
         """Materialise the next occurrence and advance ``next_due_date``.
 
@@ -3529,6 +3666,15 @@ class Repository:
         one. Sign of the actual amount must match the sign of the estimate
         — a fixed-direction schedule producing an inverted-sign txn is
         almost always a bug.
+
+        ``to_amount`` (ADR-035 amendment 2026-06-07) is the explicit
+        magnitude on the **``transfer_to_account_id`` side** in that
+        account's currency, regardless of inflow/outflow direction. Lets
+        the manual Post Now flow collect the partner-side amount when no
+        FX rate is on file, instead of erroring on the lookup. The rate
+        is back-derived from the two amounts and recorded as
+        ``rate_source='derived'``. Same-currency / non-transfer
+        schedules: ignored.
 
         Atomic: the txn insert / transfer pair plus the schedule update
         run in one SQLite transaction. If the post advances past
@@ -3596,6 +3742,22 @@ class Repository:
                     if known_to_magnitude is None:
                         known_to_magnitude = known_from_magnitude
                     used_rate = Decimal("1")
+                    used_rate_source = "derived"
+                elif to_amount is not None:
+                    # ADR-035 amendment 2026-06-07: caller supplied the
+                    # destination-side magnitude — no FX lookup needed.
+                    # In both directions ``to_amount`` is the magnitude on
+                    # the to_id side, so it directly fills the unknown
+                    # half regardless of sign.
+                    if to_amount <= 0:
+                        raise ValueError(
+                            "to_amount must be greater than zero."
+                        )
+                    if known_from_magnitude is None:
+                        known_from_magnitude = to_amount
+                    else:
+                        known_to_magnitude = to_amount
+                    used_rate = known_to_magnitude / known_from_magnitude
                     used_rate_source = "derived"
                 else:
                     looked, _, _ = self.get_fx_rate_nearest(

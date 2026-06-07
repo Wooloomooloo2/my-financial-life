@@ -59,6 +59,8 @@ ADRs are written at the time a decision is made and are not retrospective docume
 | [ADR-035](ADR-035-multi-currency-foundation.md) | Multi-currency foundation — fx_rate, transfer parent, settings, openexchangerates integration | 2026-06-06 | Accepted |
 | [ADR-036](ADR-036-transfer-matching.md) | Transfer matching — link existing other-side row instead of always creating a partner | 2026-06-06 | Accepted |
 | [ADR-037](ADR-037-bulk-transfer-reconcile.md) | Bulk transfer reconcile — Manage → Reconcile Transfers… dialog | 2026-06-06 | Accepted |
+| [ADR-035 amend](ADR-035-multi-currency-foundation.md#amendment-2026-06-07--cross-currency-entry-collects-the-partner-amount-at-the-point-of-creation) | (Amendment) Cross-currency entry collects partner amount at the moment of creation | 2026-06-07 | Accepted (amended) |
+| [ADR-038](ADR-038-banktivity-sign-over-type.md) | Banktivity CSV import trusts the amount sign over the Type column | 2026-06-07 | Accepted |
 
 ---
 

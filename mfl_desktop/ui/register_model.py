@@ -8,7 +8,7 @@ the view repaints from the same source of truth.
 from __future__ import annotations
 
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
@@ -38,7 +38,7 @@ class TransactionTableModel(QAbstractTableModel):
         ("Category", "category_name",   True),
         ("Status",   "status",          True),
         ("Memo",     "memo",            True),
-        ("Amount",   "amount",          False),
+        ("Amount",   "amount",          True),
         ("Balance",  "running_balance", False),
     ]
     COLUMNS_ALL = [
@@ -48,7 +48,7 @@ class TransactionTableModel(QAbstractTableModel):
         ("Category", "category_name",   True),
         ("Status",   "status",          True),
         ("Memo",     "memo",            True),
-        ("Amount",   "amount",          False),
+        ("Amount",   "amount",          True),
     ]
 
     def __init__(self, repo: Repository, account_id: int | None) -> None:
@@ -162,4 +162,40 @@ class TransactionTableModel(QAbstractTableModel):
             self._repo.update_transaction_memo(row.id, new_memo)
             return replace(row, memo=new_memo)
 
+        if col_name == "amount":
+            parsed = _parse_amount_input(str(value))
+            if parsed is None:
+                return None
+            # Repository handles transfer-half sign coercion + partner sync;
+            # the returned value is what actually landed on this row, which
+            # may differ in sign from the user's input for transfer rows.
+            try:
+                stored = self._repo.update_transaction_amount(row.id, parsed)
+            except ValueError:
+                return None
+            return replace(row, amount=stored)
+
+        return None
+
+
+def _parse_amount_input(text: str) -> Optional[Decimal]:
+    """Parse a user-typed amount string into a signed Decimal.
+
+    Lenient — strips common currency symbols (£/$/€), commas (so the
+    display format "1,234.56" round-trips when the user clicks an
+    already-formatted cell), and whitespace. Returns None on empty
+    input or unparseable text; the model treats that as "edit
+    rejected, leave the cell alone."
+    """
+    s = (
+        text.strip()
+        .replace("£", "").replace("$", "").replace("€", "")
+        .replace(",", "")
+        .strip()
+    )
+    if not s:
+        return None
+    try:
+        return Decimal(s)
+    except InvalidOperation:
         return None

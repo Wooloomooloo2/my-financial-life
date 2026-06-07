@@ -255,13 +255,26 @@ def _normalise_banktivity_row(row: dict) -> Optional[dict]:
         logger.warning(f"Skipping row with unparseable amount: {amount_str!r}")
         return None
 
-    # Direction from Type column takes priority over amount sign.
-    if row_type.lower() == "deposit":
-        tx_type = "credit"
-    elif row_type.lower() in ("withdrawal", "transfer"):
-        tx_type = "debit"
-    else:
-        tx_type = inferred_type
+    # Direction is taken from the amount sign — Banktivity exports
+    # signed amounts across all three Types (Deposit, Withdrawal,
+    # Transfer). Example: in bedford_house.csv, Withdrawals export as
+    # ``-£X``; in ally_savings.csv, Transfers export as ``+$X`` for
+    # inbound and ``-$X`` for outbound. The Type column itself is
+    # therefore informational, not authoritative — see ADR-038. When
+    # Type and sign disagree (a Withdrawal exported as ``+$X`` because
+    # the user mis-tagged it in Banktivity), the sign is the user's
+    # actual intent and gets the row's direction right. Type is still
+    # surfaced into ``tx_type_label`` so future surfaces can warn on
+    # mismatch; today it just logs.
+    tx_type = inferred_type
+    type_lower = row_type.lower()
+    if (type_lower == "deposit" and tx_type == "debit") or (
+        type_lower == "withdrawal" and tx_type == "credit"
+    ):
+        logger.info(
+            f"Banktivity row Type={row_type!r} disagrees with amount "
+            f"sign ({amount_str!r}); trusting sign per ADR-038."
+        )
 
     payee_raw = row.get("Payee", "").strip()
     category = row.get("Category/Account", "").strip()
@@ -317,11 +330,15 @@ def _parse_banktivity_date(date_str: str) -> str:
 
 
 def _parse_banktivity_amount(amount_str: str) -> tuple[Decimal, str]:
-    clean = (
-        amount_str.strip().strip('"')
-        .replace("£", "").replace(",", "").strip()
-    )
-    value = Decimal(clean)
+    # Delegate to the shared symbol-stripping helper so all three CSV
+    # paths (generic mapping, Banktivity, generic-via-mapping at the
+    # column-mapped fallback) accept the same symbol set: £, $, €. The
+    # original Banktivity-specific helper only stripped £, which broke
+    # USD Banktivity exports from US accounts (e.g. Chase via Banktivity)
+    # — every row got skipped with "unparseable amount: '-$3.29'".
+    value = _parse_amount_str(amount_str)
+    if value is None:
+        raise ValueError(f"Cannot parse amount: {amount_str!r}")
     return abs(value), ("debit" if value < 0 else "credit")
 
 
@@ -417,31 +434,20 @@ def _parse_generic(content: str) -> list[dict]:
             continue
 
         if amount_col:
-            amount_str = row.get(amount_col, "").strip()
-            try:
-                value = Decimal(
-                    amount_str.replace(",", "").replace("£", "")
-                              .replace("$", "").strip()
-                )
-                amount = abs(value)
-                tx_type = "debit" if value < 0 else "credit"
-            except InvalidOperation:
+            value = _parse_amount_str(row.get(amount_col, ""))
+            if value is None:
                 continue
+            amount = abs(value)
+            tx_type = "debit" if value < 0 else "credit"
         else:
-            debit_str  = row.get(debit_col,  "").strip().replace(",", "")
-            credit_str = row.get(credit_col, "").strip().replace(",", "")
-            if debit_str:
-                try:
-                    amount = abs(Decimal(debit_str.replace("£", "").replace("$", "")))
-                    tx_type = "debit"
-                except InvalidOperation:
-                    continue
-            elif credit_str:
-                try:
-                    amount = abs(Decimal(credit_str.replace("£", "").replace("$", "")))
-                    tx_type = "credit"
-                except InvalidOperation:
-                    continue
+            debit_value  = _parse_amount_str(row.get(debit_col,  ""))
+            credit_value = _parse_amount_str(row.get(credit_col, ""))
+            if debit_value is not None:
+                amount = abs(debit_value)
+                tx_type = "debit"
+            elif credit_value is not None:
+                amount = abs(credit_value)
+                tx_type = "credit"
             else:
                 continue
 

@@ -56,6 +56,10 @@ from mfl_desktop.ui.sidebar import KIND_ROLE, AccountSidebar
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
+from mfl_desktop.ui.transfer_destination_dialog import (
+    TransferDestinationDialog,
+    no_other_accounts_message,
+)
 from mfl_desktop.ui.transfer_match_dialogs import (
     BulkRowAnalysis,
     BulkTransferReviewDialog,
@@ -473,34 +477,73 @@ class RegisterWindow(QMainWindow):
 
         # ADR-020: a transfer-kind category turns this into a transfer —
         # prompt for the destination, then create both halves via
-        # create_transfer. Otherwise insert as a normal txn.
+        # create_transfer. ADR-035 amendment 2026-06-07: when the
+        # destination account is a different currency, the same dialog
+        # also collects the amount that hits the destination side, so
+        # cross-currency transfers don't require a stored FX rate.
         if self._category_kind(values.category_id) == "transfer":
-            other_id = self._prompt_destination_account(
+            source_acct = self._repo.get_account_by_id(values.account_id)
+            if source_acct is None:
+                return
+            others = [
+                a for a in self._repo.list_accounts()
+                if a.id != values.account_id
+            ]
+            if not others:
+                no_other_accounts_message(self)
+                return
+            dest_dialog = TransferDestinationDialog(
+                repo=self._repo,
+                source_account=source_acct,
+                source_magnitude=abs(values.amount),
+                source_signed_display=values.amount,
+                posted_date=values.posted_date,
                 exclude_account_ids={values.account_id},
                 title="New transfer",
-                message=(
-                    "This category is a transfer category — "
-                    "which account is the other side?"
+                intro=(
+                    "This category is a transfer category — which account "
+                    "is the other side?"
                 ),
+                parent=self,
             )
-            if other_id is None:
+            if dest_dialog.exec() != QDialog.Accepted:
                 return
-            # Direction is encoded in the dialog's signed amount: negative
-                # = "money out from this account" so dialog account is the
-            # source; positive = inflow, dialog account is the destination.
+            choice = dest_dialog.values()
+            if choice is None:
+                return
+            # Direction is encoded in the signed amount: negative = "money
+            # out from this account" → dialog account is the source;
+            # positive = inflow → dialog account is the destination.
+            # The dialog's `other_amount` is always the magnitude on the
+            # *other* side; map it to create_transfer's amount / to_amount
+            # based on direction so the source side stays the truth-of-
+            # the-source's-statement.
+            this_mag = abs(values.amount)
             if values.amount < 0:
-                from_id, to_id = values.account_id, other_id
+                from_id, to_id = values.account_id, choice.account_id
+                source_amount = this_mag
+                target_to_amount = choice.other_amount
             else:
-                from_id, to_id = other_id, values.account_id
+                from_id, to_id = choice.account_id, values.account_id
+                # Inflow: source side is the other account, so its
+                # magnitude is the dialog's other_amount; the dialog
+                # account's amount becomes the to_amount.
+                source_amount = (
+                    choice.other_amount
+                    if choice.other_amount is not None
+                    else this_mag
+                )
+                target_to_amount = this_mag
             try:
                 self._repo.create_transfer(
                     from_account_id=from_id,
                     to_account_id=to_id,
                     posted_date=values.posted_date,
-                    amount=abs(values.amount),
+                    amount=source_amount,
                     category_id=values.category_id,
                     memo=values.memo,
                     status=values.status,
+                    to_amount=target_to_amount,
                 )
             except Exception as e:
                 QMessageBox.critical(
@@ -540,14 +583,26 @@ class RegisterWindow(QMainWindow):
         self.statusBar().showMessage("Transaction added", 4000)
 
     def _on_model_data_changed(self, top_left, _bottom_right, _roles) -> None:
-        """Detect inline category edits that set a transfer-kind category
-        on a non-transfer row and pop the destination-account prompt
-        (ADR-020). Other edits — payee, status, memo — pass through
-        without action."""
+        """Detect inline edits that need post-processing:
+
+        - Category set to a transfer-kind value → pop the destination
+          prompt (ADR-020).
+        - Amount changed → reload the model so running balances
+          recompute, and refresh sidebar balances.
+
+        Other edits — payee, status, memo — pass through without action."""
         col_idx = top_left.column()
         if col_idx < 0 or col_idx >= len(self._model.COLUMNS):
             return
         col_name = self._model.COLUMNS[col_idx][1]
+        if col_name == "amount":
+            # Running balance and sidebar totals are stale after an
+            # amount edit; reload picks up the new running balance from
+            # the Repository (computed in list order) and the sidebar
+            # refresh re-sums account totals.
+            self._model.reload()
+            self._refresh_sidebar_balances()
+            return
         if col_name != "category_name":
             return
         row = self._model.row_at(top_left.row())
@@ -555,20 +610,42 @@ class RegisterWindow(QMainWindow):
             return
         if self._category_kind(row.category_id) != "transfer":
             return
-        other_id = self._prompt_destination_account(
+        # ADR-035 amendment 2026-06-07: open the destination-amount-aware
+        # dialog so the cross-currency case (USD txn marked as transfer
+        # to a GBP account) doesn't require a stored FX rate. The dialog
+        # collapses to a plain account picker when both currencies match.
+        source_acct = self._repo.get_account_by_id(row.account_id)
+        if source_acct is None:
+            return
+        others = [
+            a for a in self._repo.list_accounts() if a.id != row.account_id
+        ]
+        if not others:
+            no_other_accounts_message(self)
+            return
+        dest_dialog = TransferDestinationDialog(
+            repo=self._repo,
+            source_account=source_acct,
+            source_magnitude=abs(row.amount),
+            source_signed_display=row.amount,
+            posted_date=row.posted_date,
             exclude_account_ids={row.account_id},
             title="New transfer",
-            message=(
-                "This category is a transfer category — "
-                "which account is the other side?"
+            intro=(
+                "This category is a transfer category — which account "
+                "is the other side?"
             ),
+            parent=self,
         )
-        if other_id is None:
+        if dest_dialog.exec() != QDialog.Accepted:
             # User cancelled. Row is left with the transfer-kind category
-            # but no partner — a recoverable rough edge (they can come
-            # back and pick the destination from bulk edit, or re-set
-            # the category to trigger the prompt again).
+            # but no partner — a recoverable rough edge (re-setting the
+            # category triggers the prompt again).
             return
+        choice = dest_dialog.values()
+        if choice is None:
+            return
+        other_id = choice.account_id
 
         # ADR-036: run the matcher before manufacturing a partner.
         # The other side may already exist on the destination account
@@ -583,6 +660,10 @@ class RegisterWindow(QMainWindow):
         try:
             if isinstance(chosen, int):
                 # User accepted an existing candidate; chosen is its txn id.
+                # The candidate's existing amount carries the other-side
+                # truth, so the explicit to_amount we just collected is
+                # not propagated here — link_transfer back-derives the
+                # rate from the two stored amounts.
                 self._repo.link_transfer(
                     source_txn_id=row.id,
                     candidate_txn_id=chosen,
@@ -590,8 +671,13 @@ class RegisterWindow(QMainWindow):
                 )
                 message = "Linked to existing transaction"
             else:
+                # convert_to_transfer's to_amount is "magnitude on the
+                # partner side", which is exactly what the dialog returns
+                # as other_amount (None for same-currency).
                 self._repo.convert_to_transfer(
-                    txn_id=row.id, other_account_id=other_id,
+                    txn_id=row.id,
+                    other_account_id=other_id,
+                    to_amount=choice.other_amount,
                 )
                 message = "Transfer partner created"
         except Exception as e:
@@ -665,11 +751,26 @@ class RegisterWindow(QMainWindow):
     # ── transfer helpers (category-driven, ADR-020) ──
 
     def _category_kind(self, category_id: int) -> Optional[str]:
-        """Look up a category's kind from the window's cached list."""
+        """Look up a category's kind from the window's cached list, with
+        a Repository fallback when the cache misses.
+
+        The cache misses (and would silently return None) whenever the
+        category was created or kind-changed since the window cached
+        ``self._categories`` — e.g. a kind change made via the CLI, a
+        category dialog whose ``categories_changed`` signal hadn't yet
+        propagated, or any future code path that mutates kind without
+        refreshing the window cache. The DB fallback keeps the
+        transfer-prompt trigger correct in every case; on hit we
+        re-warm the cache so subsequent lookups are fast again."""
         for c in self._categories:
             if c.id == category_id:
                 return c.kind
-        return None
+        kind = self._repo.get_category_kind(category_id)
+        if kind is not None:
+            # Cache was stale — pull fresh so dependent surfaces
+            # (filter combo, dialogs) catch up too.
+            self._reload_category_cache()
+        return kind
 
     def _offer_transfer_match(self, *, source_row, other_account_id: int):
         """Run the transfer matcher (ADR-036) for one source row.
@@ -1018,9 +1119,11 @@ class RegisterWindow(QMainWindow):
                 r = self._model.row_at(i)
                 row_lookup[r.id] = r
             other_name = ""
+            other_currency = ""
             other_acct = self._repo.get_account_by_id(other_id)
             if other_acct is not None:
                 other_name = other_acct.name
+                other_currency = other_acct.currency
             analyses: list[BulkRowAnalysis] = []
             matcher_errors: list[str] = []
             for tid in ids:
@@ -1038,6 +1141,23 @@ class RegisterWindow(QMainWindow):
                 except Exception as e:
                     candidates = []
                     matcher_errors.append(f"#{tid}: {e}")
+                # ADR-035 amendment 2026-06-07: pre-fill the partner
+                # magnitude from the FX table when the row crosses
+                # currencies. None when no rate is on file — the dialog
+                # surfaces an editable blank field with the right hint.
+                fx_prefill = None
+                if (
+                    other_currency
+                    and src_currency
+                    and other_currency != src_currency
+                ):
+                    converted, _ = self._repo.convert_amount(
+                        abs(row.amount),
+                        from_ccy=src_currency,
+                        to_ccy=other_currency,
+                        on_date=row.posted_date,
+                    )
+                    fx_prefill = converted
                 analyses.append(BulkRowAnalysis(
                     source_txn_id=tid,
                     source_account_id=row.account_id,
@@ -1047,6 +1167,8 @@ class RegisterWindow(QMainWindow):
                     source_date=row.posted_date,
                     source_payee=row.payee_name,
                     candidates=candidates,
+                    dest_currency=other_currency,
+                    fx_prefill_amount=fx_prefill,
                 ))
 
             if matcher_errors:

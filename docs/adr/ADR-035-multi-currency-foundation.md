@@ -298,3 +298,54 @@ Each report passes its display currency through to the new `Repository.convert_a
 - Bulk reconcile dialog for many candidate pairs at once — **[ADR-037](ADR-037-bulk-transfer-reconcile.md)**.
 - Per-txn currency column for foreign-currency manual entries — future ADR if real use surfaces.
 - Multi-currency budgets — future ADR.
+
+---
+
+## Amendment 2026-06-07 — cross-currency entry collects the partner amount at the point of creation
+
+**Status:** Accepted (amendment).
+
+### Problem
+
+ADR-035 §UI specifies a "Cross-currency transfer dialog" that extends the destination-account prompt with a "Receiving in {to_ccy}:" field, pre-filled from the FX-table lookup and editable. The foundation work shipped without this surface: `create_transfer` / `convert_to_transfer` / `post_scheduled_txn` already accepted the documented `to_amount` / `rate` kwargs at the data layer, but every UI call site invoked them with the source amount only. The result was a regression for the user-facing flow — entering a USD transaction and marking it as a transfer to a GBP account hit the FX-table lookup, found nothing on a fresh import, and raised `"No FX rate available for USD → GBP on or before <date>; supply a rate or to_amount, or refresh rates first."` Owners hit this on first real use ("it does not let me do it because it asks for an exchange rate in another part of the application") and flagged that the entry-time flow should never depend on a stored rate.
+
+The user's framing is correct and matches ADR-035's original intent: when the user records a cross-currency transfer, they typically know the amount that actually hit the receiving account (from the inbound statement). That amount is the truth-of-money on the destination side. The rate is back-derived from the two amounts and stored as `rate_source='derived'`. Asking for a stored FX rate first is friction that shouldn't exist.
+
+### What ships now
+
+- New dialog `mfl_desktop/ui/transfer_destination_dialog.py` — `TransferDestinationDialog`, returning `TransferDestinationChoice(account_id, other_amount)` where `other_amount` is the magnitude on the *other* account's side, or `None` for same-currency. Single dialog covers both cases so call sites don't have to fork.
+- The dialog's layout: intro line, this-side summary (account · date · signed amount, sign carries direction), other-account combo, and a cross-currency block that appears only when the chosen other-account's currency differs. Block contents: editable amount field with the destination currency label, live "Implied rate: 1 USD = 0.7900 GBP" line, hint line about the pre-fill source.
+- Pre-fill from `Repository.get_fx_rate_nearest` when a rate exists (hint: "Pre-filled from stored rate dated …"); blank field when none exists (hint: "No stored USD → GBP rate. Enter the amount that hit the GBP account; the rate is back-derived from the two amounts.").
+- Three call sites in `register_window.py` now route through the new dialog:
+  - **New Transaction** (transfer-kind category branch) — direction is read from the signed amount; the dialog account is mapped to `from_` or `to_` based on sign, with `to_amount` set so the destination side records what the user typed.
+  - **Inline category edit** (`_on_model_data_changed`) — same dialog; passes `to_amount=choice.other_amount` to `convert_to_transfer` (the kwarg already existed and worked; the call site just never passed it).
+  - **Bulk edit → transfer category** — destination account stays one-per-batch (no change), but `BulkRowAnalysis` gains `dest_currency` + `fx_prefill_amount`, and `BulkTransferReviewDialog` gains a sixth "Dest amount" column with per-row inputs pre-filled from the FX table when available. Each `CreateNew` decision now carries the per-row `to_amount` through `bulk_match_or_create_transfers`.
+- Fourth call site in `schedules_dialog.py`'s **Post Now** flow — for cross-currency transfer schedules, the dialog opens with the destination account locked (via a new `locked_account_id` kwarg). `post_scheduled_txn` gains a `to_amount` kwarg (`magnitude on the transfer_to_account_id side regardless of inflow/outflow direction`) and a `derived`-rate branch that bypasses the FX-table lookup when the caller supplies the amount directly.
+- Auto-post sweep (`auto_post_due`) is unchanged — it has no user prompt path, so missing FX continues to silently skip that schedule's catch-up loop. Manual Post Now is the path the user takes when something can't auto-resolve.
+
+### Sign / direction semantics
+
+The dialog is framed neutrally around "this account" (the register row's account or the schedule's account) and "the other account" (whatever ends up paired). The returned `other_amount` is always the magnitude on the other side in that account's currency, regardless of inflow/outflow direction. Each call site translates to the repository's existing `amount` / `to_amount` convention based on sign — outflow rows map dialog account → `from_`, other → `to_`, and `to_amount = other_amount`; inflow rows reverse, with `amount = other_amount` and `to_amount = this magnitude`. The schedule path keeps `post_scheduled_txn.to_amount` defined as "magnitude on `transfer_to_account_id` side" so callers don't have to think about the inflow/outflow flip inside the repo.
+
+### `rate_source` for user-supplied amounts
+
+User-supplied `to_amount` (with no explicit `rate`) lands as `rate_source='derived'` — the rate is back-derived from the two amounts. This matches the existing convention in `create_transfer` and `_convert_to_transfer_unbatched`. "Manual" remains reserved for the case where the user types a *rate* directly (which the txn-entry UI doesn't expose today; the Currencies dialog's "Add manual rate" row is where that surfaces). FX-table pre-fills are not silently re-classified as `manual` even if the user accepts them unchanged — they're still derived from the two amounts at the moment of save.
+
+### Why this is an amendment rather than a new ADR
+
+The decision (collect partner amount at entry time, back-derive the rate) was already made in ADR-035 §UI; only the surface wasn't built. The data-layer contracts (`to_amount` kwarg, two-of-three rule, `rate_source` vocab) are unchanged. This amendment closes the gap between specification and implementation rather than introducing a new architectural direction.
+
+### Files touched in the amendment
+
+| File | Change |
+|---|---|
+| `mfl_desktop/ui/transfer_destination_dialog.py` | New — the dialog implementing the spec |
+| `mfl_desktop/ui/register_window.py` | New-txn, inline-edit, and bulk-edit transfer flows route through the dialog and pass `to_amount` through |
+| `mfl_desktop/ui/transfer_match_dialogs.py` | `BulkRowAnalysis` gains `dest_currency` + `fx_prefill_amount`; `BulkTransferReviewDialog` gains the "Dest amount" column |
+| `mfl_desktop/ui/schedules_dialog.py` | Post Now opens the dialog with the destination locked for cross-currency schedules; passes `to_amount` to `post_scheduled_txn` |
+| `mfl_desktop/db/repository.py` | `post_scheduled_txn` gains the `to_amount` kwarg and a derived-rate branch that bypasses the FX-table lookup when supplied |
+
+### Follow-ups still open
+
+- **Edit Transfer dialog** for after-the-fact rate / amount corrections — already on the multi-currency backlog (see CLAUDE_CONTEXT.md). The new entry-time dialog and the edit dialog share the same conceptual shape; consider extracting a common widget when the edit path lands.
+- **Cross-currency manual rate entry** at txn-creation time — a user who knows the rate but not the destination amount has to either pre-load the FX table or do the multiplication themselves. If real use surfaces, the dialog's amount field could be flanked by a "or specify rate" alternate field; deferred until use shows it's worth the surface.
