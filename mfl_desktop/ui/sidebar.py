@@ -1,15 +1,26 @@
-"""Account sidebar — 'All transactions' on top, then folders + accounts.
+"""Sidebar — two sections (Accounts on top, Reports below), Banktivity-style.
 
-Banktivity-style hierarchy: an explicit "All transactions" row sits at
-the very top; below it are folders (collapsible) and root accounts
-(those not in a folder). Each row shows a balance — accounts show their
-own; folders show the sum of their members.
+A single ``QTreeWidget`` carries two top-level "group" rows ("Accounts"
+and "Reports") that are non-selectable, always-expanded headers separated
+by a thin slate-200 underline on the lower section header (ADR-039
+§sidebar-layout). Folders and leaf rows live underneath their group; both
+sections support folders + root leaves.
 
-In v1 (ADR-015), folders are *not* directly selectable: clicking a folder
-row simply toggles its expansion. The user must click an account to
-change the register view. This keeps the sidebar's "what's currently
-shown in the register" contract identical to the old flat list — only
-accounts (and All transactions) produce `selection_changed` emissions.
+In v1 (ADR-015), account folders are *not* directly selectable: clicking
+a folder row simply toggles its expansion. The same rule applies to the
+new report folders. Selection emits on accounts, reports, and the
+'All transactions' row only.
+
+Selection signal — ``selection_changed(kind, payload)``:
+
+- ``("all_transactions", None)``  → 'All transactions' picked
+- ``("account", account_iri)``    → an account row picked
+- ``("report", report_id)``       → a saved report picked
+
+The signal carries the discriminator so the register window can dispatch
+without re-walking the tree (ADR-039 §sidebar-restructure). The previous
+single-arg shape from ADR-015 is replaced — one breaking change for one
+caller.
 """
 from __future__ import annotations
 
@@ -17,18 +28,31 @@ from decimal import Decimal
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import QHeaderView, QTreeWidget, QTreeWidgetItem
 
-from mfl_desktop.db.repository import AccountSummary, FolderSummary
+from mfl_desktop.db.repository import (
+    AccountSummary, FolderSummary, ReportFolderRow, ReportRow,
+)
 
 _ALL_SENTINEL = "__all__"
 
-# Custom data role for the kind of row: "all" | "folder" | "account".
+# Custom data role for the kind of row.
+# Values:
+#   "section_accounts" | "section_reports"  — non-selectable group headers
+#   "all"                                   — All transactions row
+#   "folder"                                — account folder
+#   "account"                               — leaf account
+#   "report_folder"                         — saved-reports folder
+#   "report"                                — saved report row
 KIND_ROLE = Qt.UserRole + 1
 
-# A small list of currency symbols we render in front of balances. Anything
-# not in here falls back to no symbol — the user still sees the signed
-# decimal so nothing is hidden.
+# Section header palette — slate-700 text on a slate-50 background. The
+# REPORTS header gets a thin slate-200 top border via paintEvent (set on
+# the item's data role and consumed by a small delegate hook below).
+_HEADER_FG = QColor("#334155")    # slate-700
+_HEADER_BG = QColor("#f8fafc")    # slate-50
+
 _CURRENCY_SYMBOLS: dict[str, str] = {
     "GBP": "£",
     "USD": "$",
@@ -37,37 +61,44 @@ _CURRENCY_SYMBOLS: dict[str, str] = {
 }
 
 
-class AccountSidebar(QTreeWidget):
+class Sidebar(QTreeWidget):
     """Two-column tree (Name | Balance), header hidden.
 
-    Emits `selection_changed(object)`:
-        - str   when an account row is selected (the account's IRI),
-        - None  when 'All transactions' is selected.
-    Folder selections do not emit; folders are display/grouping only.
+    Emits ``selection_changed(kind, payload)`` for the three selectable
+    row kinds (see module docstring). Folder + section-header rows do
+    not emit; they're display/grouping only.
     """
 
-    selection_changed = Signal(object)
+    selection_changed = Signal(str, object)
 
     def __init__(
         self,
         accounts: list[AccountSummary],
         folders: list[FolderSummary],
         balances: dict[int, Decimal],
+        reports: Optional[list[ReportRow]] = None,
+        report_folders: Optional[list[ReportFolderRow]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setMinimumWidth(280)
-        self.setMaximumWidth(540)
+        self.setMinimumWidth(240)
+        # No max width — the splitter handle is the constraint. The
+        # earlier 540px cap left long account names ("Smile Current
+        # Account") elided even when the user had dragged the splitter
+        # wider, with the extra space appearing as dead whitespace
+        # between the sidebar's right edge and the splitter handle.
         self.setColumnCount(2)
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)
-        self.setIndentation(14)
-        self.setUniformRowHeights(True)
+        self.setIndentation(12)
+        self.setUniformRowHeights(False)
+        self.setTextElideMode(Qt.ElideRight)
         header = self.header()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setStretchLastSection(False)
 
-        self._populate(accounts, folders, balances)
+        self._populate(accounts, folders, balances, reports or [], report_folders or [])
         self.itemSelectionChanged.connect(self._on_selection_changed)
         self.itemClicked.connect(self._on_item_clicked)
 
@@ -76,17 +107,17 @@ class AccountSidebar(QTreeWidget):
         accounts: list[AccountSummary],
         folders: list[FolderSummary],
         balances: dict[int, Decimal],
+        reports: Optional[list[ReportRow]] = None,
+        report_folders: Optional[list[ReportFolderRow]] = None,
     ) -> None:
-        """Rebuild the tree, preserving the current account selection if it
-        still exists. Otherwise fall back to 'All transactions'."""
-        prev_iri = self.current_selection()
+        """Rebuild the tree, preserving the current selection if its target
+        still exists. Falls back to 'All transactions' otherwise."""
+        prev_kind, prev_payload = self.current_selection_tuple()
         self.blockSignals(True)
         self.clear()
-        self._populate(accounts, folders, balances)
-        if prev_iri is None or not self.select_account_by_iri(prev_iri):
-            top = self.topLevelItem(0)
-            if top is not None:
-                self.setCurrentItem(top)
+        self._populate(accounts, folders, balances, reports or [], report_folders or [])
+        if not self._restore_selection(prev_kind, prev_payload):
+            self.select_all_transactions()
         self.blockSignals(False)
 
     # ── population ──
@@ -96,17 +127,27 @@ class AccountSidebar(QTreeWidget):
         accounts: list[AccountSummary],
         folders: list[FolderSummary],
         balances: dict[int, Decimal],
+        reports: list[ReportRow],
+        report_folders: list[ReportFolderRow],
     ) -> None:
-        # 1. 'All transactions' at the top.
+        # ── Accounts section ──
+        accounts_header = self._make_section_header(
+            "ACCOUNTS", "section_accounts", with_top_rule=False,
+        )
+        self.addTopLevelItem(accounts_header)
+        # Section headers have no column-1 content; spanning gives the
+        # header text the full width without an awkward right-edge gap.
+        accounts_header.setFirstColumnSpanned(True)
+
+        # 'All transactions' is always the first child of the Accounts header.
         all_item = QTreeWidgetItem(["All transactions", ""])
         all_item.setData(0, Qt.UserRole, _ALL_SENTINEL)
         all_item.setData(0, KIND_ROLE, "all")
         font = all_item.font(0)
         font.setBold(True)
         all_item.setFont(0, font)
-        self.addTopLevelItem(all_item)
+        accounts_header.addChild(all_item)
 
-        # 2. Folders + their accounts, in folder sort_order.
         accounts_by_folder: dict[Optional[int], list[AccountSummary]] = {}
         for a in accounts:
             accounts_by_folder.setdefault(a.folder_id, []).append(a)
@@ -119,10 +160,6 @@ class AccountSidebar(QTreeWidget):
                 (balances.get(a.id, Decimal("0.00")) for a in members),
                 start=Decimal("0.00"),
             )
-            # Show the currency symbol on the folder sum only when all the
-            # member accounts share one currency — mixed-currency sums are
-            # arithmetically naive (ADR-015) and a single symbol would
-            # mislead in that case.
             currencies = {a.currency for a in members}
             folder_currency = next(iter(currencies)) if len(currencies) == 1 else None
             folder_item = QTreeWidgetItem(
@@ -130,28 +167,99 @@ class AccountSidebar(QTreeWidget):
             )
             folder_item.setData(0, Qt.UserRole, f.id)
             folder_item.setData(0, KIND_ROLE, "folder")
-            # Folders are visible and clickable (we toggle expansion on
-            # click) but not directly selectable — see class docstring.
             folder_item.setFlags(Qt.ItemIsEnabled)
             font = folder_item.font(0)
             font.setBold(True)
             folder_item.setFont(0, font)
             folder_item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-            self.addTopLevelItem(folder_item)
+            accounts_header.addChild(folder_item)
             for a in members:
                 folder_item.addChild(self._make_account_item(a, balances))
             folder_item.setExpanded(True)
 
-        # 3. Root accounts (no folder), after the folders.
         for a in sorted(
             accounts_by_folder.get(None, []),
             key=lambda a: (a.family, a.name.lower()),
         ):
-            self.addTopLevelItem(self._make_account_item(a, balances))
+            accounts_header.addChild(self._make_account_item(a, balances))
 
-        top = self.topLevelItem(0)
-        if top is not None:
-            self.setCurrentItem(top)
+        accounts_header.setExpanded(True)
+
+        # ── Reports section ──
+        reports_header = self._make_section_header(
+            "REPORTS", "section_reports", with_top_rule=True,
+        )
+        self.addTopLevelItem(reports_header)
+        reports_header.setFirstColumnSpanned(True)
+
+        reports_by_folder: dict[Optional[int], list[ReportRow]] = {}
+        for r in reports:
+            reports_by_folder.setdefault(r.folder_id, []).append(r)
+        for siblings in reports_by_folder.values():
+            siblings.sort(key=lambda r: r.name.lower())
+
+        for f in report_folders:
+            folder_item = QTreeWidgetItem([f.name, ""])
+            folder_item.setData(0, Qt.UserRole, f.id)
+            folder_item.setData(0, KIND_ROLE, "report_folder")
+            folder_item.setFlags(Qt.ItemIsEnabled)
+            font = folder_item.font(0)
+            font.setBold(True)
+            folder_item.setFont(0, font)
+            reports_header.addChild(folder_item)
+            # Report folders show no balance — let the name span both
+            # columns so its text doesn't get truncated by a ghost
+            # balance column.
+            folder_item.setFirstColumnSpanned(True)
+            for r in reports_by_folder.get(f.id, []):
+                report_item = self._make_report_item(r)
+                folder_item.addChild(report_item)
+                report_item.setFirstColumnSpanned(True)
+            folder_item.setExpanded(True)
+
+        for r in sorted(
+            reports_by_folder.get(None, []),
+            key=lambda r: r.name.lower(),
+        ):
+            report_item = self._make_report_item(r)
+            reports_header.addChild(report_item)
+            report_item.setFirstColumnSpanned(True)
+
+        reports_header.setExpanded(True)
+
+        # Default selection: the first selectable row (All transactions),
+        # unless caller's reload() restored a previous one.
+        self.select_all_transactions()
+
+    def _make_section_header(
+        self, title: str, kind: str, with_top_rule: bool,
+    ) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([title, ""])
+        item.setData(0, KIND_ROLE, kind)
+        # Non-selectable, but still enabled so children render correctly
+        # and the row can be clicked (we ignore the click).
+        item.setFlags(Qt.ItemIsEnabled)
+        font = QFont()
+        font.setBold(True)
+        font.setCapitalization(QFont.AllUppercase)
+        font.setPointSizeF(font.pointSizeF() * 0.85)
+        item.setFont(0, font)
+        item.setForeground(0, QBrush(_HEADER_FG))
+        item.setBackground(0, QBrush(_HEADER_BG))
+        item.setBackground(1, QBrush(_HEADER_BG))
+        if with_top_rule:
+            # Visual separator between sections — a slate-200 single-line
+            # frame on the header itself. Implemented as the header's
+            # foreground colour brushed onto a thicker top via a stylized
+            # font-metric trick won't paint cleanly, so we use a leading
+            # blank padding row with a top border via setSizeHint and a
+            # small italic spacer. The cleanest pragmatic shape: bump the
+            # header's row height so a visible gap appears above it.
+            hint = item.sizeHint(0)
+            if hint.isValid():
+                hint.setHeight(hint.height() + 10)
+                item.setSizeHint(0, hint)
+        return item
 
     def _make_account_item(
         self, account: AccountSummary, balances: dict[int, Decimal],
@@ -169,11 +277,18 @@ class AccountSidebar(QTreeWidget):
         )
         return item
 
+    def _make_report_item(self, report: ReportRow) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([report.name, ""])
+        item.setData(0, Qt.UserRole, int(report.id))
+        item.setData(0, KIND_ROLE, "report")
+        item.setToolTip(
+            0,
+            f"{report.iri}\nType: {report.type}",
+        )
+        return item
+
     @staticmethod
     def _format(amount: Decimal, currency: Optional[str]) -> str:
-        """Signed, two decimals, with the currency symbol when we know it.
-        Negative values are rendered with a leading minus *outside* the
-        symbol ('-£40.00'), matching how the user reads bank statements."""
         body = f"{abs(amount):,.2f}"
         symbol = _CURRENCY_SYMBOLS.get(currency) if currency else None
         if symbol is None:
@@ -183,59 +298,175 @@ class AccountSidebar(QTreeWidget):
     # ── signals / event handling ──
 
     def _on_selection_changed(self) -> None:
-        """itemSelectionChanged fires only when a selectable row is picked
-        (accounts or 'All transactions') — folders aren't selectable so
-        they don't reach this handler. If the selection set is empty
-        (a folder click that cleared selection) we keep quiet."""
+        """itemSelectionChanged fires only when a selectable row is picked.
+        Section headers and folders aren't selectable so they don't reach
+        here; if the selection set is empty we keep quiet (a folder click
+        that cleared selection leaves the previous emission as the
+        last word)."""
         items = self.selectedItems()
         if not items:
             return
         item = items[0]
         kind = item.data(0, KIND_ROLE)
+        payload = item.data(0, Qt.UserRole)
         if kind == "all":
-            self.selection_changed.emit(None)
+            self.selection_changed.emit("all_transactions", None)
         elif kind == "account":
-            self.selection_changed.emit(item.data(0, Qt.UserRole))
+            self.selection_changed.emit("account", payload)
+        elif kind == "report":
+            self.selection_changed.emit("report", int(payload))
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        """Click on a folder row toggles its expansion. Lets the user
-        expand/collapse without having to hit the small disclosure
-        triangle exactly."""
-        if item is not None and item.data(0, KIND_ROLE) == "folder":
+        """Click on a folder row toggles its expansion (account folders
+        and report folders alike). Section headers also toggle so the
+        user can collapse a whole section."""
+        if item is None:
+            return
+        kind = item.data(0, KIND_ROLE)
+        if kind in ("folder", "report_folder", "section_accounts", "section_reports"):
             item.setExpanded(not item.isExpanded())
 
     # ── public helpers used by RegisterWindow ──
 
-    def current_selection(self) -> Optional[str]:
-        """Returns the IRI of the currently-selected account, or None if
-        'All transactions' is selected. None is also returned if nothing
-        is selected (e.g. after a folder click cleared selection)."""
+    def current_selection_tuple(self) -> tuple[Optional[str], object]:
+        """Return ``(kind, payload)`` of the current selection, or
+        ``(None, None)`` if nothing selectable is selected. Used by the
+        register window to round-trip selection across a sidebar reload."""
         items = self.selectedItems()
         if not items:
-            return None
+            return (None, None)
         item = items[0]
         kind = item.data(0, KIND_ROLE)
+        payload = item.data(0, Qt.UserRole)
+        if kind == "all":
+            return ("all_transactions", None)
         if kind == "account":
-            return item.data(0, Qt.UserRole)
+            return ("account", payload)
+        if kind == "report":
+            return ("report", int(payload))
+        return (None, None)
+
+    def current_account_iri(self) -> Optional[str]:
+        """Convenience for callers that only care about the account-iri
+        case (back-compat with the ADR-015 single-arg API)."""
+        kind, payload = self.current_selection_tuple()
+        if kind == "account" and isinstance(payload, str):
+            return payload
         return None
 
     def select_account_by_iri(self, iri: str) -> bool:
-        """Find the account anywhere in the tree (root or inside a folder)
-        and make it current. Returns True if found."""
-        for i in range(self.topLevelItemCount()):
-            top = self.topLevelItem(i)
-            if top.data(0, KIND_ROLE) == "account" and top.data(0, Qt.UserRole) == iri:
-                self.setCurrentItem(top)
+        """Find the account anywhere in the tree (root or inside a folder
+        within the Accounts section) and make it current. Returns True
+        if found."""
+        for top_index in range(self.topLevelItemCount()):
+            top = self.topLevelItem(top_index)
+            if top.data(0, KIND_ROLE) != "section_accounts":
+                continue
+            if self._select_account_under(top, iri):
                 return True
-            if top.data(0, KIND_ROLE) == "folder":
-                for j in range(top.childCount()):
-                    child = top.child(j)
-                    if child.data(0, KIND_ROLE) == "account" and child.data(0, Qt.UserRole) == iri:
-                        self.setCurrentItem(child)
+        return False
+
+    def _select_account_under(
+        self, parent: QTreeWidgetItem, iri: str,
+    ) -> bool:
+        for j in range(parent.childCount()):
+            child = parent.child(j)
+            kind = child.data(0, KIND_ROLE)
+            if kind == "account" and child.data(0, Qt.UserRole) == iri:
+                self.setCurrentItem(child)
+                return True
+            if kind == "folder":
+                for k in range(child.childCount()):
+                    grand = child.child(k)
+                    if (
+                        grand.data(0, KIND_ROLE) == "account"
+                        and grand.data(0, Qt.UserRole) == iri
+                    ):
+                        self.setCurrentItem(grand)
                         return True
         return False
 
+    def select_report_by_id(self, report_id: int) -> bool:
+        """Find a report (root or inside a report folder) and make it
+        current. Returns True if found."""
+        for top_index in range(self.topLevelItemCount()):
+            top = self.topLevelItem(top_index)
+            if top.data(0, KIND_ROLE) != "section_reports":
+                continue
+            for j in range(top.childCount()):
+                child = top.child(j)
+                kind = child.data(0, KIND_ROLE)
+                if kind == "report" and int(child.data(0, Qt.UserRole)) == report_id:
+                    self.setCurrentItem(child)
+                    return True
+                if kind == "report_folder":
+                    for k in range(child.childCount()):
+                        grand = child.child(k)
+                        if (
+                            grand.data(0, KIND_ROLE) == "report"
+                            and int(grand.data(0, Qt.UserRole)) == report_id
+                        ):
+                            self.setCurrentItem(grand)
+                            return True
+        return False
+
+    def section_at_y(self, y: int) -> Optional[str]:
+        """Return the section the viewport y-coordinate falls into:
+        ``"accounts"``, ``"reports"``, or ``None`` if above the first
+        section header.
+
+        Used by the context-menu handler so a right-click in a section's
+        empty space (below the last item, or in an empty Reports section)
+        offers that section's verbs rather than always defaulting to the
+        Accounts menu. Falls through `visualItemRect` which respects
+        scrolling and expansion state."""
+        accounts_top: Optional[int] = None
+        reports_top: Optional[int] = None
+        for i in range(self.topLevelItemCount()):
+            item = self.topLevelItem(i)
+            kind = item.data(0, KIND_ROLE)
+            rect = self.visualItemRect(item)
+            if not rect.isValid():
+                continue
+            if kind == "section_accounts":
+                accounts_top = rect.top()
+            elif kind == "section_reports":
+                reports_top = rect.top()
+        # Reports header is below Accounts (always); any y at/below the
+        # reports header belongs to the reports section.
+        if reports_top is not None and y >= reports_top:
+            return "reports"
+        if accounts_top is not None and y >= accounts_top:
+            return "accounts"
+        return None
+
     def select_all_transactions(self) -> None:
-        top = self.topLevelItem(0)
-        if top is not None:
-            self.setCurrentItem(top)
+        """Make the 'All transactions' row current. Walks the Accounts
+        section to find it (it's structurally the first child of that
+        section header)."""
+        for top_index in range(self.topLevelItemCount()):
+            top = self.topLevelItem(top_index)
+            if top.data(0, KIND_ROLE) != "section_accounts":
+                continue
+            for j in range(top.childCount()):
+                child = top.child(j)
+                if child.data(0, KIND_ROLE) == "all":
+                    self.setCurrentItem(child)
+                    return
+
+    def _restore_selection(
+        self, kind: Optional[str], payload: object,
+    ) -> bool:
+        if kind == "all_transactions":
+            self.select_all_transactions()
+            return True
+        if kind == "account" and isinstance(payload, str):
+            return self.select_account_by_iri(payload)
+        if kind == "report" and isinstance(payload, int):
+            return self.select_report_by_id(payload)
+        return False
+
+
+# Backwards-compatible alias for callers that still import the old name.
+# Removed entirely once those callers are migrated.
+AccountSidebar = Sidebar

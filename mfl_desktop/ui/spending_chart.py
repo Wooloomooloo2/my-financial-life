@@ -19,10 +19,11 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QPainter,
@@ -39,7 +40,16 @@ class SpendingChart(QWidget):
 
     The Spending window does the SQL roll-up and hands structured data in
     via :meth:`render`. Empty state is signalled with :meth:`show_empty`.
+
+    Emits :py:attr:`segment_clicked(group_id, bucket)` when the user
+    clicks a stack segment — the report window uses this to push a
+    drill-down onto its filter stack (ADR-039 follow-up). ``group_id``
+    is the category id of the rolled-up bucket (the same id the report
+    window already groups on); ``bucket`` is the time-bucket key the
+    segment belongs to, so a future drill could also narrow by period.
     """
+
+    segment_clicked = Signal(int, str)
 
     # Layout constants — tuned for readability at 1240x740 (the window's
     # default size). Recalculated each paintEvent so the chart adapts to
@@ -61,6 +71,11 @@ class SpendingChart(QWidget):
         self._spending: dict[tuple[int, str], int] = {}
         self._avg_pounds = 0.0
         self._empty_message: Optional[str] = None
+        # When False, the bottom-of-chart legend strip is skipped and
+        # the legend band isn't reserved (the chart fills the space).
+        # The window owns an external vertical legend instead — see
+        # SpendingReportWindow's summary panel.
+        self._show_legend = True
 
         # Updated each paintEvent — list of (rect, group_index, bucket, value)
         # for hover hit-testing.
@@ -90,6 +105,15 @@ class SpendingChart(QWidget):
         self._empty_message = message
         self.update()
 
+    def set_show_legend(self, on: bool) -> None:
+        """Toggle the bottom-of-chart legend strip. When off, the legend
+        band is reclaimed for the chart and the caller is expected to
+        render its own legend somewhere else (e.g. a side panel)."""
+        if self._show_legend == on:
+            return
+        self._show_legend = on
+        self.update()
+
     # ── painting ──
 
     def paintEvent(self, event) -> None:  # noqa: D401 — Qt override
@@ -115,7 +139,8 @@ class SpendingChart(QWidget):
         self._paint_x_labels(painter, chart_rect)
         self._paint_bars(painter, chart_rect, ymax)
         self._paint_average(painter, chart_rect, ymax)
-        self._paint_legend(painter, legend_rect)
+        if self._show_legend:
+            self._paint_legend(painter, legend_rect)
         self._paint_axis_baseline(painter, chart_rect)
 
         painter.end()
@@ -123,7 +148,8 @@ class SpendingChart(QWidget):
     def _compute_rects(self) -> tuple[QRectF, QRectF]:
         w = self.width()
         h = self.height()
-        legend_top = h - self._LEGEND_BAND
+        legend_band = self._LEGEND_BAND if self._show_legend else 0
+        legend_top = h - legend_band
         chart_bottom = legend_top - self._AXIS_LABEL_BAND
         chart = QRectF(
             self._MARGIN_LEFT,
@@ -135,7 +161,7 @@ class SpendingChart(QWidget):
             self._MARGIN_LEFT,
             legend_top,
             max(1, w - self._MARGIN_LEFT - self._MARGIN_RIGHT),
-            self._LEGEND_BAND,
+            legend_band,
         )
         return chart, legend
 
@@ -383,7 +409,7 @@ class SpendingChart(QWidget):
             message,
         )
 
-    # ── hover tooltip ──
+    # ── hover tooltip / click drill-down ──
 
     def mouseMoveEvent(self, event) -> None:  # noqa: D401 — Qt override
         pos = event.position() if hasattr(event, "position") else event.posF()
@@ -396,10 +422,29 @@ class SpendingChart(QWidget):
                     text,
                     self,
                 )
+                self.setCursor(QCursor(Qt.PointingHandCursor))
                 return
         QToolTip.hideText()
+        self.unsetCursor()
         super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: D401 — Qt override
+        """Left-click on a stack segment fires :py:attr:`segment_clicked`
+        with the segment's underlying ``group_id`` + bucket. Other
+        buttons fall through to the base class."""
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position() if hasattr(event, "position") else event.posF()
+        for rect, group_index, bucket, _pounds in self._segment_hitmap:
+            if rect.contains(pos):
+                if 0 <= group_index < len(self._groups):
+                    group_id = self._groups[group_index][0]
+                    self.segment_clicked.emit(int(group_id), bucket)
+                return
+        super().mousePressEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: D401 — Qt override
         QToolTip.hideText()
+        self.unsetCursor()
         super().leaveEvent(event)

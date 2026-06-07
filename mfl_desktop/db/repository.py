@@ -365,6 +365,41 @@ class BulkTransferResult:
     transfer_iris: list[str]
 
 
+# ── Saved reports (ADR-039) ─────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReportFolderRow:
+    """A sidebar Reports-section folder. Mirrors :class:`FolderSummary`'s
+    shape — flat list, sort_order for explicit ordering, archived rows
+    excluded from listings."""
+    id: int
+    iri: str
+    name: str
+    sort_order: int
+    report_count: int
+
+
+@dataclass(frozen=True)
+class ReportRow:
+    """A saved report instance (ADR-039).
+
+    ``type`` discriminates the per-type filter schema in
+    :mod:`mfl_desktop.reports.filters` (the ``filters_json`` blob is
+    opaque to SQL — parsed at read time). ``folder_name`` is denormalised
+    onto the row for sidebar rendering; ``None`` when the report sits at
+    the Reports-section root.
+    """
+    id: int
+    iri: str
+    name: str
+    type: str
+    folder_id: Optional[int]
+    folder_name: Optional[str]
+    filters_json: str
+    created_at: str
+
+
 # ── Identifier helpers (ADR-006) ────────────────────────────────────────────
 
 
@@ -386,6 +421,14 @@ def new_scheduled_txn_iri() -> str:
 
 def new_budget_iri() -> str:
     return f"mfl:Budget_{uuid.uuid4().hex[:8]}"
+
+
+def new_report_iri() -> str:
+    return f"mfl:Report_{uuid.uuid4().hex[:8]}"
+
+
+def new_report_folder_iri() -> str:
+    return f"mfl:ReportFolder_{uuid.uuid4().hex[:8]}"
 
 
 # ── Repository ──────────────────────────────────────────────────────────────
@@ -1173,6 +1216,26 @@ class Repository:
         )
         return [(r["id"], r["name"]) for r in cur]
 
+    def expand_canonical_payee_ids(self, ids: list[int]) -> list[int]:
+        """Return the input canonical payee ids plus the ids of every
+        payee whose ``canonical_id`` is in the input.
+
+        Used by report filters (ADR-039) to make "filter to canonical
+        Tesco" automatically include historical alias rows. Round 1 of
+        ADR-029 left ``txn.payee_id`` pointing at the raw alias; round 2
+        will normalise to the canonical at import time, but the existing
+        ledger still has alias-pointing txns until that lands. Empty
+        input returns an empty list."""
+        if not ids:
+            return []
+        ph = ",".join("?" * len(ids))
+        cur = self._conn.execute(
+            f"SELECT id FROM payee "
+            f"WHERE id IN ({ph}) OR canonical_id IN ({ph})",
+            [*ids, *ids],
+        )
+        return [int(r["id"]) for r in cur]
+
     def list_aliases_of(self, canonical_id: int) -> list[tuple[int, str]]:
         """Every alias pointing at ``canonical_id``, as ``(id, name)`` tuples."""
         cur = self._conn.execute(
@@ -1652,6 +1715,7 @@ class Repository:
         granularity: str,
         account_ids: Optional[list[int]] = None,
         include_uncategorised: bool = True,
+        payee_ids: Optional[list[int]] = None,
     ) -> list[dict]:
         """Outflow spending per (bucket, category_id) over a date range.
 
@@ -1664,6 +1728,12 @@ class Repository:
         Refund handling — where a positive amount on an expense category
         reduces the bucket — is deferred to the future Cash Flow report,
         which interprets signed amounts directly.
+
+        ``payee_ids``, when supplied non-empty, narrows the result to
+        transactions whose payee is in the set (ADR-039 saved-report
+        filter dimension). ``None`` or an empty list means no payee
+        narrowing — every payee contributes (including the (No payee)
+        rows where ``txn.payee_id`` is NULL).
 
         Returns a list of dicts: ``{bucket, category_id, spending_pence}``
         — pence are always ≥ 0. Caller rolls category_id up to a "report
@@ -1691,6 +1761,11 @@ class Repository:
         if not include_uncategorised:
             filters.append("t.category_id != ?")
             params.append(UNCATEGORISED_ID)
+
+        if payee_ids:
+            ph = ",".join("?" * len(payee_ids))
+            filters.append(f"t.payee_id IN ({ph})")
+            params.extend(payee_ids)
 
         filter_sql = ""
         if filters:
@@ -4149,6 +4224,24 @@ class Repository:
             for r in cur
         ]
 
+    def distinct_category_ids_for_account(
+        self, account_id: Optional[int],
+    ) -> set[int]:
+        """Category ids actually referenced by txns in a single account
+        (when ``account_id`` is set) or across the whole ledger (when
+        ``None``). Used by the register's category-filter combo to hide
+        options that wouldn't match anything in the current view."""
+        if account_id is None:
+            cur = self._conn.execute(
+                "SELECT DISTINCT category_id FROM txn"
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT DISTINCT category_id FROM txn WHERE account_id = ?",
+                (account_id,),
+            )
+        return {int(r["category_id"]) for r in cur}
+
     def category_parent_map(self) -> dict[int, Optional[int]]:
         """Mapping of category id → parent id, for the whole tree. Used
         by the budget computation to walk up to the nearest budgeted
@@ -4184,3 +4277,291 @@ class Repository:
             (through_date, budget_id),
         )
         return [self._row_to_scheduled(r) for r in cur]
+
+    # ── Saved reports (ADR-039) ──
+
+    _REPORT_COLS = (
+        "r.id, r.iri, r.name, r.type, r.folder_id, "
+        "r.filters_json, r.created_at, f.name AS folder_name"
+    )
+
+    def _row_to_report(self, row) -> ReportRow:
+        return ReportRow(
+            id=int(row["id"]),
+            iri=row["iri"],
+            name=row["name"],
+            type=row["type"],
+            folder_id=row["folder_id"],
+            folder_name=row["folder_name"],
+            filters_json=row["filters_json"] or "{}",
+            created_at=row["created_at"],
+        )
+
+    def list_report_folders(self) -> list[ReportFolderRow]:
+        """All non-archived report folders in sidebar order (sort_order,
+        then name as a stable tiebreaker). ``report_count`` is the number
+        of non-archived reports currently inside the folder."""
+        cur = self._conn.execute(
+            "SELECT f.id, f.iri, f.name, f.sort_order, "
+            "       (SELECT COUNT(*) FROM report r "
+            "        WHERE r.folder_id = f.id AND r.archived_at IS NULL) AS n "
+            "FROM report_folder f "
+            "WHERE f.archived_at IS NULL "
+            "ORDER BY f.sort_order, f.name"
+        )
+        return [
+            ReportFolderRow(
+                id=int(r["id"]), iri=r["iri"], name=r["name"],
+                sort_order=int(r["sort_order"]), report_count=int(r["n"]),
+            )
+            for r in cur
+        ]
+
+    def list_reports(self) -> list[ReportRow]:
+        """All non-archived saved reports, joined with their folder name.
+        Sorted by folder (root first, then folders in their sort_order)
+        then report name — matches the sidebar's natural render order."""
+        cur = self._conn.execute(
+            f"SELECT {self._REPORT_COLS} "
+            f"FROM report r "
+            f"LEFT JOIN report_folder f ON f.id = r.folder_id "
+            f"WHERE r.archived_at IS NULL "
+            f"ORDER BY "
+            f"  CASE WHEN r.folder_id IS NULL THEN 0 ELSE 1 END, "
+            f"  f.sort_order, "
+            f"  r.name COLLATE NOCASE"
+        )
+        return [self._row_to_report(r) for r in cur]
+
+    def get_report(self, report_id: int) -> Optional[ReportRow]:
+        row = self._conn.execute(
+            f"SELECT {self._REPORT_COLS} "
+            f"FROM report r "
+            f"LEFT JOIN report_folder f ON f.id = r.folder_id "
+            f"WHERE r.id = ? AND r.archived_at IS NULL",
+            (report_id,),
+        ).fetchone()
+        return self._row_to_report(row) if row is not None else None
+
+    def create_report(
+        self,
+        *,
+        name: str,
+        type_key: str,
+        folder_id: Optional[int],
+        filters_json: str,
+    ) -> ReportRow:
+        """Insert a new saved report. Raises ``ValueError`` on a blank
+        name or a duplicate (name, folder_id) — the UNIQUE constraint in
+        0010_reports.sql enforces the latter."""
+        clean = (name or "").strip()
+        if not clean:
+            raise ValueError("Report name cannot be empty.")
+        iri = new_report_iri()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO report (iri, name, type, folder_id, filters_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (iri, clean, type_key, folder_id, filters_json or "{}"),
+            )
+            self.commit()
+        except sqlite3.IntegrityError as e:
+            self.rollback()
+            raise ValueError(
+                f"Could not create report {clean!r}: {e}"
+            ) from e
+        except Exception:
+            self.rollback()
+            raise
+        row = self.get_report(int(cur.lastrowid))
+        assert row is not None  # we just inserted it
+        return row
+
+    def update_report(
+        self,
+        report_id: int,
+        *,
+        name=_UNSET,
+        folder_id=_UNSET,
+        filters_json=_UNSET,
+    ) -> ReportRow:
+        """Update one or more fields on a saved report. Unspecified fields
+        keep their current value (the sentinel distinguishes "leave alone"
+        from "set to None" on the optional folder_id).
+
+        References the class-level ``_UNSET`` sentinel via ``self._UNSET``
+        — Python class scope is not visible to nested function bodies, so
+        a bare ``_UNSET`` inside the method body would resolve to a
+        different (or missing) name and silently treat every default as
+        "set to None" (see the bulk_update_transactions pattern above)."""
+        sets: list[str] = []
+        params: list = []
+        if name is not self._UNSET:
+            clean = (name or "").strip()
+            if not clean:
+                raise ValueError("Report name cannot be empty.")
+            sets.append("name = ?")
+            params.append(clean)
+        if folder_id is not self._UNSET:
+            sets.append("folder_id = ?")
+            params.append(folder_id)
+        if filters_json is not self._UNSET:
+            sets.append("filters_json = ?")
+            params.append(filters_json or "{}")
+        if not sets:
+            row = self.get_report(report_id)
+            if row is None:
+                raise ValueError(f"No report with id {report_id}.")
+            return row
+        params.append(report_id)
+        try:
+            self._conn.execute(
+                f"UPDATE report SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            self.commit()
+        except sqlite3.IntegrityError as e:
+            self.rollback()
+            raise ValueError(f"Could not update report: {e}") from e
+        except Exception:
+            self.rollback()
+            raise
+        row = self.get_report(report_id)
+        if row is None:
+            raise ValueError(f"No report with id {report_id}.")
+        return row
+
+    def delete_report(self, report_id: int) -> bool:
+        """Hard-delete a saved report. Returns True if a row was removed,
+        False if the id was already gone."""
+        try:
+            cur = self._conn.execute(
+                "DELETE FROM report WHERE id = ?", (report_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return cur.rowcount > 0
+
+    def create_report_folder(self, name: str) -> ReportFolderRow:
+        """Create a Reports-section folder. Appended at the end of the
+        existing folder list (sort_order = current max + 1), matching the
+        account-folder pattern."""
+        clean = (name or "").strip()
+        if not clean:
+            raise ValueError("Folder name cannot be empty.")
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) AS m FROM report_folder "
+            "WHERE archived_at IS NULL"
+        ).fetchone()
+        next_order = int(row["m"]) + 1
+        iri = new_report_folder_iri()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO report_folder (iri, name, sort_order) "
+                "VALUES (?, ?, ?)",
+                (iri, clean, next_order),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return ReportFolderRow(
+            id=int(cur.lastrowid), iri=iri, name=clean,
+            sort_order=next_order, report_count=0,
+        )
+
+    def rename_report_folder(self, folder_id: int, new_name: str) -> None:
+        clean = (new_name or "").strip()
+        if not clean:
+            raise ValueError("Folder name cannot be empty.")
+        try:
+            self._conn.execute(
+                "UPDATE report_folder SET name = ? WHERE id = ?",
+                (clean, folder_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def delete_report_folder(self, folder_id: int) -> None:
+        """Delete a Reports-section folder. Reports inside it fall to the
+        Reports root via the FK rule (ON DELETE SET NULL) — no report data
+        is lost. Mirrors :meth:`delete_folder`."""
+        try:
+            self._conn.execute(
+                "DELETE FROM report_folder WHERE id = ?", (folder_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def set_report_folder(
+        self, report_id: int, folder_id: Optional[int],
+    ) -> None:
+        """Move a report into a folder (``folder_id`` set) or out to the
+        Reports root (``folder_id=None``)."""
+        try:
+            self._conn.execute(
+                "UPDATE report SET folder_id = ? WHERE id = ?",
+                (folder_id, report_id),
+            )
+            self.commit()
+        except sqlite3.IntegrityError as e:
+            self.rollback()
+            raise ValueError(
+                f"Could not move report: name collides in the target folder ({e})"
+            ) from e
+        except Exception:
+            self.rollback()
+            raise
+
+    def move_report_folder(self, folder_id: int, direction: int) -> None:
+        """Swap this folder's sort_order with its immediate neighbour
+        (direction = -1 up / +1 down). No-op if there is no neighbour."""
+        if direction not in (-1, 1):
+            raise ValueError(f"Invalid move direction: {direction}")
+        row = self._conn.execute(
+            "SELECT sort_order FROM report_folder WHERE id = ?",
+            (folder_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No report folder with id {folder_id}")
+        current = int(row["sort_order"])
+        if direction == -1:
+            neighbour = self._conn.execute(
+                "SELECT id, sort_order FROM report_folder "
+                "WHERE sort_order < ? AND archived_at IS NULL "
+                "ORDER BY sort_order DESC LIMIT 1",
+                (current,),
+            ).fetchone()
+        else:
+            neighbour = self._conn.execute(
+                "SELECT id, sort_order FROM report_folder "
+                "WHERE sort_order > ? AND archived_at IS NULL "
+                "ORDER BY sort_order ASC LIMIT 1",
+                (current,),
+            ).fetchone()
+        if neighbour is None:
+            return
+        try:
+            sentinel = -1
+            self._conn.execute(
+                "UPDATE report_folder SET sort_order = ? WHERE id = ?",
+                (sentinel, folder_id),
+            )
+            self._conn.execute(
+                "UPDATE report_folder SET sort_order = ? WHERE id = ?",
+                (current, int(neighbour["id"])),
+            )
+            self._conn.execute(
+                "UPDATE report_folder SET sort_order = ? WHERE id = ?",
+                (int(neighbour["sort_order"]), folder_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise

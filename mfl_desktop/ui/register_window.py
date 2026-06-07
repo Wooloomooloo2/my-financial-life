@@ -8,12 +8,15 @@ Balance column hidden — see project-all-transactions-view in memory).
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractItemDelegate,
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -52,9 +55,16 @@ from mfl_desktop.ui.payees_dialog import PayeesDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
 from mfl_desktop.ui.schedules_dialog import SchedulesDialog
-from mfl_desktop.ui.sidebar import KIND_ROLE, AccountSidebar
+from mfl_desktop.ui.sidebar import KIND_ROLE, Sidebar
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
+from mfl_desktop.ui.new_report_dialog import NewReportDialog
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
+from mfl_desktop.reports.filters import (
+    TYPE_INCOME_EXPENSE,
+    TYPE_NET_WORTH,
+    TYPE_SANKEY,
+    TYPE_SPENDING_OVER_TIME,
+)
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
 from mfl_desktop.ui.transfer_destination_dialog import (
     TransferDestinationDialog,
@@ -68,6 +78,16 @@ from mfl_desktop.ui.transfer_match_dialogs import (
 )
 
 STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
+
+# Mirror of the sidebar's currency-symbol table so the status-bar Net
+# matches the in-app convention. Unknown currencies fall back to no
+# symbol — the signed magnitude is still readable.
+_CURRENCY_SYMBOLS: dict[str, str] = {
+    "GBP": "£",
+    "USD": "$",
+    "EUR": "€",
+    "JPY": "¥",
+}
 
 # Per-column default widths, keyed by attribute name so they apply to whichever
 # mode the model is in.
@@ -102,7 +122,12 @@ class RegisterWindow(QMainWindow):
         accounts = repo.list_accounts()
         folders = repo.list_folders()
         balances = repo.compute_account_balances()
-        self._sidebar = AccountSidebar(accounts, folders, balances)
+        reports = repo.list_reports()
+        report_folders = repo.list_report_folders()
+        self._sidebar = Sidebar(
+            accounts, folders, balances,
+            reports=reports, report_folders=report_folders,
+        )
         self._sidebar.selection_changed.connect(self._on_sidebar_change)
         self._sidebar.setContextMenuPolicy(Qt.CustomContextMenu)
         self._sidebar.customContextMenuRequested.connect(
@@ -115,6 +140,13 @@ class RegisterWindow(QMainWindow):
         # Single-instance-per-account registry — opening an account that
         # already has a summary window raises the existing one (ADR-033).
         self._account_summary_wins: dict[int, AccountSummaryWindow] = {}
+
+        # Single-instance-per-saved-report registry (ADR-039). A bare-
+        # opened report window (no saved-id) lives in self._bare_report_wins
+        # keyed by type, so the Reports-menu entry stays singleton per
+        # type without conflicting with the saved-id windows.
+        self._saved_report_wins: dict[int, SpendingReportWindow] = {}
+        self._bare_report_wins: dict[str, SpendingReportWindow] = {}
 
         search = QLineEdit()
         search.setPlaceholderText("Search payee, memo, amount, or date…")
@@ -179,7 +211,7 @@ class RegisterWindow(QMainWindow):
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 1040])
+        splitter.setSizes([360, 1000])
         self.setCentralWidget(splitter)
 
         self.setStatusBar(QStatusBar(self))
@@ -215,11 +247,26 @@ class RegisterWindow(QMainWindow):
             self._sidebar.select_all_transactions()
             self._show_all_transactions()
 
-    def _on_sidebar_change(self, account_iri: Optional[str]) -> None:
-        if account_iri is None:
+    def _on_sidebar_change(self, kind: str, payload) -> None:
+        """Dispatch a new sidebar selection to the right surface.
+
+        The sidebar emits one of three kinds (ADR-039):
+        - ``"all_transactions"`` → cross-account register view
+        - ``"account"`` (payload = account IRI) → single-account register
+        - ``"report"`` (payload = report id int) → open the saved report
+          window for that row (singleton per report id)
+        """
+        if kind == "all_transactions":
             self._show_all_transactions()
-        else:
-            self._show_account(account_iri)
+            return
+        if kind == "account":
+            if isinstance(payload, str):
+                self._show_account(payload)
+            return
+        if kind == "report":
+            if isinstance(payload, int):
+                self._open_saved_report(payload)
+            return
 
     # ── view modes ──
 
@@ -231,6 +278,9 @@ class RegisterWindow(QMainWindow):
         self._account = acct
         self._update_window_title()
         self._set_model(TransactionTableModel(self._repo, account_id=acct.id))
+        # The category combo lists only the categories actually used in
+        # the current view — rebuild it now that _account has flipped.
+        self._populate_category_combo()
         self._import_action.setEnabled(True)
         self._import_action.setToolTip("Import OFX / QFX / CSV into this account")
         self._set_account_action_state(account_selected=True)
@@ -239,6 +289,8 @@ class RegisterWindow(QMainWindow):
         self._account = None
         self._update_window_title()
         self._set_model(TransactionTableModel(self._repo, account_id=None))
+        # See _show_account: the category combo is per-view.
+        self._populate_category_combo()
         self._import_action.setEnabled(False)
         self._import_action.setToolTip(
             "Select an account in the sidebar to import into it"
@@ -263,7 +315,23 @@ class RegisterWindow(QMainWindow):
 
     def _set_model(self, model: TransactionTableModel) -> None:
         """Swap the source model and reattach delegates + column widths for
-        the new column layout."""
+        the new column layout.
+
+        Closes any inline editor (Payee / Category typeahead, Status
+        combo, etc.) first so it doesn't try to commit against the
+        about-to-be-replaced view/model and surface the Qt warning
+        ``commitData called with an editor that does not belong to
+        this view``. Most commonly hit when the user clicks a different
+        sidebar account while a cell is still being edited, or when a
+        big delete triggers a reload mid-edit."""
+        focused = QApplication.focusWidget()
+        if focused is not None and self._table.isAncestorOf(focused):
+            # Discard the in-flight edit rather than commit it — the
+            # user has navigated away (clicked a different account,
+            # deleted an account, etc.); committing now would write to
+            # whichever cell happened to have focus, which is rarely
+            # what they intended.
+            self._table.closeEditor(focused, QAbstractItemDelegate.NoHint)
         self._model = model
         self._proxy.setSourceModel(self._model)
         self._model.reload()
@@ -311,9 +379,26 @@ class RegisterWindow(QMainWindow):
         visible = self._proxy.rowCount()
         total = self._model.rowCount()
         suffix = "" if self._account is not None else "  (across all accounts)"
-        self.statusBar().showMessage(
-            f"Showing {visible:,} of {total:,} transactions{suffix}"
-        )
+        parts = [f"Showing {visible:,} of {total:,} transactions{suffix}"]
+        # Net of the visible rows is meaningful inside a single-currency
+        # view; the cross-account view mixes currencies so the bare sum
+        # would be misleading — skip it there. Cheap to walk 1.3k rows
+        # in Python; if this grows we move it into the proxy.
+        if self._account is not None and visible > 0:
+            net = Decimal("0.00")
+            for i in range(visible):
+                src = self._proxy.mapToSource(self._proxy.index(i, 0))
+                net += self._model.row_at(src.row()).amount
+            parts.append(self._format_net(net, self._account.currency))
+        self.statusBar().showMessage("  ·  ".join(parts))
+
+    @staticmethod
+    def _format_net(amount: Decimal, currency: str) -> str:
+        symbol = _CURRENCY_SYMBOLS.get(currency, "")
+        body = f"{abs(amount):,.2f}"
+        if amount < 0:
+            return f"Net: -{symbol}{body}"
+        return f"Net: {symbol}{body}"
 
     # ── menus ──
 
@@ -1633,11 +1718,20 @@ class RegisterWindow(QMainWindow):
         current row. Otherwise the first account is selected, or
         All Transactions if no accounts remain. Balances are recomputed
         each time so the sidebar reflects the current ledger state.
+
+        Reports section is reloaded too — saved reports may have come
+        and gone since the last refresh (creates from a report window,
+        deletes from the sidebar context menu).
         """
         accounts = self._repo.list_accounts()
         folders = self._repo.list_folders()
         balances = self._repo.compute_account_balances()
-        self._sidebar.reload(accounts, folders, balances)
+        reports = self._repo.list_reports()
+        report_folders = self._repo.list_report_folders()
+        self._sidebar.reload(
+            accounts, folders, balances,
+            reports=reports, report_folders=report_folders,
+        )
         if select_iri is not None:
             self._select_account_in_sidebar(select_iri)
         elif accounts:
@@ -1646,16 +1740,102 @@ class RegisterWindow(QMainWindow):
             self._sidebar.select_all_transactions()
             self._show_all_transactions()
 
+    def _refresh_sidebar_keep_selection(self) -> None:
+        """Reload the sidebar (reports included) preserving whatever the
+        user has selected. Used after a saved-report create / update /
+        delete so the Reports section reflects the new state without
+        moving the user's focus."""
+        accounts = self._repo.list_accounts()
+        folders = self._repo.list_folders()
+        balances = self._repo.compute_account_balances()
+        reports = self._repo.list_reports()
+        report_folders = self._repo.list_report_folders()
+        self._sidebar.reload(
+            accounts, folders, balances,
+            reports=reports, report_folders=report_folders,
+        )
+
     def _on_sidebar_context_menu(self, pos) -> None:
         item = self._sidebar.itemAt(pos)
         if item is None:
-            # Empty area — offer New Account + New Folder.
+            # Empty area — pick the section by y-coordinate so right-
+            # clicking *anywhere* in the Reports section (including below
+            # the existing rows) offers the Reports verbs. Falls back to
+            # the Accounts menu when above both sections.
+            section = self._sidebar.section_at_y(pos.y())
+            menu = QMenu(self._sidebar)
+            if section == "reports":
+                new_report_act = menu.addAction("&New Report…")
+                new_report_act.triggered.connect(self._on_new_report_from_sidebar)
+                new_folder_act = menu.addAction("New &Folder…")
+                new_folder_act.triggered.connect(self._on_new_report_folder)
+            else:
+                menu.addAction(self._new_account_action)
+                menu.addAction(self._new_folder_action)
+            menu.exec(self._sidebar.viewport().mapToGlobal(pos))
+            return
+        kind = item.data(0, KIND_ROLE)
+        if kind == "section_accounts":
             menu = QMenu(self._sidebar)
             menu.addAction(self._new_account_action)
             menu.addAction(self._new_folder_action)
             menu.exec(self._sidebar.viewport().mapToGlobal(pos))
             return
-        kind = item.data(0, KIND_ROLE)
+        if kind == "section_reports":
+            menu = QMenu(self._sidebar)
+            new_report_act = menu.addAction("&New Report…")
+            new_report_act.triggered.connect(self._on_new_report_from_sidebar)
+            new_folder_act = menu.addAction("New &Folder…")
+            new_folder_act.triggered.connect(self._on_new_report_folder)
+            menu.exec(self._sidebar.viewport().mapToGlobal(pos))
+            return
+        if kind == "report_folder":
+            folder_id = item.data(0, Qt.UserRole)
+            folder_name = item.text(0)
+            menu = QMenu(self._sidebar)
+            rename_act = menu.addAction("&Rename Folder…")
+            rename_act.triggered.connect(
+                lambda: self._on_rename_report_folder(folder_id, folder_name)
+            )
+            menu.addSeparator()
+            up_act = menu.addAction("Move &Up")
+            up_act.triggered.connect(
+                lambda: self._on_move_report_folder(folder_id, -1)
+            )
+            down_act = menu.addAction("Move &Down")
+            down_act.triggered.connect(
+                lambda: self._on_move_report_folder(folder_id, +1)
+            )
+            menu.addSeparator()
+            new_report_act = menu.addAction("&New Report…")
+            new_report_act.triggered.connect(self._on_new_report_from_sidebar)
+            new_folder_act = menu.addAction("New &Folder…")
+            new_folder_act.triggered.connect(self._on_new_report_folder)
+            menu.addSeparator()
+            delete_act = menu.addAction("&Delete Folder…")
+            delete_act.triggered.connect(
+                lambda: self._on_delete_report_folder(folder_id, folder_name)
+            )
+            menu.exec(self._sidebar.viewport().mapToGlobal(pos))
+            return
+        if kind == "report":
+            report_id = int(item.data(0, Qt.UserRole))
+            report_name = item.text(0)
+            menu = QMenu(self._sidebar)
+            open_act = menu.addAction("&Open Report")
+            open_act.triggered.connect(
+                lambda: self._open_saved_report(report_id)
+            )
+            menu.addSeparator()
+            move_menu = menu.addMenu("&Move to Folder")
+            self._populate_move_report_to_folder_menu(move_menu, report_id)
+            menu.addSeparator()
+            delete_act = menu.addAction("&Delete Report…")
+            delete_act.triggered.connect(
+                lambda: self._on_delete_report(report_id, report_name)
+            )
+            menu.exec(self._sidebar.viewport().mapToGlobal(pos))
+            return
         if kind == "all":
             menu = QMenu(self._sidebar)
             menu.addAction(self._new_account_action)
@@ -1813,24 +1993,229 @@ class RegisterWindow(QMainWindow):
     # ── reports ──
 
     def _on_spending_report(self) -> None:
-        """Open the Spending Over Time report. Non-modal so the user can
-        keep working in the register; instance is held on self so the
-        window stays alive after this method returns."""
-        # Reuse an existing window if one is already open — preferred over
-        # spawning duplicates on repeat clicks.
-        existing = getattr(self, "_spending_report_win", None)
+        """Reports menu → Spending Over Time. Opens the *bare* window
+        (no saved-state attached) — saved reports open via the sidebar
+        instead (ADR-039 §reports-menu)."""
+        self._open_bare_report(TYPE_SPENDING_OVER_TIME)
+
+    def _open_bare_report(self, type_key: str) -> None:
+        """Open an unattached report window for the given type. Singleton
+        per type — repeat menu clicks raise the existing bare window."""
+        existing = self._bare_report_wins.get(type_key)
         if existing is not None and existing.isVisible():
             existing.raise_()
             existing.activateWindow()
             return
-        win = SpendingReportWindow(self._repo, parent=self)
+        if type_key == TYPE_SPENDING_OVER_TIME:
+            win = SpendingReportWindow.open_bare(self._repo, parent=self)
+        else:
+            # Other types not yet implemented; the menu items for them
+            # haven't been added either, but keep the dispatcher honest.
+            QMessageBox.information(
+                self, "Not yet available",
+                "This report type is part of a later round of ADR-039.",
+            )
+            return
         win.setAttribute(Qt.WA_DeleteOnClose)
-        win.destroyed.connect(self._on_spending_report_closed)
-        self._spending_report_win = win
+        win.destroyed.connect(
+            lambda _obj=None, t=type_key: self._on_bare_report_closed(t)
+        )
+        win.reports_changed.connect(self._on_reports_changed)
+        self._bare_report_wins[type_key] = win
         win.show()
 
-    def _on_spending_report_closed(self, _obj=None) -> None:
-        self._spending_report_win = None
+    def _on_bare_report_closed(self, type_key: str) -> None:
+        self._bare_report_wins.pop(type_key, None)
+
+    def _open_saved_report(self, report_id: int) -> None:
+        """Open a saved report by id. Singleton per report id — clicking
+        the same Reports-section row twice raises the existing window."""
+        existing = self._saved_report_wins.get(report_id)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        report = self._repo.get_report(report_id)
+        if report is None:
+            # Row was deleted between sidebar build and click.
+            self._refresh_sidebar_keep_selection()
+            return
+        if report.type == TYPE_SPENDING_OVER_TIME:
+            win = SpendingReportWindow.load_from_id(
+                self._repo, report_id, parent=self,
+            )
+        else:
+            QMessageBox.information(
+                self, "Not yet available",
+                f"Saved reports of type {report.type!r} aren't openable yet.",
+            )
+            return
+        if win is None:
+            self._refresh_sidebar_keep_selection()
+            return
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.destroyed.connect(
+            lambda _obj=None, rid=report_id: self._on_saved_report_closed(rid)
+        )
+        win.reports_changed.connect(self._on_reports_changed)
+        self._saved_report_wins[report_id] = win
+        win.show()
+
+    def _on_saved_report_closed(self, report_id: int) -> None:
+        self._saved_report_wins.pop(report_id, None)
+
+    def _on_reports_changed(self) -> None:
+        """A report window saved / created / renamed a row. Refresh the
+        sidebar's Reports section so the new state is visible without
+        the user having to do anything."""
+        self._refresh_sidebar_keep_selection()
+
+    # ── reports — sidebar verbs ──
+
+    def _on_new_report_from_sidebar(self) -> None:
+        """Sidebar → New Report… verb. Pops the type picker; opens the
+        bare window for the chosen type. The user's first Save inside
+        that window creates the actual ``report`` row."""
+        dialog = NewReportDialog(parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        type_key = dialog.values()
+        if type_key is None:
+            return
+        self._open_bare_report(type_key)
+
+    def _on_new_report_folder(self) -> None:
+        name, ok = QInputDialog.getText(
+            self, "New Folder", "Folder name:", QLineEdit.Normal, "",
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            self._repo.create_report_folder(name)
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not create folder", str(e))
+            return
+        self._refresh_sidebar_keep_selection()
+
+    def _on_rename_report_folder(self, folder_id: int, current_name: str) -> None:
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Folder", "New name:", QLineEdit.Normal, current_name,
+        )
+        if not ok or new_name.strip() == current_name:
+            return
+        try:
+            self._repo.rename_report_folder(folder_id, new_name)
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not rename", str(e))
+            return
+        self._refresh_sidebar_keep_selection()
+
+    def _on_delete_report_folder(self, folder_id: int, folder_name: str) -> None:
+        confirm = QMessageBox.question(
+            self, "Confirm delete",
+            f"Delete folder {folder_name!r}?\n\nReports inside the folder "
+            f"will move back to the Reports root — no reports are deleted.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self._repo.delete_report_folder(folder_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not delete folder", str(e))
+            return
+        self._refresh_sidebar_keep_selection()
+
+    def _on_move_report_folder(self, folder_id: int, direction: int) -> None:
+        try:
+            self._repo.move_report_folder(folder_id, direction)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not reorder folder", str(e))
+            return
+        self._refresh_sidebar_keep_selection()
+
+    def _on_delete_report(self, report_id: int, report_name: str) -> None:
+        confirm = QMessageBox.question(
+            self, "Confirm delete",
+            f"Delete saved report {report_name!r}?\n\n"
+            f"This removes the saved filter set; transaction data is "
+            f"unaffected.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self._repo.delete_report(report_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not delete report", str(e))
+            return
+        # Close the open window for this report (if any) so the user
+        # doesn't end up editing a phantom row.
+        existing = self._saved_report_wins.pop(report_id, None)
+        if existing is not None:
+            existing.close()
+        self._refresh_sidebar_keep_selection()
+
+    def _populate_move_report_to_folder_menu(
+        self, menu: "QMenu", report_id: int,
+    ) -> None:
+        """Build the Move to Folder ▸ submenu for a right-clicked report.
+        Mirrors :py:meth:`_populate_move_to_folder_menu` (account
+        equivalent)."""
+        folders = self._repo.list_report_folders()
+        report = self._repo.get_report(report_id)
+        current_folder_id = report.folder_id if report is not None else None
+
+        no_folder_act = menu.addAction("(No folder)")
+        no_folder_act.setEnabled(current_folder_id is not None)
+        no_folder_act.triggered.connect(
+            lambda: self._move_report_to_folder(report_id, None)
+        )
+
+        if folders:
+            menu.addSeparator()
+            for f in folders:
+                act = menu.addAction(f.name)
+                act.setEnabled(f.id != current_folder_id)
+                fid = f.id
+                act.triggered.connect(
+                    lambda checked=False, target=fid: self._move_report_to_folder(
+                        report_id, target,
+                    )
+                )
+
+        menu.addSeparator()
+        new_act = menu.addAction("&New Folder…")
+        new_act.triggered.connect(
+            lambda: self._on_new_report_folder_and_assign(report_id)
+        )
+
+    def _move_report_to_folder(
+        self, report_id: int, folder_id: Optional[int],
+    ) -> None:
+        try:
+            self._repo.set_report_folder(report_id, folder_id)
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not move report", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Could not move report", str(e))
+            return
+        self._refresh_sidebar_keep_selection()
+
+    def _on_new_report_folder_and_assign(self, report_id: int) -> None:
+        name, ok = QInputDialog.getText(
+            self, "New Folder", "Folder name:", QLineEdit.Normal, "",
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            folder = self._repo.create_report_folder(name)
+            self._repo.set_report_folder(report_id, folder.id)
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not create folder", str(e))
+            return
+        self._refresh_sidebar_keep_selection()
 
     def _on_net_worth(self) -> None:
         existing = getattr(self, "_net_worth_win", None)
@@ -1908,20 +2293,34 @@ class RegisterWindow(QMainWindow):
         self._account_summary_wins.pop(account_id, None)
 
     def _populate_category_combo(self) -> None:
-        """Rebuild the filter-bar Category combo. Preserves the
-        currently-selected filter id where possible."""
+        """Rebuild the filter-bar Category combo, scoped to the
+        categories actually in use in the current view (single account
+        or all accounts). Preserves the previously-selected filter id
+        where it's still visible; otherwise reverts to All and clears
+        the proxy filter in lockstep."""
         current_id = (
             self._category_combo.currentData()
             if self._category_combo.count() else None
+        )
+        in_use = self._repo.distinct_category_ids_for_account(
+            self._account.id if self._account is not None else None
         )
         self._category_combo.blockSignals(True)
         self._category_combo.clear()
         self._category_combo.addItem("All", userData=None)
         restore_index = 0
-        for i, c in enumerate(self._categories, start=1):
+        for i, c in enumerate(
+            (c for c in self._categories if c.id in in_use), start=1,
+        ):
             label = f"{c.name} ({c.parent_name})" if c.parent_name else c.name
             self._category_combo.addItem(label, userData=c.id)
             if c.id == current_id:
                 restore_index = i
         self._category_combo.setCurrentIndex(restore_index)
         self._category_combo.blockSignals(False)
+        # blockSignals(True) above swallows currentIndexChanged, so if
+        # the prior selection isn't visible in the new view we have to
+        # push the "All" filter through to the proxy by hand — otherwise
+        # the table keeps showing the now-invisible category's rows only.
+        if current_id is not None and restore_index == 0:
+            self._proxy.set_category_id(None)
