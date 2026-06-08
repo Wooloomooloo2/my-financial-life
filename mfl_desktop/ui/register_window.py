@@ -7,7 +7,7 @@ Balance column hidden — see project-all-transactions-view in memory).
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
@@ -81,6 +81,18 @@ from mfl_desktop.ui.transfer_match_dialogs import (
 
 STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
+# ADR-041: register date-window presets — (label, key). The chosen window is
+# turned into an inclusive lower bound on posted_date and pushed into the
+# Repository query, so the default view fetches and sorts only recent rows
+# instead of the full account history. Default = rolling quarter (90 days).
+_WINDOW_PRESETS = [
+    ("Last 30 days",   "30d"),
+    ("Rolling quarter", "90d"),
+    ("Year to date",   "ytd"),
+    ("All",            "all"),
+]
+_DEFAULT_WINDOW_KEY = "90d"
+
 # Mirror of the sidebar's currency-symbol table so the status-bar Net
 # matches the in-app convention. Unknown currencies fall back to no
 # symbol — the signed magnitude is still readable.
@@ -116,6 +128,10 @@ class RegisterWindow(QMainWindow):
         self._service = ImportService(repo)
         self._categories = repo.list_categories_flat()
         self._account: Optional[AccountSummary] = None  # None == all-transactions mode
+        # ADR-041: current register date-window key; resolved to a posted_date
+        # lower bound by _current_since(). Set before the initial selection
+        # builds a model so the first view is already windowed.
+        self._window_key = _DEFAULT_WINDOW_KEY
 
         self.resize(1360, 760)
 
@@ -154,6 +170,18 @@ class RegisterWindow(QMainWindow):
         search.setPlaceholderText("Search payee, memo, amount, or date…")
         search.textChanged.connect(lambda s: self._proxy.set_search(s))
 
+        # ADR-041: date-window selector. Default seeded from self._window_key.
+        self._window_combo = QComboBox()
+        for label, key in _WINDOW_PRESETS:
+            self._window_combo.addItem(label, key)
+        self._window_combo.setCurrentIndex(
+            next(
+                i for i, (_, k) in enumerate(_WINDOW_PRESETS)
+                if k == self._window_key
+            )
+        )
+        self._window_combo.currentIndexChanged.connect(self._on_window_change)
+
         status_combo = QComboBox()
         status_combo.addItems(["All", *STATUSES])
         status_combo.currentTextChanged.connect(lambda s: self._proxy.set_status(s))
@@ -168,6 +196,9 @@ class RegisterWindow(QMainWindow):
         filter_bar.setContentsMargins(8, 8, 8, 4)
         filter_bar.addWidget(QLabel("Search:"))
         filter_bar.addWidget(search, stretch=2)
+        filter_bar.addSpacing(12)
+        filter_bar.addWidget(QLabel("Show:"))
+        filter_bar.addWidget(self._window_combo)
         filter_bar.addSpacing(12)
         filter_bar.addWidget(QLabel("Status:"))
         filter_bar.addWidget(status_combo)
@@ -286,7 +317,9 @@ class RegisterWindow(QMainWindow):
             return
         self._account = acct
         self._update_window_title()
-        self._set_model(TransactionTableModel(self._repo, account_id=acct.id))
+        self._set_model(TransactionTableModel(
+            self._repo, account_id=acct.id, since=self._current_since(),
+        ))
         # The category combo lists only the categories actually used in
         # the current view — rebuild it now that _account has flipped.
         self._populate_category_combo()
@@ -297,7 +330,9 @@ class RegisterWindow(QMainWindow):
     def _show_all_transactions(self) -> None:
         self._account = None
         self._update_window_title()
-        self._set_model(TransactionTableModel(self._repo, account_id=None))
+        self._set_model(TransactionTableModel(
+            self._repo, account_id=None, since=self._current_since(),
+        ))
         # See _show_account: the category combo is per-view.
         self._populate_category_combo()
         self._import_action.setEnabled(False)
@@ -305,6 +340,27 @@ class RegisterWindow(QMainWindow):
             "Select an account in the sidebar to import into it"
         )
         self._set_account_action_state(account_selected=False)
+
+    def _current_since(self) -> Optional[str]:
+        """Resolve the active window key (ADR-041) to an inclusive
+        'YYYY-MM-DD' lower bound on posted_date, or None for full history."""
+        key = self._window_key
+        if key == "all":
+            return None
+        today = date.today()
+        if key == "ytd":
+            return f"{today.year:04d}-01-01"
+        days = {"30d": 30, "90d": 90}.get(key, 90)
+        return (today - timedelta(days=days)).isoformat()
+
+    def _on_window_change(self, index: int) -> None:
+        """Date-window combo changed — re-window the current model in place.
+
+        The column layout is identical across windows, so set_since just
+        resets the rows (no delegate/​column-width teardown). The proxy
+        re-sorts on the model reset, keeping the active sort column."""
+        self._window_key = self._window_combo.itemData(index)
+        self._model.set_since(self._current_since())
 
     def _update_window_title(self) -> None:
         filename = self._repo.db_path.name

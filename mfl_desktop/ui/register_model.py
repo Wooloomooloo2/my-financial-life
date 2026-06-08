@@ -51,10 +51,16 @@ class TransactionTableModel(QAbstractTableModel):
         ("Amount",   "amount",          True),
     ]
 
-    def __init__(self, repo: Repository, account_id: int | None) -> None:
+    def __init__(
+        self, repo: Repository, account_id: int | None, since: str | None = None,
+    ) -> None:
         super().__init__()
         self._repo = repo
         self._account_id = account_id
+        # ADR-041: inclusive 'YYYY-MM-DD' lower bound on posted_date, or None
+        # for the full history. The window is pushed into the Repository query
+        # (not the proxy) so load + reset + sort all shrink to what's shown.
+        self._since = since
         self.COLUMNS = (
             self.COLUMNS_SINGLE if account_id is not None else self.COLUMNS_ALL
         )
@@ -69,10 +75,19 @@ class TransactionTableModel(QAbstractTableModel):
     def reload(self) -> None:
         self.beginResetModel()
         if self._account_id is not None:
-            self._rows = self._repo.list_transactions_for_account(self._account_id)
+            self._rows = self._repo.list_transactions_for_account(
+                self._account_id, since=self._since,
+            )
         else:
-            self._rows = self._repo.list_all_transactions()
+            self._rows = self._repo.list_all_transactions(since=self._since)
         self.endResetModel()
+
+    def set_since(self, since: str | None) -> None:
+        """Change the date window (ADR-041) and reload in place. The column
+        layout is unchanged, so the window can re-window an existing model
+        without the delegate/​column-width teardown that swapping models does."""
+        self._since = since
+        self.reload()
 
     def row_at(self, source_row: int) -> TransactionRow:
         return self._rows[source_row]

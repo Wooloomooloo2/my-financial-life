@@ -1674,18 +1674,36 @@ class Repository:
     # ── Register (read + inline edits) ──
 
     def list_transactions_for_account(
-        self, account_id: int,
+        self, account_id: int, since: str | None = None,
     ) -> list[TransactionRow]:
         """All transactions for one account, chronologically, with running
         balance. Running balance is seeded from the account's opening_balance
-        so the final value matches the account's true balance."""
+        so the final value matches the account's true balance.
+
+        ``since`` (ADR-041) is an inclusive ``'YYYY-MM-DD'`` lower bound: only
+        rows with ``posted_date >= since`` are returned, but the running
+        balance is still correct because it is seeded with
+        ``opening_balance + SUM(amount) WHERE posted_date < since`` — i.e. the
+        balance as of the first windowed row, not restarted from zero.
+        ``None`` (the default) returns the full history unchanged. The bound
+        is lower-only by design, so future-dated rows stay visible. The seed
+        query uses ``< since`` and the row select uses ``>= since`` — they must
+        share the same bound or the boundary day double-counts or is skipped.
+        """
         opening_row = self._conn.execute(
             "SELECT opening_balance FROM account WHERE id = ?", (account_id,),
         ).fetchone()
         running = pence_to_decimal(
             opening_row["opening_balance"] if opening_row else 0
         )
-        cur = self._conn.execute(
+        if since is not None:
+            seed_row = self._conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS s FROM txn "
+                "WHERE account_id = ? AND posted_date < ?",
+                (account_id, since),
+            ).fetchone()
+            running += pence_to_decimal(seed_row["s"])
+        sql = (
             "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
             "       t.posted_date, t.amount, "
             "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
@@ -1697,9 +1715,13 @@ class Repository:
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
             "WHERE t.account_id = ? "
-            "ORDER BY t.posted_date ASC, t.id ASC",
-            (account_id,),
         )
+        params: list = [account_id]
+        if since is not None:
+            sql += "  AND t.posted_date >= ? "
+            params.append(since)
+        sql += "ORDER BY t.posted_date ASC, t.id ASC"
+        cur = self._conn.execute(sql, params)
         rows: list[TransactionRow] = []
         for r in cur:
             amt = pence_to_decimal(r["amount"])
@@ -1716,14 +1738,18 @@ class Repository:
             ))
         return rows
 
-    def list_all_transactions(self) -> list[TransactionRow]:
+    def list_all_transactions(self, since: str | None = None) -> list[TransactionRow]:
         """Every transaction across every account, chronologically.
 
         Running balance is not meaningful across accounts of different types
         and currencies (see project-all-transactions-view in memory) and is
         reported as 0; the UI hides the Balance column in this view.
+
+        ``since`` (ADR-041) is an inclusive ``'YYYY-MM-DD'`` lower bound; with
+        no running balance here there is no seed query — the window is a plain
+        ``WHERE posted_date >= since``. ``None`` returns the full history.
         """
-        cur = self._conn.execute(
+        sql = (
             "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
             "       t.posted_date, t.amount, "
             "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
@@ -1734,8 +1760,13 @@ class Repository:
             "JOIN      account a  ON a.id = t.account_id "
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
-            "ORDER BY t.posted_date ASC, t.id ASC"
         )
+        params: list = []
+        if since is not None:
+            sql += "WHERE t.posted_date >= ? "
+            params.append(since)
+        sql += "ORDER BY t.posted_date ASC, t.id ASC"
+        cur = self._conn.execute(sql, params)
         return [
             TransactionRow(
                 id=r["id"], iri=r["iri"],

@@ -5,6 +5,7 @@ data/
 *.db
 *.db-wal
 *.db-shm
+*.mfl
 .env
 dist/
 build/
