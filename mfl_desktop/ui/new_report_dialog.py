@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.reports.filters import (
     REPORT_TYPE_LABELS,
     TYPE_INCOME_EXPENSE,
+    TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
     TYPE_SANKEY,
     TYPE_SPENDING_OVER_TIME,
@@ -33,9 +34,12 @@ from mfl_desktop.reports.filters import (
 
 # Types shipped with persistence today. The rest render but are disabled
 # until their per-type ADR lands (ADR-039 §rounds).
-_AVAILABLE_TYPES: tuple[str, ...] = (TYPE_SPENDING_OVER_TIME,)
+_AVAILABLE_TYPES: tuple[str, ...] = (
+    TYPE_SPENDING_OVER_TIME, TYPE_INVESTMENT_RETURNS,
+)
 _TYPE_ORDER: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
+    TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
     TYPE_INCOME_EXPENSE,
     TYPE_SANKEY,

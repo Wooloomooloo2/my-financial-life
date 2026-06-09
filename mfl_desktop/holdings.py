@@ -35,7 +35,7 @@ from typing import Optional
 
 from mfl_desktop.db.repository import TransactionRow
 from mfl_desktop.import_engine.qif_actions import (
-    is_share_in, is_share_out, is_split,
+    is_income, is_reinvest, is_share_in, is_share_out, is_split,
 )
 
 logger = logging.getLogger(__name__)
@@ -352,3 +352,269 @@ def compute_value_history(
             fully_priced=fully,
         ))
     return points
+
+
+# ── Total return over time (ADR-046) ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReturnPoint:
+    """One sample on the returns chart, in the account's native currency.
+
+    ``unrealized = market_value - cost_basis`` is the lifetime appreciation of
+    the shares held on ``date`` (a snapshot — not period-scoped). ``realized_cum``
+    and ``dividends_cum`` accumulate *only* flows dated on/after the window start
+    (ADR-046 — a sale or distribution before the window contributes nothing), so
+    both reset to zero at the window's left edge. ``fully_priced`` is False when
+    any held security fell back to cost for lack of a price by ``date``."""
+    date: str
+    cost_basis: Decimal
+    market_value: Decimal
+    unrealized: Decimal
+    realized_cum: Decimal
+    dividends_cum: Decimal
+    fully_priced: bool
+
+
+@dataclass(frozen=True)
+class SecurityReturn:
+    """End-of-window total-return breakdown for one security (ADR-046).
+
+    ``realized_window`` / ``dividends_window`` count only flows within the
+    selected window; ``unrealized`` is the lifetime appreciation of the shares
+    still held at the window end (``None`` when the position is unpriced, or
+    ``shares == 0`` for a position fully exited *within* the window — which
+    still carries its windowed realized gain / dividends). ``total_return``
+    sums the three components, treating an unknown unrealized as zero."""
+    security_id: int
+    symbol: str
+    name: str
+    shares: float
+    cost_basis: Decimal
+    market_value: Optional[Decimal]
+    unrealized: Optional[Decimal]
+    realized_window: Decimal
+    dividends_window: Decimal
+    total_return: Decimal
+    priced: bool
+
+
+@dataclass(frozen=True)
+class ReturnsResult:
+    """Portfolio total-return view for one account over a window (ADR-046).
+    Portfolio totals are the end-of-window state; market value / unrealized
+    count priced positions only (unpriced contribute nothing — matching
+    compute_holdings_view), while the chart ``points`` use a cost fallback so
+    the value line never collapses (flagged via ``fully_priced``)."""
+    points: list[ReturnPoint] = field(default_factory=list)
+    by_security: list[SecurityReturn] = field(default_factory=list)
+    cost_basis: Decimal = Decimal("0.00")
+    market_value: Decimal = Decimal("0.00")
+    unrealized: Decimal = Decimal("0.00")
+    realized_window: Decimal = Decimal("0.00")
+    dividends_window: Decimal = Decimal("0.00")
+    total_return: Decimal = Decimal("0.00")
+    fully_priced: bool = True
+    unpriced_count: int = 0
+
+
+def compute_returns(
+    txns: list[TransactionRow],
+    sample_dates: list,
+    price_series_by_security: dict[int, list[tuple[str, float]]],
+    window_start: str,
+    security_ids: Optional[set[int]] = None,
+) -> ReturnsResult:
+    """Replay one investment account's transactions into a total-return view.
+
+    Produces the per-sample chart series (``points``), an end-of-window
+    per-security breakdown (``by_security``), and portfolio totals.
+
+    The FIFO replay processes the *entire* transaction history so cost basis
+    and open shares are always correct, but realized gains and dividend/income
+    only count toward the window accumulators when the originating transaction
+    is dated on/after ``window_start`` (ADR-046 — period-scoped flows).
+
+    ``sample_dates`` are date/ISO points within the window (e.g. month-ends);
+    ``price_series_by_security`` maps security_id → ascending ``(date, price)``
+    pairs (Repository.price_series); ``security_ids`` (``None`` = all) restricts
+    the view to a subset of securities. Currency-agnostic — the caller converts
+    when aggregating accounts of differing currencies.
+    """
+    samples = sorted({
+        d.isoformat() if isinstance(d, date) else str(d) for d in sample_dates
+    })
+    if not samples:
+        return ReturnsResult()
+
+    series_dates = {
+        sid: [d for d, _ in ser] for sid, ser in price_series_by_security.items()
+    }
+
+    def nearest_price(sid: int, on_date: str) -> Optional[float]:
+        dates = series_dates.get(sid)
+        if not dates:
+            return None
+        i = bisect.bisect_right(dates, on_date) - 1
+        if i < 0:
+            return None
+        return price_series_by_security[sid][i][1]
+
+    def included(sid: int) -> bool:
+        return security_ids is None or sid in security_ids
+
+    lots: dict[int, deque[_Lot]] = {}
+    realized_win: dict[int, float] = {}
+    dividends_win: dict[int, float] = {}
+    meta: dict[int, tuple[str, str]] = {}
+
+    ordered = sorted(txns, key=lambda r: (r.posted_date, r.id))
+    ti = 0
+    points: list[ReturnPoint] = []
+
+    for sample in samples:
+        while ti < len(ordered) and ordered[ti].posted_date <= sample:
+            t = ordered[ti]
+            ti += 1
+            if t.security_id is None or t.action is None:
+                continue
+            sid = t.security_id
+            if not included(sid):
+                continue
+            meta.setdefault(sid, (t.security_name or "", t.security_symbol or ""))
+            lots.setdefault(sid, deque())
+            realized_win.setdefault(sid, 0.0)
+            dividends_win.setdefault(sid, 0.0)
+            in_window = t.posted_date >= window_start
+            qty = float(t.quantity) if t.quantity is not None else 0.0
+
+            if is_share_in(t.action):
+                if qty > _EPS:
+                    cost, known = _lot_cost(t.action, t.amount, t.price, qty)
+                    lots[sid].append(
+                        _Lot(qty=qty, unit_cost=cost / qty, known_basis=known)
+                    )
+                    if in_window and is_reinvest(t.action):
+                        # Reinvested distribution: income = the reinvested value
+                        # (no separate cash leg, so use the lot cost / amount).
+                        reinv = float(abs(t.amount)) if t.amount != 0 else cost
+                        dividends_win[sid] += reinv
+            elif is_share_out(t.action):
+                if qty > _EPS:
+                    proceeds = float(abs(t.amount))
+                    remaining = qty
+                    cost_removed = 0.0
+                    queue = lots[sid]
+                    while remaining > _EPS and queue:
+                        lot = queue[0]
+                        take = min(remaining, lot.qty)
+                        cost_removed += take * lot.unit_cost
+                        lot.qty -= take
+                        remaining -= take
+                        if lot.qty <= _EPS:
+                            queue.popleft()
+                    if in_window:
+                        realized_win[sid] += proceeds - cost_removed
+            elif is_income(t.action):
+                if in_window:
+                    dividends_win[sid] += float(t.amount)
+            # splits + XIn/XOut: no lot move, no income (ADR-044 deferral).
+
+        invested = 0.0
+        market = 0.0
+        fully = True
+        for sid, queue in lots.items():
+            shares = sum(lot.qty for lot in queue)
+            if shares <= _EPS:
+                continue
+            cost = sum(lot.qty * lot.unit_cost for lot in queue)
+            invested += cost
+            price = nearest_price(sid, sample)
+            if price is not None:
+                market += shares * price
+            else:
+                market += cost
+                fully = False
+        points.append(ReturnPoint(
+            date=sample,
+            cost_basis=_to_money(invested),
+            market_value=_to_money(market),
+            unrealized=_to_money(market - invested),
+            realized_cum=_to_money(sum(realized_win.values())),
+            dividends_cum=_to_money(sum(dividends_win.values())),
+            fully_priced=fully,
+        ))
+
+    # ── end-of-window per-security breakdown + portfolio totals ──
+    last_sample = samples[-1]
+    by_security: list[SecurityReturn] = []
+    tot_cost = Decimal("0.00")
+    tot_mv = Decimal("0.00")
+    tot_unreal = Decimal("0.00")
+    tot_realized = Decimal("0.00")
+    tot_div = Decimal("0.00")
+    unpriced = 0
+    end_fully = True
+
+    all_sids = set(lots) | set(realized_win) | set(dividends_win)
+    for sid in all_sids:
+        queue = lots.get(sid, deque())
+        shares = sum(lot.qty for lot in queue)
+        realized_w = _to_money(realized_win.get(sid, 0.0))
+        dividends_w = _to_money(dividends_win.get(sid, 0.0))
+        held = shares > _EPS
+
+        if not held and realized_w == 0 and dividends_w == 0:
+            # Fully exited before the window with no in-window flows — skip.
+            continue
+
+        name, symbol = meta.get(sid, ("", ""))
+        market_value: Optional[Decimal] = None
+        unrealized: Optional[Decimal] = None
+        priced = False
+        if held:
+            cost_basis = _to_money(sum(lot.qty * lot.unit_cost for lot in queue))
+            tot_cost += cost_basis
+            price = nearest_price(sid, last_sample)
+            if price is not None:
+                market_value = _to_money(shares * price)
+                unrealized = market_value - cost_basis
+                priced = True
+                tot_mv += market_value
+                tot_unreal += unrealized
+            else:
+                unpriced += 1
+                end_fully = False
+        else:
+            cost_basis = Decimal("0.00")
+
+        unreal_for_total = unrealized if unrealized is not None else Decimal("0.00")
+        total_return = unreal_for_total + realized_w + dividends_w
+        tot_realized += realized_w
+        tot_div += dividends_w
+        by_security.append(SecurityReturn(
+            security_id=sid, symbol=symbol, name=name, shares=shares,
+            cost_basis=cost_basis, market_value=market_value,
+            unrealized=unrealized, realized_window=realized_w,
+            dividends_window=dividends_w, total_return=total_return,
+            priced=priced,
+        ))
+
+    by_security.sort(key=lambda s: (
+        0 if s.shares > _EPS else 1,
+        -float(s.total_return),
+        s.name.lower(),
+    ))
+
+    return ReturnsResult(
+        points=points,
+        by_security=by_security,
+        cost_basis=tot_cost,
+        market_value=tot_mv,
+        unrealized=tot_unreal,
+        realized_window=tot_realized,
+        dividends_window=tot_div,
+        total_return=tot_unreal + tot_realized + tot_div,
+        fully_priced=end_fully,
+        unpriced_count=unpriced,
+    )

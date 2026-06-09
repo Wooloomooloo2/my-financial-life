@@ -62,8 +62,10 @@ from mfl_desktop.ui.statements_window import StatementsWindow
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.new_report_dialog import NewReportDialog
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
+from mfl_desktop.ui.investment_returns_window import InvestmentReturnsWindow
 from mfl_desktop.reports.filters import (
     TYPE_INCOME_EXPENSE,
+    TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
     TYPE_SANKEY,
     TYPE_SPENDING_OVER_TIME,
@@ -172,8 +174,11 @@ class RegisterWindow(QMainWindow):
         # opened report window (no saved-id) lives in self._bare_report_wins
         # keyed by type, so the Reports-menu entry stays singleton per
         # type without conflicting with the saved-id windows.
-        self._saved_report_wins: dict[int, SpendingReportWindow] = {}
-        self._bare_report_wins: dict[str, SpendingReportWindow] = {}
+        # Value type is the per-type report window (SpendingReportWindow or
+        # InvestmentReturnsWindow today — both QMainWindow with the same
+        # reports_changed signal + WA_DeleteOnClose contract).
+        self._saved_report_wins: dict[int, QMainWindow] = {}
+        self._bare_report_wins: dict[str, QMainWindow] = {}
 
         search = QLineEdit()
         search.setPlaceholderText("Search payee, memo, amount, or date…")
@@ -622,6 +627,12 @@ class RegisterWindow(QMainWindow):
         self._spending_report_action = QAction("&Spending Over Time…", self)
         self._spending_report_action.triggered.connect(self._on_spending_report)
         reports_menu.addAction(self._spending_report_action)
+
+        self._investment_returns_action = QAction("&Investment Returns…", self)
+        self._investment_returns_action.triggered.connect(
+            self._on_investment_returns_report
+        )
+        reports_menu.addAction(self._investment_returns_action)
 
         self._net_worth_action = QAction("&Net Worth…", self)
         self._net_worth_action.triggered.connect(self._on_net_worth)
@@ -2105,6 +2116,11 @@ class RegisterWindow(QMainWindow):
         instead (ADR-039 §reports-menu)."""
         self._open_bare_report(TYPE_SPENDING_OVER_TIME)
 
+    def _on_investment_returns_report(self) -> None:
+        """Reports menu → Investment Returns. Opens the *bare* window
+        (ADR-046)."""
+        self._open_bare_report(TYPE_INVESTMENT_RETURNS)
+
     def _open_bare_report(self, type_key: str) -> None:
         """Open an unattached report window for the given type. Singleton
         per type — repeat menu clicks raise the existing bare window."""
@@ -2115,6 +2131,8 @@ class RegisterWindow(QMainWindow):
             return
         if type_key == TYPE_SPENDING_OVER_TIME:
             win = SpendingReportWindow.open_bare(self._repo, parent=self)
+        elif type_key == TYPE_INVESTMENT_RETURNS:
+            win = InvestmentReturnsWindow.open_bare(self._repo, parent=self)
         else:
             # Other types not yet implemented; the menu items for them
             # haven't been added either, but keep the dispatcher honest.
@@ -2149,6 +2167,10 @@ class RegisterWindow(QMainWindow):
             return
         if report.type == TYPE_SPENDING_OVER_TIME:
             win = SpendingReportWindow.load_from_id(
+                self._repo, report_id, parent=self,
+            )
+        elif report.type == TYPE_INVESTMENT_RETURNS:
+            win = InvestmentReturnsWindow.load_from_id(
                 self._repo, report_id, parent=self,
             )
         else:

@@ -28,12 +28,14 @@ TYPE_SPENDING_OVER_TIME = "spending_over_time"
 TYPE_NET_WORTH = "net_worth"
 TYPE_INCOME_EXPENSE = "income_expense"
 TYPE_SANKEY = "sankey"
+TYPE_INVESTMENT_RETURNS = "investment_returns"
 
 REPORT_TYPES: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
     TYPE_NET_WORTH,
     TYPE_INCOME_EXPENSE,
     TYPE_SANKEY,
+    TYPE_INVESTMENT_RETURNS,
 )
 
 REPORT_TYPE_LABELS: dict[str, str] = {
@@ -41,6 +43,7 @@ REPORT_TYPE_LABELS: dict[str, str] = {
     TYPE_NET_WORTH:          "Net Worth",
     TYPE_INCOME_EXPENSE:     "Income & Expense",
     TYPE_SANKEY:             "Sankey",
+    TYPE_INVESTMENT_RETURNS: "Investment Returns",
 }
 
 
@@ -106,12 +109,60 @@ class SpendingOverTimeFilters:
         return _from_dict(cls, raw)
 
 
+# ── Investment Returns (ADR-046) ────────────────────────────────────────────
+
+# Investment-native period presets. "max" = first transaction → today
+# (lifetime), which the spending presets don't offer; "custom" uses
+# custom_start / custom_end. Resolved to date bounds by the report window.
+INVESTMENT_RETURNS_PERIOD_KEYS: tuple[str, ...] = (
+    "ytd", "1y", "3y", "5y", "max", "custom",
+)
+
+
+@dataclass(frozen=True)
+class InvestmentReturnsFilters:
+    """Persisted filter set for a saved Investment Returns report (ADR-046).
+
+    Empty id-tuples mean "all" (same convention as SpendingOverTimeFilters):
+    no account filter = every investment account (the whole portfolio), no
+    security filter = every security held in the selected accounts. Realized
+    gains and dividends are period-scoped to ``period_key`` by the compute
+    engine; unrealized gain is the lifetime gain of currently-held positions.
+    """
+
+    period_key: str = "max"
+    custom_start: Optional[str] = None     # ISO date, only when period_key == "custom"
+    custom_end:   Optional[str] = None
+    account_ids: tuple[int, ...] = field(default_factory=tuple)
+    security_ids: tuple[int, ...] = field(default_factory=tuple)
+
+    # ── round-trip helpers ──
+
+    @classmethod
+    def default(cls) -> "InvestmentReturnsFilters":
+        return cls()
+
+    def to_json(self) -> str:
+        return json.dumps(_asdict_for_json(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, blob: str) -> "InvestmentReturnsFilters":
+        raw = json.loads(blob) if blob else {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"InvestmentReturnsFilters: expected JSON object, got "
+                f"{type(raw).__name__}"
+            )
+        return _from_dict(cls, raw)
+
+
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 # Maps the report.type enum value to its filter dataclass. Adding a new
 # type later means a new entry here + a new dataclass above.
 _FILTER_CLASSES: dict[str, type] = {
     TYPE_SPENDING_OVER_TIME: SpendingOverTimeFilters,
+    TYPE_INVESTMENT_RETURNS: InvestmentReturnsFilters,
 }
 
 

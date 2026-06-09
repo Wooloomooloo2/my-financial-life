@@ -32,6 +32,12 @@ ZERO_CASH_ACTIONS = {"shrsin", "shrsout", "reinvdiv", "reinvlg", "reinvsh",
 # specially by the holdings engine.
 SPLIT_ACTIONS = {"stksplit", "stocksplit"}
 
+# Reinvested-distribution actions: a share-in whose cost basis IS the
+# distribution being reinvested (zero net cash). Economically this is
+# dividend/income, captured by the returns report (ADR-046) as income =
+# price × qty, since these rows carry no separate cash leg.
+REINVEST_ACTIONS = {"reinvdiv", "reinvlg", "reinvsh", "reinvint", "reinvmd"}
+
 
 def _norm(action: str | None) -> str:
     return (action or "").strip().lower()
@@ -47,6 +53,22 @@ def is_share_out(action: str | None) -> bool:
 
 def is_split(action: str | None) -> bool:
     return _norm(action) in SPLIT_ACTIONS
+
+
+def is_income(action: str | None) -> bool:
+    """True if the action is a cash distribution / income received into the
+    account (dividend, interest, cap-gain distribution, return of capital).
+    Used by the returns report (ADR-046) to bucket dividend/income flows.
+    Note: a *reinvested* dividend (``ReinvDiv`` etc.) is a share-in with zero
+    cash, so it is NOT in this set — the returns engine handles the reinvest
+    leg's income value separately (price × qty) to avoid double-counting."""
+    return _norm(action) in CASH_IN_ACTIONS
+
+
+def is_reinvest(action: str | None) -> bool:
+    """True if the action reinvests a distribution into new shares (zero net
+    cash; the reinvested distribution is both income and cost basis)."""
+    return _norm(action) in REINVEST_ACTIONS
 
 
 def affects_shares(action: str | None) -> bool:

@@ -242,7 +242,8 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │   │   ├── 0010_reports.sql         # ADR-039: report + report_folder tables
 │   │   ├── 0011_reconciliation.sql  # ADR-040: statement + statement_txn + txn.statement_id
 │   │   ├── 0012_investments.sql      # ADR-043: security table + txn investment columns (action/security_id/quantity/price/commission)
-│   │   └── 0013_security_prices.sql  # ADR-044: security_price table (per-security date-stamped prices)
+│   │   ├── 0013_security_prices.sql  # ADR-044: security_price table (per-security date-stamped prices)
+│   │   └── 0014_investment_returns_report.sql # ADR-046: widen report.type CHECK to add 'investment_returns'
 │   ├── import_engine/               # Lifted from app/core/import_engine/
 │   │   ├── ofx_parser.py            # OFX/QFX — verbatim from v0.1
 │   │   ├── csv_parser.py            # Banktivity / credit-card / generic CSV (syntax bug fixed)
@@ -250,7 +251,7 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │   │   ├── qif_actions.py           # ADR-044: shared investment action sets (share-in/out/zero-cash) used by parser + holdings
 │   │   └── import_service.py        # Stage + classify + commit, rewritten against Repository (investment-aware per ADR-043)
 │   ├── account_summary.py           # ADR-033: pure-Python per-account aggregations (mirror of budget_calc.py)
-│   ├── holdings.py                  # ADR-044: pure-Python FIFO holdings engine (shares/cost basis/market value/gain)
+│   ├── holdings.py                  # ADR-044/045/046: FIFO holdings + compute_value_history + compute_returns (total-return)
 │   ├── prices.py                    # ADR-044: Tiingo price client + refresh helpers (no Qt deps; mirrors fx.py)
 │   ├── fx.py                        # ADR-035: openexchangerates.org client + refresh helpers (no Qt deps)
 │   ├── transfer_reconcile.py        # ADR-036/037: pure-Python score_candidate + greedy_pair helpers
@@ -273,6 +274,9 @@ C:\Users\hallm\Documents\GitHub\my-financial-life\
 │       ├── value_chart.py           # ADR-045: two-tone cost-basis-vs-market-value bars (Positions tab)
 │       ├── value_history_chart.py   # ADR-045 amend: portfolio value-over-time (Invested + Market value lines)
 │       ├── treemap_chart.py         # ADR-045: squarified allocation treemap (default Portfolio-tab view)
+│       ├── returns_chart.py         # ADR-046: stacked-composition total-return chart (cost/gain-loss/realized/dividends)
+│       ├── investment_returns_window.py # ADR-046: Investment Returns report (chart + per-security table + totals)
+│       ├── investment_returns_filter_dialog.py # ADR-046: period + account + security filters
 │       ├── account_summary_window.py # ADR-033/034: per-account focus screen (card layout + Top-N drill-down)
 │       ├── transactions_list_window.py # ADR-034: drill-down register view with breadcrumb chips
 │       ├── custom_period_dialog.py  # ADR-033 amendment: From/To date picker for "Custom" period
@@ -399,7 +403,8 @@ Round 1 (ADR-043) landed the QIF on-ramp + `security` master + `txn` investment 
 - ~~**Round 2 — holdings & cost basis.**~~ **Shipped 2026-06-09 (ADR-044).** FIFO computed on the fly in `holdings.py` (NOT persisted to `lot` — that stays reserved for manual-basis/specific-ID). Holdings table on the per-account summary; realized gain as a byproduct. `StkSplit` ratio application is still **deferred** (flagged `basis_incomplete`); shares/price stay REAL.
 - ~~**Round 3 — prices & market value.**~~ **Shipped** across ADR-044 (current prices + market-value net worth) and ADR-045-amend (**historical prices**: `TiingoClient.fetch_historical` + `backfill_historical_into` + `Backfill history` button → `security_price`; `price_series`/`get_security_price_nearest`; `compute_value_history` powering the Overview value-over-time chart). Remaining nuance: **Net Worth still uses the *latest* price for every date** (it's a today snapshot — `compute_account_values`), so *historical* net worth (net worth as-of a past date, using that date's prices) isn't a thing yet; the per-account value-over-time chart does use historical prices correctly. The dormant `valuation` table remains unused — security prices live in `security_price`.
 - **Round 4 — transfer-linking & income reporting.** Link the `L[Account]` cash rows (imported as plain cash with a memo note in round 1) to the real other-side account by reusing the ADR-036 matcher — this also fixes the holdings edge where whole-account `XIn`/`XOut` transfers don't move lots (ADR-044). Dividend/income reporting; per-currency display for cross-currency brokerage accounts.
-- **Investment dashboard (ADR-045, amended).** Shipped: tabbed summary (**Overview** = portfolio value-over-time line chart; **Holdings** = searchable wide table; **Portfolio** = allocation **treemap** by default + a cost-vs-value bars view) + historical-price backfill (Tiingo) feeding the value line. **Phase 2 open**: Returns tab (appreciation + dividends + realised — needs `compute_returns()` in `holdings.py`), Dividends tab (income-over-time + per-security). Smaller follow-ups: a **period-zoom selector** on the value-over-time chart (currently full history; PERIOD presets lack an "all/max" so a small 1Y/3Y/5Y/Max toggle is the fit), and a launch-time auto-backfill for newly-seen securities.
+- **Investment dashboard (ADR-045, amended).** Shipped: tabbed summary (**Overview** = portfolio value-over-time line chart; **Holdings** = searchable wide table; **Portfolio** = allocation **treemap** by default + a cost-vs-value bars view) + historical-price backfill (Tiingo) feeding the value line. ~~Phase 2: Returns + Dividends tabs~~ **superseded by ADR-046** — those became a cross-account *report* instead (see next item). Smaller follow-ups still open: a **period-zoom selector** on the value-over-time chart (currently full history; PERIOD presets lack an "all/max" so a small 1Y/3Y/5Y/Max toggle is the fit), and a launch-time auto-backfill for newly-seen securities.
+- ~~**Returns + Dividends (ADR-045 Phase 2).**~~ **Shipped 2026-06-09 as ADR-046** — built as the **Investment Returns report** (sidebar Reports section / Reports menu) rather than dashboard tabs, so it spans one account *or* the whole portfolio. `holdings.compute_returns()` (FIFO replay; per-security breakdown + chart series + totals), new `is_income`/`is_reinvest` in `qif_actions`, `report.type='investment_returns'` (migration 0014 widens the CHECK), `InvestmentReturnsFilters` (period incl. **max**/lifetime + account + security filters), a stacked-composition `returns_chart.py` (cost / gain-loss / realized / dividends, drawn relative to the cost line), `investment_returns_window.py` + `investment_returns_filter_dialog.py`, `Repository.list_investment_accounts()` / `list_securities_for_accounts()`. **Total return = unrealized (lifetime, as-of) + realized + dividends**, with **realized & dividends period-scoped** to the window (a TSLA sale years ago shows $0 YTD). Verified on live data: lifetime realized $2,672.14 (== holdings engine), TSLA +$354 in max / absent YTD, dividends $35,239.16 with no Div/ReinvDiv double-count. **Still open**: the cross-account view converts mixed currencies per-sample (not a time-weighted model); a true time-weighted period-return % is out of scope.
 - **Inline editing of investment rows + manual basis.** Round 1 makes Action/Security/Qty/Price read-only in the register (`COLUMNS_INVEST`); manual entry/edit of investment transactions (a New Investment Transaction flow, or inline qty/price delegates) is a later concern. A manual cost-basis override on transferred-in shares (the `basis_incomplete` flag from ADR-044) is the natural point to finally **persist** lots in the `lot` table.
 - **General QIF (`!Type:Bank` / `!Type:CCard`).** `qif_parser._section_for_header` / `_dispatch_record` are structured to add bank/credit-card QIF; do it when a cash-QIF file actually needs importing.
 - **`!Type:Cat` ingestion.** Round 1 parses but doesn't bulk-create the source category tree. If a user wants their Banktivity categories pre-seeded rather than auto-created on demand, wire `QifFile.categories` → `find_or_create_category_path`.
@@ -471,6 +476,7 @@ Round 1 (ADR-043) landed the QIF on-ramp + `security` master + `txn` investment 
 | ADR-043 | Investment accounts & QIF import — security master, txn investment columns, action→cash-sign mapping (arc plan + round 1) | **Accepted 2026-06-08** |
 | ADR-044 | Investment holdings (FIFO) + prices (Tiingo + manual) + market-value net worth (round 2) | **Accepted 2026-06-09** |
 | ADR-045 | Investment dashboard — tabbed summary + cost-vs-value chart (Phase 1); Returns/Dividends/Allocation tabs (Phase 2) | **Accepted 2026-06-09** |
+| ADR-046 | Investment Returns report — cross-account total return (cost / unrealized / realized / dividends), period-scoped flows, stacked-composition chart; supersedes ADR-045's Returns/Dividends tabs | **Accepted 2026-06-09** |
 
 Full index and summaries: [`docs/adr/README.md`](docs/adr/README.md).
 

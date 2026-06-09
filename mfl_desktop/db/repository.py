@@ -614,6 +614,11 @@ class Repository:
         )
         return [self._row_to_account(r) for r in cur]
 
+    def list_investment_accounts(self) -> list[AccountSummary]:
+        """Non-archived investment-family accounts in display order. Feeds the
+        Investment Returns report's account filter (ADR-046)."""
+        return [a for a in self.list_accounts() if a.family == "investment"]
+
     def account_has_transactions(self, account_id: int) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM txn WHERE account_id = ? LIMIT 1", (account_id,),
@@ -1369,6 +1374,35 @@ class Repository:
         price provider (Tiingo) can look up. Securities with no symbol are
         manual-price only (ADR-044)."""
         return [s for s in self.list_securities() if (s.symbol or "").strip()]
+
+    def list_securities_for_accounts(
+        self, account_ids: list[int],
+    ) -> list[SecurityRow]:
+        """Distinct securities referenced by investment transactions in the
+        given accounts, sorted by name. Feeds the Investment Returns report's
+        security filter (ADR-046) so it lists only securities actually held in
+        the selected accounts. Empty ``account_ids`` returns []."""
+        if not account_ids:
+            return []
+        placeholders = ",".join("?" for _ in account_ids)
+        cur = self._conn.execute(
+            "SELECT DISTINCT s.id, s.iri, s.name, "
+            "       COALESCE(s.symbol, '') AS symbol, "
+            "       COALESCE(s.type, '') AS type "
+            "FROM security s "
+            "JOIN txn t ON t.security_id = s.id "
+            f"WHERE t.account_id IN ({placeholders}) "
+            "  AND s.archived_at IS NULL "
+            "ORDER BY s.name COLLATE NOCASE",
+            list(account_ids),
+        )
+        return [
+            SecurityRow(
+                id=r["id"], iri=r["iri"], name=r["name"],
+                symbol=r["symbol"], type=r["type"],
+            )
+            for r in cur
+        ]
 
     # ── Security prices (ADR-044) ──
 
