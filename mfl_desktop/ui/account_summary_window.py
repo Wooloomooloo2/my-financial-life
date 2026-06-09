@@ -30,19 +30,36 @@ from typing import Optional
 from PySide6.QtCore import QEvent, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from mfl_desktop.holdings import HoldingsView, compute_holdings_view
+from mfl_desktop.ui.check_list_panel import CheckListPanel
+from mfl_desktop.ui.value_chart import ValueBar, ValueChart
+from mfl_desktop.ui.value_history_chart import ValueHistoryChart
+from mfl_desktop.ui.treemap_chart import TreemapChart, TreemapTile
+from mfl_desktop.holdings import compute_value_history
 from mfl_desktop.account_summary import (
     PERIOD_KEYS,
     PERIOD_LABELS,
@@ -91,6 +108,57 @@ _COLOR_WINDOW_BG   = "#f8fafc"
 
 _DEFAULT_PERIOD = "quarter"   # rolling 90 days — replaces the old "90d" key
 _NON_CASH_FAMILIES = {"investment", "property", "vehicle"}
+
+# The screen's money formatters are GBP-hardcoded (a known display-currency
+# limitation); the holdings panel formats in the account's own currency so the
+# USD figures read correctly. A per-report display-currency selector is a
+# separate backlog item.
+_CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
+
+
+def _sym(currency: str) -> str:
+    return _CURRENCY_SYMBOLS.get((currency or "").upper(), "")
+
+
+def _month_end_samples(first_iso: str, today: date) -> list[date]:
+    """Month-end dates from the month of ``first_iso`` through ``today``
+    (inclusive of today as the final point). Drives the value-over-time
+    chart's x-axis (ADR-045)."""
+    from datetime import timedelta
+    try:
+        d = date.fromisoformat(first_iso)
+    except ValueError:
+        return [today]
+    y, m = d.year, d.month
+    out: list[date] = []
+    while True:
+        nm_y, nm_m = (y + 1, 1) if m == 12 else (y, m + 1)
+        eom = date(nm_y, nm_m, 1) - timedelta(days=1)
+        if eom >= today:
+            break
+        out.append(eom)
+        y, m = nm_y, nm_m
+    out.append(today)   # always finish on today so the last point is current
+    return out
+
+
+def _fmt_shares(value: float) -> str:
+    """Share quantity: up to 6dp, trailing zeros trimmed (180.0 → '180',
+    0.069 → '0.069')."""
+    s = f"{float(value):,.6f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _fmt_ccy(amount: Decimal, currency: str, *, decimals: int = 2, signed: bool = False) -> str:
+    sym = _sym(currency)
+    sign = ""
+    if amount < 0:
+        sign = "-"
+        amount = -amount
+    elif signed:
+        sign = "+"
+    body = f"{sym}{amount:,.{decimals}f}" if sym else f"{amount:,.{decimals}f} {currency.upper()}"
+    return f"{sign}{body}"
 
 
 def _fmt_money(amount: Decimal) -> str:
@@ -319,9 +387,43 @@ class AccountSummaryWindow(QMainWindow):
         # existing window; clicking a different row spawns a new one.
         self._drilldown_wins: dict[tuple, TransactionsListWindow] = {}
 
-        # ── widgets ──
-        chart_panel = self._build_chart_panel()
+        # An investment account gets a tabbed dashboard (ADR-045) — a value
+        # chart + a roomy searchable Holdings tab — instead of the cash
+        # account's single-page chart/info/top-N layout.
+        self._is_investment = self._account.family == "investment"
+        # Value-chart selection state (investment only): which securities are
+        # charted (None = all) and whether to collapse to one portfolio bar.
+        self._chart_selected_ids: Optional[set[int]] = None
+        self._chart_total_mode = False
+        # Latest computed holdings — kept so the Holdings search box and the
+        # chart-selection controls can re-render without recomputing.
+        self._holdings_view: Optional[HoldingsView] = None
+
         info_panel = self._build_info_panel()
+        content = (
+            self._build_investment_tabs(info_panel)
+            if self._is_investment
+            else self._build_cash_layout(info_panel)
+        )
+
+        container = QWidget()
+        container.setObjectName("summaryRoot")
+        container.setStyleSheet(
+            f"QWidget#summaryRoot {{ background-color: {_COLOR_WINDOW_BG}; }}"
+        )
+        v = QVBoxLayout(container)
+        v.setContentsMargins(20, 18, 20, 16)
+        v.setSpacing(12)
+        v.addWidget(self._build_title())
+        v.addWidget(content, stretch=1)
+        self.setCentralWidget(container)
+
+        self.reload()
+
+    def _build_cash_layout(self, info_panel: QWidget) -> QWidget:
+        """The original single-page layout (ADR-033/034): chart | info over a
+        Top-Payees | Top-Categories row. Cash accounts only."""
+        chart_panel = self._build_chart_panel()
         top_payees_panel = self._build_top_n_panel(
             title="TOP PAYEES (this period)", widget_attr="_top_payees_widget",
         )
@@ -329,8 +431,6 @@ class AccountSummaryWindow(QMainWindow):
             title="TOP CATEGORIES (this period)",
             widget_attr="_top_categories_widget",
         )
-
-        # Wire Top-N clicks → drill-down (ADR-034).
         self._top_payees_widget.row_clicked.connect(self._on_payee_clicked)
         self._top_categories_widget.row_clicked.connect(self._on_category_clicked)
 
@@ -340,8 +440,6 @@ class AccountSummaryWindow(QMainWindow):
         top_split.setStretchFactor(0, 3)
         top_split.setStretchFactor(1, 2)
         top_split.setSizes([720, 480])
-        # Wider handles so the cards have a visible gutter, not a hairline
-        # touch — matches the card aesthetic (ADR-034 §2).
         top_split.setHandleWidth(12)
         top_split.setChildrenCollapsible(False)
 
@@ -362,20 +460,55 @@ class AccountSummaryWindow(QMainWindow):
         outer.setSizes([460, 260])
         outer.setHandleWidth(12)
         outer.setChildrenCollapsible(False)
+        return outer
 
-        container = QWidget()
-        container.setObjectName("summaryRoot")
-        container.setStyleSheet(
-            f"QWidget#summaryRoot {{ background-color: {_COLOR_WINDOW_BG}; }}"
+    def _build_investment_tabs(self, info_panel: QWidget) -> QWidget:
+        """Tabbed investment dashboard (ADR-045). Overview (portfolio value
+        over time + info), Holdings (searchable wide table), Portfolio
+        (allocation treemap by default, with a cost-vs-value bars view).
+        Returns/Dividends land later."""
+        tabs = QTabWidget()
+
+        overview = QSplitter(Qt.Horizontal)
+        overview.addWidget(self._build_overview_panel())
+        overview.addWidget(info_panel)
+        overview.setStretchFactor(0, 3)
+        overview.setStretchFactor(1, 2)
+        overview.setSizes([760, 440])
+        overview.setHandleWidth(12)
+        overview.setChildrenCollapsible(False)
+
+        tabs.addTab(overview, "Overview")
+        tabs.addTab(self._build_holdings_panel(), "Holdings")
+        tabs.addTab(self._build_value_panel(), "Portfolio")
+        return tabs
+
+    def _build_overview_panel(self) -> QWidget:
+        """The Overview tab's main card: portfolio value over time (ADR-045)."""
+        panel = self._make_card("valueHistoryCard")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(8)
+
+        header = QLabel("PORTFOLIO VALUE OVER TIME")
+        header.setStyleSheet(
+            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
         )
-        v = QVBoxLayout(container)
-        v.setContentsMargins(20, 18, 20, 16)
-        v.setSpacing(12)
-        v.addWidget(self._build_title())
-        v.addWidget(outer, stretch=1)
-        self.setCentralWidget(container)
+        layout.addWidget(header)
 
-        self.reload()
+        # The unpriced/valuations banner lives here on the Overview tab.
+        self._non_cash_banner = QLabel("")
+        self._non_cash_banner.setStyleSheet(
+            "color: #92400e; background-color: #fef3c7; "
+            "padding: 6px 10px; border-radius: 4px; font-size: 9pt;"
+        )
+        self._non_cash_banner.setWordWrap(True)
+        self._non_cash_banner.hide()
+        layout.addWidget(self._non_cash_banner)
+
+        self._value_history_chart = ValueHistoryChart()
+        layout.addWidget(self._value_history_chart, stretch=1)
+        return panel
 
     # ── builders ──
 
@@ -538,6 +671,286 @@ class AccountSummaryWindow(QMainWindow):
         layout.addWidget(self._build_reconcile_placeholder())
         return panel
 
+    # ── holdings (ADR-044) ──
+
+    _HOLDINGS_COLUMNS = [
+        "Symbol", "Security", "Shares", "Avg cost", "Cost basis",
+        "Last price", "Market value", "Unrealised gain",
+    ]
+
+    def _build_holdings_panel(self) -> QWidget:
+        panel = self._make_card("holdingsCard")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        title = QLabel("HOLDINGS")
+        title.setStyleSheet(
+            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
+        )
+        header_row.addWidget(title)
+        header_row.addStretch(1)
+        self._holdings_totals_lbl = QLabel("")
+        self._holdings_totals_lbl.setStyleSheet(f"color: {_COLOR_BODY}; font-size: 9pt;")
+        header_row.addWidget(self._holdings_totals_lbl)
+        layout.addLayout(header_row)
+
+        # Live search over symbol + name — portfolios can be long.
+        self._holdings_search = QLineEdit()
+        self._holdings_search.setPlaceholderText("Search securities…")
+        self._holdings_search.setClearButtonEnabled(True)
+        self._holdings_search.textChanged.connect(self._render_holdings_table)
+        layout.addWidget(self._holdings_search)
+
+        self._holdings_table = QTableWidget(0, len(self._HOLDINGS_COLUMNS))
+        self._holdings_table.setHorizontalHeaderLabels(self._HOLDINGS_COLUMNS)
+        self._holdings_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._holdings_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._holdings_table.verticalHeader().setVisible(False)
+        self._holdings_table.setAlternatingRowColors(True)
+        hh = self._holdings_table.horizontalHeader()
+        for col in range(len(self._HOLDINGS_COLUMNS)):
+            hh.setSectionResizeMode(
+                col,
+                QHeaderView.Stretch if col == 1 else QHeaderView.ResizeToContents,
+            )
+        layout.addWidget(self._holdings_table, stretch=1)
+        return panel
+
+    def _update_holdings_panel(self, view: HoldingsView) -> None:
+        """Store the latest view, refresh the totals line, and (re)render the
+        table through the current search filter."""
+        self._holdings_view = view
+        ccy = self._account.currency
+        gain = view.total_unrealized_gain
+        parts = [f"Account value {_fmt_ccy(view.account_value, ccy)}"]
+        if view.holdings_market_value != 0 or view.total_unrealized_gain != 0:
+            parts.append(f"Unrealised {_fmt_ccy(gain, ccy, signed=True)}")
+        if view.total_realized_gain != 0:
+            parts.append(f"Realised {_fmt_ccy(view.total_realized_gain, ccy, signed=True)}")
+        parts.append(f"Cash {_fmt_ccy(view.cash_balance, ccy)}")
+        self._holdings_totals_lbl.setText("   ·   ".join(parts))
+        self._render_holdings_table()
+
+    def _render_holdings_table(self) -> None:
+        ccy = self._account.currency
+        table = self._holdings_table
+        view = self._holdings_view
+        rows = list(view.holdings) if view is not None else []
+        needle = self._holdings_search.text().strip().lower()
+        if needle:
+            rows = [
+                h for h in rows
+                if needle in h.symbol.lower() or needle in h.name.lower()
+            ]
+        table.setRowCount(len(rows))
+        for i, h in enumerate(rows):
+            name = h.name + (" *" if h.basis_incomplete else "")
+            cells = [
+                (h.symbol, Qt.AlignLeft),
+                (name, Qt.AlignLeft),
+                (_fmt_shares(h.shares), Qt.AlignRight),
+                (_fmt_ccy(Decimal(str(h.avg_unit_cost)), ccy, decimals=4)
+                 if h.avg_unit_cost is not None else "—", Qt.AlignRight),
+                (_fmt_ccy(h.cost_basis, ccy), Qt.AlignRight),
+                (_fmt_ccy(Decimal(str(h.last_price)), ccy, decimals=4)
+                 if h.last_price is not None else "—", Qt.AlignRight),
+                (_fmt_ccy(h.market_value, ccy) if h.market_value is not None else "—",
+                 Qt.AlignRight),
+                (_fmt_ccy(h.unrealized_gain, ccy, signed=True)
+                 if h.unrealized_gain is not None else "—", Qt.AlignRight),
+            ]
+            for col, (text, align) in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(int(align | Qt.AlignVCenter))
+                if col == 7 and h.unrealized_gain is not None:
+                    item.setForeground(QBrush(QColor(
+                        _COLOR_POSITIVE if h.unrealized_gain >= 0 else _COLOR_NEGATIVE
+                    )))
+                if col == 1 and h.basis_incomplete:
+                    item.setToolTip(
+                        "Cost basis is approximate — this holding includes "
+                        "shares transferred in without a price, an unapplied "
+                        "stock split, or an oversell."
+                    )
+                table.setItem(i, col, item)
+
+    # ── portfolio panel (ADR-045): treemap (default) + cost-vs-value bars ──
+
+    def _build_value_panel(self) -> QWidget:
+        panel = self._make_card("portfolioCard")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        header = QLabel("PORTFOLIO")
+        header.setStyleSheet(
+            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
+        )
+        header_row.addWidget(header)
+        header_row.addStretch(1)
+        header_row.addWidget(QLabel("View:"))
+        self._portfolio_view_combo = QComboBox()
+        # Treemap is the default portfolio view; cost-vs-value bars are the
+        # alternate. Index order MUST match the stack below.
+        self._portfolio_view_combo.addItem("Treemap (allocation)")
+        self._portfolio_view_combo.addItem("Cost vs value")
+        self._portfolio_view_combo.currentIndexChanged.connect(
+            self._on_portfolio_view_changed
+        )
+        header_row.addWidget(self._portfolio_view_combo)
+        self._portfolio_total_chk = QCheckBox("Portfolio total")
+        self._portfolio_total_chk.setToolTip(
+            "Show one aggregate bar (total cost vs total value) instead of "
+            "one bar per security."
+        )
+        self._portfolio_total_chk.toggled.connect(self._on_portfolio_total_toggled)
+        self._portfolio_total_chk.hide()  # bars-only; treemap is the default view
+        header_row.addWidget(self._portfolio_total_chk)
+        self._securities_btn = QPushButton("Securities…")
+        self._securities_btn.setToolTip("Choose which securities to show")
+        self._securities_btn.clicked.connect(self._on_pick_securities)
+        header_row.addWidget(self._securities_btn)
+        layout.addLayout(header_row)
+
+        self._portfolio_stack = QStackedWidget()
+        self._treemap_chart = TreemapChart()
+        self._value_chart = ValueChart()
+        self._portfolio_stack.addWidget(self._treemap_chart)   # index 0 (default)
+        self._portfolio_stack.addWidget(self._value_chart)     # index 1
+        layout.addWidget(self._portfolio_stack, stretch=1)
+        return panel
+
+    def _on_portfolio_view_changed(self, index: int) -> None:
+        self._portfolio_stack.setCurrentIndex(index)
+        # The Portfolio-total toggle only applies to the bars view.
+        self._portfolio_total_chk.setVisible(index == 1)
+
+    def _render_portfolio(self) -> None:
+        self._render_treemap()
+        self._render_value_chart()
+
+    def _selected_holdings(self):
+        view = self._holdings_view
+        if view is None:
+            return []
+        if self._chart_selected_ids is None:
+            return list(view.holdings)
+        return [h for h in view.holdings if h.security_id in self._chart_selected_ids]
+
+    def _render_treemap(self) -> None:
+        holdings = self._selected_holdings()
+        if not holdings:
+            self._treemap_chart.show_empty("No holdings to show.")
+            return
+        priced = [h for h in holdings if h.market_value is not None]
+        if priced:
+            tiles = [
+                TreemapTile(label=(h.symbol or h.name[:8]), name=h.name,
+                            value=float(h.market_value))
+                for h in priced
+            ]
+            subtitle = "by market value"
+            excluded = len(holdings) - len(priced)
+            footnote = (
+                f"{excluded} unpriced holding{'s' if excluded != 1 else ''} excluded"
+                if excluded else ""
+            )
+        else:
+            # Nothing priced yet — size by cost basis so the mix still renders.
+            tiles = [
+                TreemapTile(label=(h.symbol or h.name[:8]), name=h.name,
+                            value=float(h.cost_basis))
+                for h in holdings
+            ]
+            subtitle = "by cost basis (no prices yet — backfill in Manage ▸ Securities)"
+            footnote = ""
+        self._treemap_chart.render(
+            tiles, _sym(self._account.currency), subtitle=subtitle, footnote=footnote,
+        )
+
+    def _value_bars(self, view: HoldingsView) -> list[ValueBar]:
+        """Build the chart's bars from the holdings view, honouring the
+        security selection and the portfolio-total toggle."""
+        holdings = view.holdings
+        if self._chart_selected_ids is not None:
+            holdings = [h for h in holdings if h.security_id in self._chart_selected_ids]
+        if self._chart_total_mode:
+            cost = float(sum((h.cost_basis for h in holdings), Decimal("0")))
+            priced = [h for h in holdings if h.market_value is not None]
+            value = (
+                float(sum((h.market_value for h in priced), Decimal("0")))
+                if priced else None
+            )
+            if cost <= 0 and not value:
+                return []
+            return [ValueBar(security_id=-1, label="Portfolio", name="Portfolio total",
+                             cost=cost, value=value)]
+        bars = [
+            ValueBar(
+                security_id=h.security_id,
+                label=(h.symbol or h.name[:8]),
+                name=h.name,
+                cost=float(h.cost_basis),
+                value=float(h.market_value) if h.market_value is not None else None,
+            )
+            for h in holdings
+        ]
+        bars.sort(key=lambda b: -(b.value if b.value is not None else b.cost))
+        return bars
+
+    def _render_value_chart(self) -> None:
+        view = self._holdings_view
+        if view is None or not view.holdings:
+            self._value_chart.show_empty("No holdings yet.")
+            return
+        bars = self._value_bars(view)
+        if not bars:
+            self._value_chart.show_empty("No securities selected.")
+            return
+        self._value_chart.render(bars, _sym(self._account.currency))
+
+    def _render_value_history(self, txns) -> None:
+        """Portfolio value over time (ADR-045): monthly invested-vs-market-value
+        line, full history. Loads each referenced security's price series once."""
+        dated = [t for t in txns if t.posted_date]
+        if len(dated) < 2:
+            self._value_history_chart.show_empty("Not enough history to chart yet.")
+            return
+        first = min(t.posted_date for t in dated)
+        samples = _month_end_samples(first, date.today())
+        sec_ids = {t.security_id for t in txns if t.security_id is not None}
+        price_series = {
+            sid: [(p.price_date, p.price) for p in self._repo.price_series(sid)]
+            for sid in sec_ids
+        }
+        points = compute_value_history(txns, samples, price_series)
+        if len(points) < 2:
+            self._value_history_chart.show_empty("Not enough history to chart yet.")
+            return
+        any_fallback = any(not p.fully_priced for p in points)
+        self._value_history_chart.render(points, _sym(self._account.currency), any_fallback)
+
+    def _on_portfolio_total_toggled(self, checked: bool) -> None:
+        self._chart_total_mode = checked
+        self._securities_btn.setEnabled(not checked)
+        self._render_value_chart()
+
+    def _on_pick_securities(self) -> None:
+        view = self._holdings_view
+        if view is None or not view.holdings:
+            return
+        rows = [(h.security_id, h.symbol or h.name) for h in view.holdings]
+        dialog = _SecurityPickerDialog(rows, self._chart_selected_ids, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            picked = dialog.selected_ids()
+            all_ids = {sid for sid, _ in rows}
+            # None == "all" so the chart stays in sync as holdings change.
+            self._chart_selected_ids = None if picked == all_ids else picked
+            self._render_portfolio()
+
     def _build_top_n_panel(self, *, title: str, widget_attr: str) -> QWidget:
         # Card name picked off the widget attr so each Top-N card has a
         # distinct objectName for QSS scoping.
@@ -697,12 +1110,54 @@ class AccountSummaryWindow(QMainWindow):
         txns = self._repo.list_transactions_for_account(self._account_id)
         opening_balance = self._account.opening_balance
         today = date.today()
+
+        # Shared info-panel feeds (both layouts): status breakdown + the
+        # account's scheduled/upcoming transactions.
+        status_breakdown = compute_status_breakdown(txns, opening_balance)
+        horizon = today.toordinal() + 30
+        through_date = date.fromordinal(horizon).isoformat()
+        all_schedules = self._repo.list_schedules_due_through(through_date)
+        upcoming_rows = upcoming_scheduled(
+            all_schedules, self._account_id, today, horizon_days=30, n=5,
+        )
+        scheduled_total = count_scheduled_for_account(
+            self._repo.list_scheduled_txns(), self._account_id,
+        )
+        self._update_summary_panel(status_breakdown, scheduled_total)
+        self._update_upcoming(upcoming_rows, today)
+
+        if self._is_investment:
+            self._reload_investment(txns, opening_balance)
+        else:
+            self._reload_cash(txns, opening_balance, today)
+
+    def _reload_investment(self, txns, opening_balance) -> None:
+        """Investment dashboard refresh (ADR-044/045): holdings → value chart
+        + Holdings table + the unpriced banner. No cash-flow chart / report /
+        period / Top-N widgets exist on this layout."""
+        prices = {
+            sid: (p.price, p.price_date)
+            for sid, p in self._repo.latest_prices().items()
+        }
+        view = compute_holdings_view(txns, opening_balance, prices)
+        self._update_holdings_panel(view)   # stores view + renders table (search-aware)
+        self._render_portfolio()            # treemap (default) + cost-vs-value bars
+        self._render_value_history(txns)
+        if view.unpriced_count:
+            self._non_cash_banner.setText(
+                f"{view.unpriced_count} holding"
+                f"{'s' if view.unpriced_count != 1 else ''} unpriced — "
+                "add prices in Manage ▸ Securities for full market value."
+            )
+            self._non_cash_banner.show()
+        else:
+            self._non_cash_banner.hide()
+
+    def _reload_cash(self, txns, opening_balance, today) -> None:
+        """Cash-account single-page refresh (ADR-033/034): flow chart + report
+        panel + Top-N breakdowns."""
         period_start, period_end = self._resolve_period_bounds()
         period_label = self._period_display_label()
-
-        # Granularity from the SELECTED period's span — drives whether
-        # the chart shows daily / weekly / monthly / quarterly / yearly
-        # buckets. Works for fixed presets AND custom ranges.
         period_days = max(1, (period_end - period_start).days)
         granularity = pick_granularity(period_days)
 
@@ -712,8 +1167,6 @@ class AccountSummaryWindow(QMainWindow):
         period_summary = compute_period_summary(
             txns, opening_balance, period_start, period_end, period_label,
         )
-        status_breakdown = compute_status_breakdown(txns, opening_balance)
-
         in_period_txns = [
             t for t in txns
             if period_start.isoformat() <= t.posted_date <= period_end.isoformat()
@@ -721,36 +1174,18 @@ class AccountSummaryWindow(QMainWindow):
         payees_rows = top_payees(in_period_txns, n=10)
         categories_rows = top_categories(in_period_txns, n=10)
 
-        # Scheduled feeds — only schedules touching this account.
-        horizon = today.toordinal() + 30
-        through_date = date.fromordinal(horizon).isoformat()
-        all_schedules = self._repo.list_schedules_due_through(through_date)
-        upcoming_rows = upcoming_scheduled(
-            all_schedules, self._account_id, today, horizon_days=30, n=5,
-        )
-        # Total scheduled count uses the full schedule list (no horizon).
-        scheduled_total = count_scheduled_for_account(
-            self._repo.list_scheduled_txns(), self._account_id,
-        )
-
-        # Sparse-data signal — let the chart paint its empty state but
-        # keep the rest of the screen useful. Empty txn list means the
-        # account is brand new; an empty bucket list means a degenerate
-        # period (e.g. "All time" on an account with no history → today).
         if not txns or not flow_series.buckets:
             self._chart.show_empty("Not enough history yet")
         else:
             self._chart.set_data(flow_series)
 
         self._update_report_panel(period_summary)
-        self._update_summary_panel(status_breakdown, scheduled_total)
-        self._update_upcoming(upcoming_rows, today)
         self._top_payees_widget.set_rows(payees_rows)
         self._top_categories_widget.set_rows(categories_rows)
-
-        # Non-cash banner — investment / property / vehicle until valuations
-        # land. ADR-032 / ADR-033 §Balance semantics for non-cash families.
-        self._non_cash_banner.setVisible(self._account.family in _NON_CASH_FAMILIES)
+        # Non-cash banner — property / vehicle until valuations land.
+        self._non_cash_banner.setVisible(
+            self._account.family in _NON_CASH_FAMILIES
+        )
 
     def _update_report_panel(self, summary: PeriodSummary) -> None:
         self._report_header.setText(f"REPORT: {summary.period_label.upper()}")
@@ -967,3 +1402,33 @@ class AccountSummaryWindow(QMainWindow):
 
     def _on_drilldown_closed(self, key: tuple) -> None:
         self._drilldown_wins.pop(key, None)
+
+
+class _SecurityPickerDialog(QDialog):
+    """Popup wrapping the reusable CheckListPanel so the value chart can be
+    narrowed to any subset of securities (ADR-045). ``selected_ids`` seeds the
+    checked subset; None means all checked."""
+
+    def __init__(
+        self,
+        rows: list[tuple[int, str]],
+        selected_ids: Optional[set[int]],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Choose securities")
+        self.setMinimumSize(360, 480)
+        layout = QVBoxLayout(self)
+        self._panel = CheckListPanel(
+            "Securities", rows, placeholder="Search securities…",
+        )
+        if selected_ids is not None:
+            self._panel.set_checked_ids(selected_ids)
+        layout.addWidget(self._panel, stretch=1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_ids(self) -> set[int]:
+        return set(self._panel.checked_ids())

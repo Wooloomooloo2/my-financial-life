@@ -1,0 +1,321 @@
+"""Manage → Securities… dialog (ADR-044).
+
+The price-management screen for investment holdings. Mirrors the Currencies
+dialog (ADR-035):
+
+- the Tiingo API key (with the same "stored inside this .mfl file" disclaimer)
+- Refresh Now (synchronous fetch of the latest close for every tickered
+  security, with a small wait cursor)
+- last-refresh timestamp
+- a table of every security with its latest price (or "—" when unpriced) so
+  the user can see at a glance which holdings still need a price
+- an "Add manual price" row — the universal fallback, and the only way to price
+  the securities that carry no ticker (most of a Banktivity export)
+
+All writes go through ``Repository.set_setting`` / ``upsert_security_price``.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Optional
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QCursor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QDateEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from mfl_desktop.db.repository import Repository
+from mfl_desktop.prices import backfill_historical_into, refresh_latest_prices_into
+
+
+def _fmt_refresh_time(iso_ts: Optional[str]) -> str:
+    if not iso_ts:
+        return "Never"
+    try:
+        ts = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return iso_ts
+    return ts.strftime("%Y-%m-%d %H:%M")
+
+
+class SecuritiesDialog(QDialog):
+    """Securities + prices. Modal but non-blocking on success — Refresh Now and
+    Add Manual Price write through immediately so the user can iterate."""
+
+    def __init__(self, repo: Repository, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._repo = repo
+        self.setWindowTitle("Securities and prices")
+        self.setMinimumWidth(680)
+        self.setMinimumHeight(560)
+
+        outer = QVBoxLayout(self)
+        outer.setSpacing(14)
+
+        # ── Provider section ──────────────────────────────────────────────
+        provider_box = QGroupBox("Tiingo (price provider)")
+        prov_layout = QVBoxLayout(provider_box)
+
+        form = QFormLayout()
+        self._key_edit = QLineEdit()
+        self._key_edit.setPlaceholderText(
+            "Paste your free Tiingo API token (see tiingo.com — free signup)"
+        )
+        self._key_edit.setEchoMode(QLineEdit.Password)
+        self._key_edit.setText(self._repo.get_setting("tiingo_api_key") or "")
+        form.addRow("API key:", self._key_edit)
+        prov_layout.addLayout(form)
+
+        disclaimer = QLabel(
+            "Stored inside this .mfl file. Remove before sharing snapshots. "
+            "Only securities with a ticker symbol can be fetched — price the "
+            "rest manually below."
+        )
+        disclaimer.setWordWrap(True)
+        disclaimer.setStyleSheet("QLabel { color: #64748B; font-size: 11px; }")
+        prov_layout.addWidget(disclaimer)
+
+        action_row = QHBoxLayout()
+        self._refresh_status = QLabel(
+            f"Last refresh: "
+            f"{_fmt_refresh_time(self._repo.get_setting('tiingo_last_refresh_at'))}"
+        )
+        self._refresh_status.setStyleSheet("QLabel { color: #475569; }")
+        action_row.addWidget(self._refresh_status, 1)
+        self._refresh_btn = QPushButton("Refresh now")
+        self._refresh_btn.clicked.connect(self._on_refresh_now)
+        action_row.addWidget(self._refresh_btn)
+        self._backfill_btn = QPushButton("Backfill history")
+        self._backfill_btn.setToolTip(
+            "Fetch each tickered security's full daily price history — powers "
+            "the portfolio value-over-time chart. One call per ticker."
+        )
+        self._backfill_btn.clicked.connect(self._on_backfill_history)
+        action_row.addWidget(self._backfill_btn)
+        prov_layout.addLayout(action_row)
+
+        outer.addWidget(provider_box)
+
+        # ── Prices table ──────────────────────────────────────────────────
+        prices_box = QGroupBox("Securities and latest prices")
+        prices_layout = QVBoxLayout(prices_box)
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(
+            ["Symbol", "Security", "Price", "As of", "Source"]
+        )
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._table.verticalHeader().setVisible(False)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        prices_layout.addWidget(self._table)
+
+        # Add-manual-price row.
+        add_row = QHBoxLayout()
+        self._add_security = QComboBox()
+        self._add_security.setEditable(True)
+        self._add_security.setInsertPolicy(QComboBox.NoInsert)
+        self._add_security.completer().setCompletionMode(
+            self._add_security.completer().CompletionMode.PopupCompletion
+        )
+        self._add_security.completer().setCaseSensitivity(Qt.CaseInsensitive)
+        for s in self._repo.list_securities():
+            label = f"{s.symbol} — {s.name}" if (s.symbol or "").strip() else s.name
+            self._add_security.addItem(label, s.id)
+        self._add_price = QLineEdit()
+        self._add_price.setPlaceholderText("price")
+        self._add_price.setMaximumWidth(100)
+        self._add_date = QDateEdit()
+        self._add_date.setCalendarPopup(True)
+        self._add_date.setDisplayFormat("yyyy-MM-dd")
+        self._add_date.setDate(date.today())
+        self._add_btn = QPushButton("Add price")
+        self._add_btn.clicked.connect(self._on_add_manual_price)
+
+        add_row.addWidget(QLabel("Add manual:"))
+        add_row.addWidget(self._add_security, 1)
+        add_row.addWidget(self._add_price)
+        add_row.addWidget(self._add_date)
+        add_row.addWidget(self._add_btn)
+        prices_layout.addLayout(add_row)
+
+        outer.addWidget(prices_box, 1)
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
+        buttons.button(QDialogButtonBox.Save).setDefault(True)
+        buttons.accepted.connect(self._on_save_and_close)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+        self._reload_table()
+
+    # ── data refreshers ─────────────────────────────────────────────────
+
+    def _reload_table(self) -> None:
+        """List every security with its latest price (or '—' when unpriced),
+        sorted by name. Doubles as the 'which holdings still need a price' view."""
+        securities = self._repo.list_securities()
+        latest = self._repo.latest_prices()
+        self._table.setRowCount(len(securities))
+        for i, s in enumerate(securities):
+            self._table.setItem(i, 0, QTableWidgetItem(s.symbol or ""))
+            self._table.setItem(i, 1, QTableWidgetItem(s.name))
+            price_row = latest.get(s.id)
+            if price_row is not None:
+                price_item = QTableWidgetItem(f"{price_row.price:,.4f}".rstrip("0").rstrip("."))
+                price_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self._table.setItem(i, 2, price_item)
+                self._table.setItem(i, 3, QTableWidgetItem(price_row.price_date))
+                self._table.setItem(i, 4, QTableWidgetItem(price_row.source))
+            else:
+                dash = QTableWidgetItem("—")
+                dash.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self._table.setItem(i, 2, dash)
+                self._table.setItem(i, 3, QTableWidgetItem(""))
+                self._table.setItem(i, 4, QTableWidgetItem(""))
+
+    # ── button handlers ─────────────────────────────────────────────────
+
+    def _on_refresh_now(self) -> None:
+        """Synchronous refresh — persists the key first so the user can paste
+        and click in one go."""
+        typed_key = self._key_edit.text().strip()
+        self._repo.set_setting("tiingo_api_key", typed_key)
+        if not typed_key:
+            QMessageBox.warning(
+                self, "Need an API key",
+                "Add your Tiingo API token to the field above before "
+                "refreshing. (Securities with no ticker can still be priced "
+                "manually below.)",
+            )
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            result = refresh_latest_prices_into(self._repo, force=True)
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self, "Refresh failed", f"Could not refresh prices:\n\n{e}",
+            )
+            return
+        QApplication.restoreOverrideCursor()
+        self._refresh_status.setText(
+            f"Last refresh: {_fmt_refresh_time(result.fetched_at)} · "
+            f"{result.new_prices_count} price"
+            f"{'s' if result.new_prices_count != 1 else ''} updated"
+        )
+        if result.errors:
+            shown = result.errors[:12]
+            more = len(result.errors) - len(shown)
+            msg = "\n".join(shown) + (f"\n… and {more} more" if more > 0 else "")
+            QMessageBox.warning(
+                self, "Some prices failed",
+                "Refresh finished with errors (often a fund ticker Tiingo "
+                f"doesn't cover — price those manually):\n\n{msg}",
+            )
+        self._reload_table()
+
+    def _on_backfill_history(self) -> None:
+        """Fetch full daily history for every tickered security (ADR-045).
+        Synchronous with a wait cursor — it's one call per ticker, so a handful
+        of seconds for this portfolio."""
+        typed_key = self._key_edit.text().strip()
+        self._repo.set_setting("tiingo_api_key", typed_key)
+        if not typed_key:
+            QMessageBox.warning(
+                self, "Need an API key",
+                "Add your Tiingo API token before backfilling history.",
+            )
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            result = backfill_historical_into(self._repo)
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self, "Backfill failed", f"Could not backfill history:\n\n{e}",
+            )
+            return
+        QApplication.restoreOverrideCursor()
+        self._refresh_status.setText(
+            f"Last refresh: {_fmt_refresh_time(result.fetched_at)} · "
+            f"{result.new_prices_count:,} historical price"
+            f"{'s' if result.new_prices_count != 1 else ''} stored"
+        )
+        if result.errors:
+            shown = result.errors[:12]
+            more = len(result.errors) - len(shown)
+            msg = "\n".join(shown) + (f"\n… and {more} more" if more > 0 else "")
+            QMessageBox.warning(
+                self, "Some securities had no history",
+                "Backfill finished with errors (often a fund ticker Tiingo "
+                f"doesn't cover):\n\n{msg}",
+            )
+        self._reload_table()
+
+    def _on_add_manual_price(self) -> None:
+        idx = self._add_security.currentIndex()
+        # When the user typed into the editable combo, currentIndex may not
+        # track the typed text — resolve by matching the data for the text.
+        sid = self._add_security.itemData(idx)
+        if sid is None or self._add_security.currentText() != self._add_security.itemText(idx):
+            match = self._add_security.findText(self._add_security.currentText())
+            sid = self._add_security.itemData(match) if match >= 0 else None
+        if sid is None:
+            QMessageBox.warning(
+                self, "Add manual price", "Pick a security from the list.",
+            )
+            return
+        text = self._add_price.text().strip().replace(",", "").lstrip("$£€")
+        on_date = self._add_date.date().toString("yyyy-MM-dd")
+        try:
+            price = float(text)
+        except ValueError:
+            QMessageBox.warning(
+                self, "Add manual price", f"{text!r} doesn't look like a number.",
+            )
+            return
+        if price < 0:
+            QMessageBox.warning(
+                self, "Add manual price", "Price can't be negative.",
+            )
+            return
+        try:
+            self._repo.upsert_security_price(
+                security_id=int(sid), price_date=on_date,
+                price=price, source="manual",
+            )
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(
+                self, "Add manual price", f"Could not save price:\n\n{e}",
+            )
+            return
+        self._add_price.clear()
+        self._reload_table()
+
+    def _on_save_and_close(self) -> None:
+        self._repo.set_setting("tiingo_api_key", self._key_edit.text().strip())
+        self.accept()

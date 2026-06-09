@@ -29,6 +29,13 @@ class TransactionTableModel(QAbstractTableModel):
     - All-transactions (account_id is None): Date / Account / Payee /
       Category / Status / Memo / Amount  — no Balance, because it isn't
       meaningful across accounts of different types and currencies.
+    - Investment account (invest=True): Date / Action / Symbol / Security /
+      Qty / Price / Status / Memo / Amount / Balance (ADR-043). The
+      security-action columns are read-only in round 1; Status/Memo stay
+      editable. Amount is read-only here because it is the derived cash
+      impact of the action. Symbol sits next to Security because security
+      names are often near-identical and differ between statement and
+      exchange — the ticker is the disambiguator for manual entry.
     """
 
     # (header_label, attribute_name, editable)
@@ -50,9 +57,22 @@ class TransactionTableModel(QAbstractTableModel):
         ("Memo",     "memo",            True),
         ("Amount",   "amount",          True),
     ]
+    COLUMNS_INVEST = [
+        ("Date",     "posted_date",     False),
+        ("Action",   "action",          False),
+        ("Symbol",   "security_symbol", False),
+        ("Security", "security_name",   False),
+        ("Qty",      "quantity",        False),
+        ("Price",    "price",           False),
+        ("Status",   "status",          True),
+        ("Memo",     "memo",            True),
+        ("Amount",   "amount",          False),
+        ("Balance",  "running_balance", False),
+    ]
 
     def __init__(
         self, repo: Repository, account_id: int | None, since: str | None = None,
+        invest: bool = False,
     ) -> None:
         super().__init__()
         self._repo = repo
@@ -61,9 +81,13 @@ class TransactionTableModel(QAbstractTableModel):
         # for the full history. The window is pushed into the Repository query
         # (not the proxy) so load + reset + sort all shrink to what's shown.
         self._since = since
-        self.COLUMNS = (
-            self.COLUMNS_SINGLE if account_id is not None else self.COLUMNS_ALL
-        )
+        # ADR-043: investment accounts use a security-aware column layout.
+        if invest and account_id is not None:
+            self.COLUMNS = self.COLUMNS_INVEST
+        elif account_id is not None:
+            self.COLUMNS = self.COLUMNS_SINGLE
+        else:
+            self.COLUMNS = self.COLUMNS_ALL
         self._rows: list[TransactionRow] = []
         # Optional gate (ADR-040): set by the window to a callable
         # ``(txn_id) -> bool``. When a reconciled row is about to be edited
@@ -131,10 +155,14 @@ class TransactionTableModel(QAbstractTableModel):
             value = getattr(row, col_name)
             if col_name in ("amount", "running_balance"):
                 return f"{value:,.2f}"
+            if col_name == "quantity":
+                return _fmt_shares(value)
+            if col_name == "price":
+                return _fmt_price(value)
             return value or ""
 
         if role == Qt.TextAlignmentRole:
-            if col_name in ("amount", "running_balance"):
+            if col_name in ("amount", "running_balance", "quantity", "price"):
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             return int(Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -203,6 +231,31 @@ class TransactionTableModel(QAbstractTableModel):
             return replace(row, amount=stored)
 
         return None
+
+
+def _fmt_shares(value) -> str:
+    """Format a share quantity (ADR-043): up to 6 dp, trailing zeros trimmed,
+    so 180.0 → '180' and 0.069 → '0.069'. Blank for None."""
+    if value is None:
+        return ""
+    s = f"{float(value):,.6f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _fmt_price(value) -> str:
+    """Format a per-share price (ADR-043): thousands-separated, 2-4 dp with
+    trailing zeros beyond 2 dp trimmed (67.07 → '67.07', 104.194 → '104.194').
+    Blank for None."""
+    if value is None:
+        return ""
+    s = f"{float(value):,.4f}"
+    if "." in s:
+        whole, frac = s.split(".")
+        frac = frac.rstrip("0")
+        if len(frac) < 2:
+            frac = (frac + "00")[:2]
+        s = f"{whole}.{frac}"
+    return s
 
 
 def _parse_amount_input(text: str) -> Optional[Decimal]:

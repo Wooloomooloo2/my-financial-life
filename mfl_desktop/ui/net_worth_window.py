@@ -210,7 +210,10 @@ class NetWorthWindow(QMainWindow):
 
     def _refresh(self) -> None:
         accounts = self._repo.list_accounts()
-        balances = self._repo.compute_account_balances()
+        # Market value, not cash: investment accounts contribute
+        # cash + Σ(shares × latest price); priced via security_price, falling
+        # back to cash when unpriced (ADR-044, closing the ADR-019 follow-up).
+        balances = self._repo.compute_account_values()
 
         # Group by family.
         by_family: dict[str, list[AccountSummary]] = {}

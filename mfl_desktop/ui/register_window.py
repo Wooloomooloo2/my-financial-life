@@ -45,6 +45,7 @@ from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
 from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
+from mfl_desktop.ui.securities_dialog import SecuritiesDialog
 from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
     CategoryTypeaheadDelegate,
@@ -114,6 +115,12 @@ _COLUMN_WIDTHS = {
     "memo":            280,
     "amount":          110,
     "running_balance": 130,
+    # Investment register (ADR-043)
+    "action":          90,
+    "security_symbol": 80,
+    "security_name":   260,
+    "quantity":        100,
+    "price":           100,
 }
 
 
@@ -139,7 +146,9 @@ class RegisterWindow(QMainWindow):
 
         accounts = repo.list_accounts()
         folders = repo.list_folders()
-        balances = repo.compute_account_balances()
+        # Sidebar shows each account's worth — market value for investment
+        # accounts (cash + holdings), cash for everything else (ADR-044).
+        balances = repo.compute_account_values()
         reports = repo.list_reports()
         report_folders = repo.list_report_folders()
         self._sidebar = Sidebar(
@@ -319,12 +328,13 @@ class RegisterWindow(QMainWindow):
         self._update_window_title()
         self._set_model(TransactionTableModel(
             self._repo, account_id=acct.id, since=self._current_since(),
+            invest=(acct.family == "investment"),
         ))
         # The category combo lists only the categories actually used in
         # the current view — rebuild it now that _account has flipped.
         self._populate_category_combo()
         self._import_action.setEnabled(True)
-        self._import_action.setToolTip("Import OFX / QFX / CSV into this account")
+        self._import_action.setToolTip("Import OFX / QFX / QIF / CSV into this account")
         self._set_account_action_state(account_selected=True)
 
     def _show_all_transactions(self) -> None:
@@ -589,6 +599,13 @@ class RegisterWindow(QMainWindow):
         self._manage_currencies_action = QAction("Cu&rrencies…", self)
         self._manage_currencies_action.triggered.connect(self._on_manage_currencies)
         manage_menu.addAction(self._manage_currencies_action)
+
+        self._manage_securities_action = QAction("Se&curities…", self)
+        self._manage_securities_action.setToolTip(
+            "Investment prices — Tiingo API key, refresh, and manual prices"
+        )
+        self._manage_securities_action.triggered.connect(self._on_manage_securities)
+        manage_menu.addAction(self._manage_securities_action)
 
         self._reconcile_transfers_action = QAction(
             "&Reconcile Transfers…", self,
@@ -1493,7 +1510,7 @@ class RegisterWindow(QMainWindow):
             return
         path, _ = QFileDialog.getOpenFileName(
             self, "Import transactions", "",
-            "Bank statements (*.ofx *.qfx *.csv);;All files (*)",
+            "Bank statements (*.ofx *.qfx *.qif *.csv);;All files (*)",
         )
         if not path:
             return
@@ -1807,7 +1824,7 @@ class RegisterWindow(QMainWindow):
         """
         accounts = self._repo.list_accounts()
         folders = self._repo.list_folders()
-        balances = self._repo.compute_account_balances()
+        balances = self._repo.compute_account_values()
         reports = self._repo.list_reports()
         report_folders = self._repo.list_report_folders()
         self._sidebar.reload(
@@ -1829,7 +1846,7 @@ class RegisterWindow(QMainWindow):
         moving the user's focus."""
         accounts = self._repo.list_accounts()
         folders = self._repo.list_folders()
-        balances = self._repo.compute_account_balances()
+        balances = self._repo.compute_account_values()
         reports = self._repo.list_reports()
         report_folders = self._repo.list_report_folders()
         self._sidebar.reload(
@@ -2031,6 +2048,14 @@ class RegisterWindow(QMainWindow):
         Repository and let it run."""
         dialog = CurrenciesDialog(self._repo, parent=self)
         dialog.exec()
+
+    def _on_manage_securities(self) -> None:
+        """Open Manage → Securities… (ADR-044). The dialog persists its own
+        edits to ``setting`` and ``security_price``; refresh sidebar balances
+        afterward in case prices changed an investment account's market value."""
+        dialog = SecuritiesDialog(self._repo, parent=self)
+        dialog.exec()
+        self._refresh_sidebar_balances()
 
     def _on_reconcile_transfers(self) -> None:
         """Open Manage → Reconcile Transfers… (ADR-037).

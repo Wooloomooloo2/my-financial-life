@@ -18,6 +18,7 @@ from PySide6.QtCore import QThreadPool, QRunnable
 
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.fx import refresh_latest_into
+from mfl_desktop.prices import refresh_latest_prices_into
 from mfl_desktop.ui.register_window import RegisterWindow
 from mfl_desktop.ui.theme import apply_theme
 
@@ -44,6 +45,27 @@ class _FxRefreshRunnable(QRunnable):
         except Exception:
             # Swallow — the user can always hit Refresh Now manually.
             pass
+
+
+class _PriceRefreshRunnable(QRunnable):
+    """Background launch refresh of security prices (ADR-044). Mirrors the FX
+    runnable: own Repository connection, once-per-day at most, silent on
+    failure (missing Tiingo key / flaky network never blocks launch)."""
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__()
+        self._db_path = db_path
+
+    def run(self) -> None:
+        try:
+            bg = Repository(self._db_path)
+            try:
+                refresh_latest_prices_into(bg)
+            finally:
+                bg.close()
+        except Exception:
+            pass
+
 
 DEFAULT_DB = Path("mfl_dev.db")
 
@@ -89,6 +111,11 @@ def main(argv: list[str] | None = None) -> int:
     # key is set, when the last refresh was less than 24h ago, or when
     # there are no non-USD accounts to fetch rates for.
     QThreadPool.globalInstance().start(_FxRefreshRunnable(args.db))
+
+    # Background launch refresh of security prices (ADR-044). No-op when no
+    # Tiingo key is set, when the last refresh was < 24h ago, or when no
+    # securities carry a ticker symbol.
+    QThreadPool.globalInstance().start(_PriceRefreshRunnable(args.db))
 
     return app.exec()
 

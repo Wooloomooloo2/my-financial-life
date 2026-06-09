@@ -26,7 +26,7 @@ from decimal import Decimal
 from typing import Optional
 
 from mfl_desktop.db.repository import Repository
-from mfl_desktop.import_engine import csv_parser, ofx_parser
+from mfl_desktop.import_engine import csv_parser, ofx_parser, qif_parser
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,15 @@ class ClassifiedTransaction:
     match_txn_payee: str = ""
     match_txn_date: str = ""
     status_override: str = ""     # 'Cleared' | 'Reconciled' | 'Pending' | ''
+    # Investment fields (ADR-043). `action` is "" for an ordinary cash row and
+    # set ('Buy'/'Sell'/'Div'/…) for a QIF investment row; the rest carry the
+    # security/quantity/price/commission through to the commit insert.
+    action: str = ""
+    security_name: str = ""
+    quantity: Optional[Decimal] = None
+    price: Optional[Decimal] = None
+    commission: Optional[Decimal] = None
+    linked_account: str = ""
 
 
 @dataclass
@@ -79,6 +88,11 @@ class PendingImport:
     suggested_status: str = "Cleared"
     currency: str = "GBP"
     has_status_override: bool = False
+    # Investment import (ADR-043). `securities` is the QIF !Type:Security master
+    # (name / symbol / type) staged for creation at commit time; `is_investment`
+    # is True when the file carried a !Type:Invst section.
+    securities: list = field(default_factory=list)
+    is_investment: bool = False
 
 
 @dataclass
@@ -95,6 +109,19 @@ class ImportResult:
 def compute_hash(account_iri: str, date_iso: str, amount: str, payee_raw: str) -> str:
     """Composite duplicate-detection hash for CSV rows without a FITID."""
     raw = f"{account_iri}|{date_iso}|{amount}|{payee_raw}"
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def compute_investment_hash(
+    account_iri: str, date_iso: str, action: str,
+    security_name: str, quantity: str, amount: str,
+) -> str:
+    """Composite hash for QIF investment rows (no FITID). Includes action,
+    security, and quantity because a single day routinely holds many rows
+    sharing date + amount (e.g. a dividend and its matching reinvest buy, or
+    several reinvestments) that the cash hash (date|amount|payee) would
+    collide. Deterministic, so re-importing the same file dedups cleanly."""
+    raw = f"{account_iri}|{date_iso}|{action}|{security_name}|{quantity}|{amount}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -121,10 +148,17 @@ class ImportService:
         """
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
+        securities: list = []
         if ext in ("ofx", "qfx"):
             raw_txns = ofx_parser.parse_ofx(file_bytes, filename)
             has_override = False
             file_format = "qfx" if ext == "qfx" else "ofx"
+        elif ext == "qif":
+            qif = qif_parser.parse_qif(file_bytes, filename)
+            raw_txns = qif.transactions
+            securities = qif.securities
+            has_override = any(t.get("status_override") for t in raw_txns)
+            file_format = "qif-invst" if qif.is_investment else "qif"
         elif ext == "csv":
             content = csv_parser._decode(file_bytes)
             fmt = csv_parser._detect_format(content.splitlines())
@@ -136,11 +170,12 @@ class ImportService:
         else:
             raise ValueError(
                 f"Unsupported file format '.{ext}'. "
-                "Please upload an OFX, QFX, or CSV file."
+                "Please upload an OFX, QFX, QIF, or CSV file."
             )
 
         token = self._classify_and_stage(
             raw_txns, has_override, file_format, account_iri, filename,
+            securities=securities,
         )
         return token, "preview"
 
@@ -169,11 +204,13 @@ class ImportService:
         file_format: str,
         account_iri: str,
         filename: str,
+        securities: Optional[list] = None,
     ) -> str:
         acct = self._repo.get_account_by_iri(account_iri)
         if acct is None:
             raise ValueError(f"No account with IRI {account_iri!r}")
 
+        is_investment = any(raw.get("action") for raw in raw_txns)
         first = not self._repo.account_has_transactions(acct.id)
         suggested = "Cleared" if first else "Uncleared"
 
@@ -197,10 +234,29 @@ class ImportService:
             memo = raw.get("memo", "")
             category_raw = raw.get("category_raw", "")
             status_ov = raw.get("status_override", "")
+            action = raw.get("action", "") or ""
+            security_name = raw.get("security_name", "")
+            quantity = raw.get("quantity")
+            price = raw.get("price")
+            commission = raw.get("commission")
+            linked_account = raw.get("linked_account", "")
 
             fitid = raw.get("fitid", "")
             if fitid:
                 import_hash = fitid
+            elif action:
+                # Investment row: hash on action + security + quantity so the
+                # many same-day rows that share date+amount don't collide.
+                base_hash = compute_investment_hash(
+                    account_iri, date_iso, action, security_name,
+                    str(quantity), str(amount),
+                )
+                import_hash = base_hash
+                n = 1
+                while import_hash in batch_seen_hashes:
+                    import_hash = f"{base_hash}:{n}"
+                    n += 1
+                fitid = import_hash
             else:
                 base_hash = compute_hash(account_iri, date_iso, str(amount), payee_raw)
                 import_hash = base_hash
@@ -218,6 +274,14 @@ class ImportService:
             if self._repo.import_hash_exists(acct.id, import_hash):
                 status = "duplicate"
                 dup_count += 1
+                match_id = None
+                match_iri = match_payee = match_date = ""
+            elif action:
+                # Investment rows aren't manually keyed in (yet), so the
+                # ±2-day manual-match heuristic — designed for cash entry —
+                # doesn't apply. New unless an identical hash already exists.
+                status = "new"
+                new_count += 1
                 match_id = None
                 match_iri = match_payee = match_date = ""
             else:
@@ -244,6 +308,9 @@ class ImportService:
                 status=status, match_txn_id=match_id, match_txn_iri=match_iri,
                 match_txn_payee=match_payee, match_txn_date=match_date,
                 status_override=status_ov,
+                action=action, security_name=security_name,
+                quantity=quantity, price=price, commission=commission,
+                linked_account=linked_account,
             ))
 
         token = uuid.uuid4().hex[:16]
@@ -255,6 +322,7 @@ class ImportService:
             match_count=match_count, is_first_import=first,
             suggested_status=suggested, currency=acct.currency,
             has_status_override=has_override,
+            securities=list(securities or []), is_investment=is_investment,
         )
         return token
 
@@ -307,6 +375,19 @@ class ImportService:
                 source_format=pending.file_format,
                 source_filename=pending.filename,
             )
+
+            # Investment import (ADR-043): create the securities master first,
+            # building a name → id map so each transaction's `Y` reference
+            # resolves with one lookup. Securities referenced by a transaction
+            # but absent from the !Type:Security block are created on the fly.
+            security_ids: dict[str, int] = {}
+            for sec in pending.securities:
+                sid = self._repo.get_or_create_security(
+                    sec.name, sec.symbol, sec.type,
+                )
+                if sid is not None:
+                    security_ids[sec.name] = sid
+
             imported = skipped = matched = 0
 
             for tx in pending.transactions:
@@ -330,6 +411,14 @@ class ImportService:
                 payee_id = self._repo.get_or_create_payee(tx.payee_raw)
                 signed_amount = -tx.amount if tx.tx_type == "debit" else tx.amount
 
+                security_id = None
+                if tx.security_name:
+                    security_id = security_ids.get(tx.security_name)
+                    if security_id is None:
+                        security_id = self._repo.get_or_create_security(tx.security_name)
+                        if security_id is not None:
+                            security_ids[tx.security_name] = security_id
+
                 self._repo.insert_transaction(
                     account_id=pending.account_id,
                     posted_date=tx.date_iso,
@@ -340,6 +429,11 @@ class ImportService:
                     memo=tx.memo,
                     import_hash=tx.import_hash,
                     import_batch_id=batch_id,
+                    action=tx.action or None,
+                    security_id=security_id,
+                    quantity=tx.quantity,
+                    price=tx.price,
+                    commission=tx.commission,
                 )
                 imported += 1
 

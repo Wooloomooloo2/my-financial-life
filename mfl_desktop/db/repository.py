@@ -89,6 +89,39 @@ class TransactionRow:
     memo: str
     running_balance: Decimal
     transfer_id: Optional[str] = None
+    # Investment fields (ADR-043). `action` is None on an ordinary cash row;
+    # set ('Buy'/'Sell'/'Div'/…) on an investment-account row. The rest are
+    # populated only when relevant to the action (quantity/price for trades,
+    # security for anything touching an instrument).
+    action: Optional[str] = None
+    security_id: Optional[int] = None
+    security_name: str = ""
+    security_symbol: str = ""
+    quantity: Optional[float] = None
+    price: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SecurityRow:
+    """A row in the securities master (ADR-043). Referenced by `name`
+    (the QIF `Y` field); `symbol` is the optional ticker (often blank in
+    Banktivity exports)."""
+    id: int
+    iri: str
+    name: str
+    symbol: str
+    type: str
+
+
+@dataclass(frozen=True)
+class PriceRow:
+    """A security price point (ADR-044). `price` is a per-share quote (REAL),
+    not pence — consistent with txn.price / lot.unit_cost."""
+    security_id: int
+    price_date: str
+    price: float
+    currency: str
+    source: str
 
 
 @dataclass(frozen=True)
@@ -485,6 +518,10 @@ def new_statement_iri() -> str:
     return f"mfl:Statement_{uuid.uuid4().hex[:8]}"
 
 
+def new_security_iri() -> str:
+    return f"mfl:Security_{uuid.uuid4().hex[:8]}"
+
+
 # ── Repository ──────────────────────────────────────────────────────────────
 
 
@@ -837,6 +874,34 @@ class Repository:
             "WHERE a.archived_at IS NULL"
         )
         return {int(r["id"]): pence_to_decimal(r["balance_pence"]) for r in cur}
+
+    def compute_account_values(self) -> dict[int, Decimal]:
+        """Per-account *market value* (ADR-044) — the figure Net Worth and the
+        sidebar should show. For investment accounts this is
+        ``cash + Σ(open-lot shares × latest price)``; unpriced holdings
+        contribute nothing, so an account with no prices on file falls back to
+        its cash balance. Every other family is the cash balance unchanged
+        (``compute_account_balances``). The register's running-balance column is
+        a transaction ledger and is deliberately NOT affected by this."""
+        balances = self.compute_account_balances()
+        investment = [
+            a for a in self.list_accounts() if a.family == "investment"
+        ]
+        if not investment:
+            return balances
+        # Lazy import: holdings.py imports TransactionRow from this module, so a
+        # top-level import here would be circular.
+        from mfl_desktop.holdings import compute_holdings_view
+        price_map = {
+            sid: (p.price, p.price_date)
+            for sid, p in self.latest_prices().items()
+        }
+        values = dict(balances)
+        for acct in investment:
+            txns = self.list_transactions_for_account(acct.id)
+            view = compute_holdings_view(txns, acct.opening_balance, price_map)
+            values[acct.id] = view.account_value
+        return values
 
     def delete_account(self, account_id: int) -> int:
         """Hard-delete an account and everything that references it
@@ -1237,6 +1302,188 @@ class Repository:
         )
         return cur.lastrowid
 
+    # ── Securities (ADR-043) ──
+
+    def get_or_create_security(
+        self, name: str, symbol: str = "", type_: str = "",
+    ) -> Optional[int]:
+        """Upsert a security by its (unique) name — the QIF `Y` reference.
+
+        Returns the security id, or None if `name` is blank (a cash-only
+        action with no instrument). When the security already exists, a
+        symbol/type supplied here backfills any blank columns (so a later
+        import that carries the ticker can fill in one mastered earlier
+        without it) but never overwrites a value already on file.
+        """
+        clean = (name or "").strip()
+        if not clean:
+            return None
+        clean_symbol = (symbol or "").strip()
+        clean_type = (type_ or "").strip()
+        # Some QIF exports put the security's full name in the `S` (symbol)
+        # field rather than a ticker. That's not a real ticker, so treat a
+        # symbol that just repeats the name as blank (the price-feed key in a
+        # later round needs a real ticker, and the register's Symbol column
+        # should stay empty rather than echo the name).
+        if clean_symbol.casefold() == clean.casefold():
+            clean_symbol = ""
+        row = self._conn.execute(
+            "SELECT id, symbol, type FROM security WHERE name = ?", (clean,),
+        ).fetchone()
+        if row is not None:
+            if clean_symbol and not (row["symbol"] or "").strip():
+                self._conn.execute(
+                    "UPDATE security SET symbol = ? WHERE id = ?",
+                    (clean_symbol, row["id"]),
+                )
+            if clean_type and not (row["type"] or "").strip():
+                self._conn.execute(
+                    "UPDATE security SET type = ? WHERE id = ?",
+                    (clean_type, row["id"]),
+                )
+            return row["id"]
+        cur = self._conn.execute(
+            "INSERT INTO security (iri, name, symbol, type) VALUES (?, ?, ?, ?)",
+            (new_security_iri(), clean, clean_symbol or None, clean_type or None),
+        )
+        return cur.lastrowid
+
+    def list_securities(self) -> list[SecurityRow]:
+        """Every non-archived security, sorted by name."""
+        cur = self._conn.execute(
+            "SELECT id, iri, name, COALESCE(symbol, '') AS symbol, "
+            "       COALESCE(type, '') AS type "
+            "FROM security WHERE archived_at IS NULL "
+            "ORDER BY name COLLATE NOCASE"
+        )
+        return [
+            SecurityRow(
+                id=r["id"], iri=r["iri"], name=r["name"],
+                symbol=r["symbol"], type=r["type"],
+            )
+            for r in cur
+        ]
+
+    def list_securities_with_symbol(self) -> list[SecurityRow]:
+        """Non-archived securities that carry a ticker symbol — the ones a
+        price provider (Tiingo) can look up. Securities with no symbol are
+        manual-price only (ADR-044)."""
+        return [s for s in self.list_securities() if (s.symbol or "").strip()]
+
+    # ── Security prices (ADR-044) ──
+
+    def upsert_security_price(
+        self, *,
+        security_id: int,
+        price_date: str,
+        price: float,
+        source: str = "manual",
+        currency: Optional[str] = None,
+    ) -> None:
+        """Insert or replace one security's price on a date. Mirrors
+        upsert_fx_rate. Commits immediately."""
+        self._conn.execute(
+            "INSERT INTO security_price "
+            "(security_id, price_date, price, currency, source) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(security_id, price_date) DO UPDATE SET "
+            "  price = excluded.price, currency = excluded.currency, "
+            "  source = excluded.source",
+            (security_id, price_date, float(price), currency, source),
+        )
+        self.commit()
+
+    def latest_prices(self) -> dict[int, PriceRow]:
+        """Most recent price point per security (ADR-044), keyed by
+        security_id. Uses the (security_id, price_date DESC) index."""
+        cur = self._conn.execute(
+            "SELECT sp.security_id, sp.price_date, sp.price, "
+            "       COALESCE(sp.currency, '') AS currency, sp.source "
+            "FROM security_price sp "
+            "JOIN (SELECT security_id, MAX(price_date) AS md "
+            "      FROM security_price GROUP BY security_id) latest "
+            "  ON latest.security_id = sp.security_id "
+            " AND latest.md = sp.price_date"
+        )
+        return {
+            r["security_id"]: PriceRow(
+                security_id=r["security_id"], price_date=r["price_date"],
+                price=r["price"], currency=r["currency"], source=r["source"],
+            )
+            for r in cur
+        }
+
+    def latest_price_for_security(self, security_id: int) -> Optional[PriceRow]:
+        row = self._conn.execute(
+            "SELECT security_id, price_date, price, "
+            "       COALESCE(currency, '') AS currency, source "
+            "FROM security_price WHERE security_id = ? "
+            "ORDER BY price_date DESC LIMIT 1",
+            (security_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return PriceRow(
+            security_id=row["security_id"], price_date=row["price_date"],
+            price=row["price"], currency=row["currency"], source=row["source"],
+        )
+
+    def bulk_upsert_security_prices(
+        self, rows: list[tuple[int, str, float, str]],
+    ) -> None:
+        """Upsert many (security_id, price_date, price, source) rows in one
+        transaction — the historical-backfill path (ADR-045), which would
+        otherwise pay a commit per day."""
+        if not rows:
+            return
+        self._conn.executemany(
+            "INSERT INTO security_price "
+            "(security_id, price_date, price, currency, source) "
+            "VALUES (?, ?, ?, NULL, ?) "
+            "ON CONFLICT(security_id, price_date) DO UPDATE SET "
+            "  price = excluded.price, source = excluded.source",
+            [(sid, d, float(p), src) for sid, d, p, src in rows],
+        )
+        self.commit()
+
+    def price_series(self, security_id: int) -> list[PriceRow]:
+        """Every stored price for a security, ascending by date (ADR-045).
+        Loaded once per security so a valuation pass can do in-memory
+        nearest-prior lookups rather than a query per sample date."""
+        cur = self._conn.execute(
+            "SELECT security_id, price_date, price, "
+            "       COALESCE(currency, '') AS currency, source "
+            "FROM security_price WHERE security_id = ? "
+            "ORDER BY price_date ASC",
+            (security_id,),
+        )
+        return [
+            PriceRow(
+                security_id=r["security_id"], price_date=r["price_date"],
+                price=r["price"], currency=r["currency"], source=r["source"],
+            )
+            for r in cur
+        ]
+
+    def get_security_price_nearest(
+        self, security_id: int, on_date: str,
+    ) -> Optional[PriceRow]:
+        """Nearest price on or before ``on_date`` (mirrors get_fx_rate_nearest's
+        nearest-prior step). Used for point valuations."""
+        row = self._conn.execute(
+            "SELECT security_id, price_date, price, "
+            "       COALESCE(currency, '') AS currency, source "
+            "FROM security_price WHERE security_id = ? AND price_date <= ? "
+            "ORDER BY price_date DESC LIMIT 1",
+            (security_id, on_date),
+        ).fetchone()
+        if row is None:
+            return None
+        return PriceRow(
+            security_id=row["security_id"], price_date=row["price_date"],
+            price=row["price"], currency=row["currency"], source=row["source"],
+        )
+
     def find_payee_id_by_name(self, name: str) -> Optional[int]:
         """Case-sensitive lookup. Returns None if no payee has that name."""
         clean = (name or "").strip()
@@ -1605,17 +1852,32 @@ class Repository:
         memo: str,
         import_hash: Optional[str],
         import_batch_id: Optional[int],
+        action: Optional[str] = None,
+        security_id: Optional[int] = None,
+        quantity: Optional[Decimal] = None,
+        price: Optional[Decimal] = None,
+        commission: Optional[Decimal] = None,
     ) -> int:
+        """Insert a transaction. The investment kwargs (ADR-043) default to
+        None so every existing cash caller is unaffected; when supplied,
+        `amount` is still the SIGNED CASH IMPACT (Buy negative, Sell/Div
+        positive, share-only actions zero) so cash balance = SUM(amount)
+        holds. `quantity`/`price` are stored as REAL; `commission` as pence."""
         iri = new_transaction_iri()
         cur = self._conn.execute(
             "INSERT INTO txn "
             "(iri, account_id, posted_date, amount, payee_id, category_id, "
-            " status, memo, import_hash, import_batch_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " status, memo, import_hash, import_batch_id, "
+            " action, security_id, quantity, price, commission) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 iri, account_id, posted_date, decimal_to_pence(amount),
                 payee_id, category_id, status, memo or None,
                 import_hash, import_batch_id,
+                action or None, security_id,
+                float(quantity) if quantity is not None else None,
+                float(price) if price is not None else None,
+                decimal_to_pence(commission) if commission is not None else None,
             ),
         )
         return cur.lastrowid
@@ -1709,11 +1971,15 @@ class Repository:
             "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
             "       t.status, COALESCE(t.memo, '') AS memo, "
-            "       t.transfer_id "
+            "       t.transfer_id, "
+            "       t.action, t.security_id, t.quantity, t.price, "
+            "       COALESCE(s.name, '') AS security_name, "
+            "       COALESCE(s.symbol, '') AS security_symbol "
             "FROM txn t "
             "JOIN      account a  ON a.id = t.account_id "
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
+            "LEFT JOIN security s ON s.id = t.security_id "
             "WHERE t.account_id = ? "
         )
         params: list = [account_id]
@@ -1735,6 +2001,10 @@ class Repository:
                 status=r["status"], memo=r["memo"],
                 running_balance=running,
                 transfer_id=r["transfer_id"],
+                action=r["action"], security_id=r["security_id"],
+                security_name=r["security_name"],
+                security_symbol=r["security_symbol"],
+                quantity=r["quantity"], price=r["price"],
             ))
         return rows
 
@@ -1755,11 +2025,15 @@ class Repository:
             "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
             "       t.status, COALESCE(t.memo, '') AS memo, "
-            "       t.transfer_id "
+            "       t.transfer_id, "
+            "       t.action, t.security_id, t.quantity, t.price, "
+            "       COALESCE(s.name, '') AS security_name, "
+            "       COALESCE(s.symbol, '') AS security_symbol "
             "FROM txn t "
             "JOIN      account a  ON a.id = t.account_id "
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
+            "LEFT JOIN security s ON s.id = t.security_id "
         )
         params: list = []
         if since is not None:
@@ -1777,6 +2051,10 @@ class Repository:
                 status=r["status"], memo=r["memo"],
                 running_balance=Decimal("0.00"),
                 transfer_id=r["transfer_id"],
+                action=r["action"], security_id=r["security_id"],
+                security_name=r["security_name"],
+                security_symbol=r["security_symbol"],
+                quantity=r["quantity"], price=r["price"],
             )
             for r in cur
         ]
