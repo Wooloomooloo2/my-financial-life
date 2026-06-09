@@ -1594,7 +1594,10 @@ class Repository:
         )
         self.commit()
 
-    def securities_missing_history(self, min_points: int = 2) -> list[SecurityRow]:
+    def securities_missing_history(
+        self, min_points: int = 2, *,
+        cooldown_days: int = 30, as_of: Optional[date] = None,
+    ) -> list[SecurityRow]:
         """Tickered, non-archived securities with fewer than ``min_points``
         *real* stored price rows — i.e. never properly backfilled. Feeds the
         launch-time auto-backfill (ADR-047) so a newly tickered or freshly
@@ -1605,7 +1608,19 @@ class Repository:
         derived prices (the sparse per-trade points seeded for untickered
         holdings) do NOT — so when a previously untickered security is given a
         ticker, its handful of trade-derived prices don't mask it from the
-        backfill, and the real end-of-day series is fetched on the next launch."""
+        backfill, and the real end-of-day series is fetched on the next launch.
+
+        Two request-waste filters (ADR-049):
+        - **Orphan skip** — only securities referenced by at least one ``txn``
+          are returned. Securities imported via a QIF ``!Type:Security`` block
+          for accounts not yet migrated carry no transactions, contribute to no
+          holding/value/return, and must not be fetched.
+        - **Give-up cooldown** — a security whose last Tiingo fetch failed
+          ("not covered") within ``cooldown_days`` is skipped, so an uncovered
+          ticker isn't re-fetched on every launch. After the window it's retried
+          automatically (a ticker Tiingo starts covering heals itself)."""
+        ref = as_of or date.today()
+        cutoff = (ref - timedelta(days=cooldown_days)).isoformat()
         cur = self._conn.execute(
             "SELECT s.id, s.iri, s.name, "
             "       COALESCE(s.symbol, '') AS symbol, "
@@ -1613,11 +1628,14 @@ class Repository:
             "FROM security s "
             "LEFT JOIN security_price sp ON sp.security_id = s.id "
             "WHERE s.archived_at IS NULL AND COALESCE(s.symbol, '') != '' "
+            "  AND EXISTS (SELECT 1 FROM txn t WHERE t.security_id = s.id) "
+            "  AND (s.price_fetch_failed_at IS NULL "
+            "       OR s.price_fetch_failed_at < ?) "
             "GROUP BY s.id "
             "HAVING SUM(CASE WHEN sp.source IN ('manual', 'tiingo') "
             "                THEN 1 ELSE 0 END) < ? "
             "ORDER BY s.name COLLATE NOCASE",
-            (min_points,),
+            (cutoff, min_points),
         )
         return [
             SecurityRow(
@@ -1626,6 +1644,68 @@ class Repository:
             )
             for r in cur
         ]
+
+    def securities_to_price(
+        self, *, cooldown_days: int = 30, as_of: Optional[date] = None,
+    ) -> list[SecurityRow]:
+        """Tickered, non-archived securities worth fetching prices for (ADR-049)
+        — the latest-refresh and full-backfill input. Same two waste filters as
+        ``securities_missing_history``: must have at least one ``txn`` (skip
+        orphan securities from un-migrated accounts) and must not be inside the
+        give-up cooldown after an uncovered-ticker failure. Unlike
+        ``securities_missing_history`` it does NOT care how many prices are
+        already stored — the latest-close sweep refreshes every held security
+        once a day.
+
+        ``list_securities_with_symbol`` keeps its broader "every tickered
+        security" meaning for non-pricing callers; this is the pricing-only
+        view."""
+        ref = as_of or date.today()
+        cutoff = (ref - timedelta(days=cooldown_days)).isoformat()
+        cur = self._conn.execute(
+            "SELECT s.id, s.iri, s.name, "
+            "       COALESCE(s.symbol, '') AS symbol, "
+            "       COALESCE(s.type, '') AS type "
+            "FROM security s "
+            "WHERE s.archived_at IS NULL AND COALESCE(s.symbol, '') != '' "
+            "  AND EXISTS (SELECT 1 FROM txn t WHERE t.security_id = s.id) "
+            "  AND (s.price_fetch_failed_at IS NULL "
+            "       OR s.price_fetch_failed_at < ?) "
+            "ORDER BY s.name COLLATE NOCASE",
+            (cutoff,),
+        )
+        return [
+            SecurityRow(
+                id=r["id"], iri=r["iri"], name=r["name"],
+                symbol=r["symbol"], type=r["type"],
+            )
+            for r in cur
+        ]
+
+    def mark_security_price_unavailable(
+        self, security_id: int, *, when: Optional[str] = None,
+    ) -> None:
+        """Record that Tiingo couldn't serve this security's history (ADR-049) —
+        an HTTP 404 / unknown ticker or a successful-but-empty series. Stamps
+        ``security.price_fetch_failed_at`` so the launch fetch paths skip it for
+        the cooldown window. ``when`` is an ISO datetime (the fetch path passes
+        its own UTC 'now'); defaults to today's date. Commits."""
+        ts = when or date.today().isoformat()
+        self._conn.execute(
+            "UPDATE security SET price_fetch_failed_at = ? WHERE id = ?",
+            (ts, security_id),
+        )
+        self.commit()
+
+    def clear_security_price_unavailable(self, security_id: int) -> None:
+        """Clear the give-up flag after a successful fetch (ADR-049). No-op when
+        already clear (avoids a needless write). Commits."""
+        self._conn.execute(
+            "UPDATE security SET price_fetch_failed_at = NULL "
+            "WHERE id = ? AND price_fetch_failed_at IS NOT NULL",
+            (security_id,),
+        )
+        self.commit()
 
     def seed_prices_from_transactions(
         self, *, security_ids: Optional[list[int]] = None,

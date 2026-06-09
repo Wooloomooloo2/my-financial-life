@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable, Optional
 
 if TYPE_CHECKING:
@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 # 24h matches "we only need today's close" personal-finance scope.
 LAUNCH_REFRESH_INTERVAL_HOURS = 24
 
+# Request-waste controls (ADR-049).
+# How long to stop fetching after a 429, when Tiingo gives no Retry-After. One
+# hour clears the 50/hour cap and still recovers same-day for the 1000/day cap.
+RATE_LIMIT_BACKOFF_SECONDS = 3600
+# Don't re-fetch a security whose ticker Tiingo couldn't serve for this long; it
+# is then retried automatically (a ticker that gains coverage heals itself).
+PRICE_UNAVAILABLE_COOLDOWN_DAYS = 30
+
 _BASE_URL = "https://api.tiingo.com/tiingo/daily"
 
 
@@ -44,6 +52,23 @@ class PriceFetchError(RuntimeError):
     """Raised when the provider call fails or returns an error payload.
     Distinct from ValueError so the Securities dialog can show "couldn't reach
     Tiingo" without conflating it with user-typed bad input."""
+
+
+class RateLimitedError(PriceFetchError):
+    """Tiingo returned HTTP 429 (rate limit hit, ADR-049). ``retry_after_seconds``
+    is parsed from a ``Retry-After`` header when present, else None. Callers
+    persist a back-off window and stop the current run — every further call this
+    run would be a guaranteed 429."""
+
+    def __init__(self, message: str, retry_after_seconds: Optional[int] = None):
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class SymbolNotFoundError(PriceFetchError):
+    """Tiingo doesn't cover this ticker (HTTP 404 / unknown symbol, ADR-049).
+    Distinct from a transient network error so the backfill loop marks the
+    security 'give up for the cooldown' rather than retrying it next launch."""
 
 
 @dataclass(frozen=True)
@@ -90,6 +115,11 @@ class TiingoClient:
                     out[sym] = (price, on_date)
                 else:
                     errors.append(f"{sym}: no price returned")
+            except RateLimitedError:
+                # A 429 is fatal to the whole batch — every remaining symbol
+                # would 429 too. Abort and let the caller record a back-off
+                # (ADR-049) rather than burning the rest of the hour's quota.
+                raise
             except PriceFetchError as e:
                 errors.append(str(e))
         return out, errors
@@ -138,6 +168,13 @@ class TiingoClient:
                 msg = body.get("detail") or body.get("message") or str(e)
             except Exception:
                 msg = str(e)
+            if e.code == 429:
+                raise RateLimitedError(
+                    f"Tiingo rate limit hit: {msg}",
+                    _parse_retry_after(e.headers.get("Retry-After")),
+                ) from e
+            if e.code == 404:
+                raise SymbolNotFoundError(f"{sym}: {msg}") from e
             raise PriceFetchError(f"{sym}: {msg}") from e
         except urllib.error.URLError as e:
             raise PriceFetchError(
@@ -173,12 +210,75 @@ class TiingoClient:
                 msg = body.get("detail") or body.get("message") or str(e)
             except Exception:
                 msg = str(e)
+            if e.code == 429:
+                raise RateLimitedError(
+                    f"Tiingo rate limit hit: {msg}",
+                    _parse_retry_after(e.headers.get("Retry-After")),
+                ) from e
+            if e.code == 404:
+                raise SymbolNotFoundError(f"{symbol}: {msg}") from e
             raise PriceFetchError(f"{symbol}: {msg}") from e
         except urllib.error.URLError as e:
             raise PriceFetchError(
                 f"Could not reach Tiingo for {symbol}: {e.reason}"
             ) from e
         return payload if isinstance(payload, list) else []
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[int]:
+    """Tiingo's ``Retry-After`` header in seconds, when it sends one. Only the
+    integer-seconds form is honoured (the HTTP-date form is ignored → default
+    back-off); a bad/absent value returns None so the caller uses its default."""
+    if not value:
+        return None
+    try:
+        secs = int(value.strip())
+    except (TypeError, ValueError):
+        return None
+    return secs if secs > 0 else None
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _rate_limited_until(repo: "Repository") -> Optional[datetime]:
+    """The active 429 back-off expiry (ADR-049), or None if not limited / expired.
+    Stored in ``setting['tiingo_rate_limited_until']`` as an ISO datetime."""
+    raw = repo.get_setting("tiingo_rate_limited_until") or ""
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts if _now_utc() < ts else None
+
+
+def _record_rate_limit(
+    repo: "Repository", retry_after_seconds: Optional[int] = None,
+) -> str:
+    """Persist a 429 back-off window (ADR-049) and return a human message naming
+    the local clear time. Uses ``Retry-After`` when Tiingo gave one, else the
+    1-hour default."""
+    secs = retry_after_seconds or RATE_LIMIT_BACKOFF_SECONDS
+    until = _now_utc() + timedelta(seconds=secs)
+    repo.set_setting(
+        "tiingo_rate_limited_until", until.isoformat(timespec="seconds"),
+    )
+    return (
+        "Tiingo rate limit hit; pausing price fetches until "
+        f"{until.astimezone().strftime('%H:%M')} local."
+    )
+
+
+def _backoff_message(until: datetime) -> str:
+    return (
+        "Skipped: Tiingo rate-limited until "
+        f"{until.astimezone().strftime('%H:%M')} local."
+    )
 
 
 def _hours_since(iso_ts: str) -> Optional[float]:
@@ -212,13 +312,23 @@ def refresh_latest_prices_into(
             fetched_at=None, new_prices_count=0,
             errors=["No Tiingo API key set."],
         )
+    until = _rate_limited_until(repo)
+    if until is not None:
+        return RefreshResult(
+            fetched_at=None, new_prices_count=0, errors=[_backoff_message(until)],
+        )
     last = repo.get_setting("tiingo_last_refresh_at") or ""
     if not force:
         hrs = _hours_since(last)
         if hrs is not None and hrs < LAUNCH_REFRESH_INTERVAL_HOURS:
             return RefreshResult(fetched_at=last, new_prices_count=0, errors=[])
 
-    securities = repo.list_securities_with_symbol()
+    # Only securities actually held (≥1 txn) and not inside the give-up cooldown
+    # — skip orphan securities from un-migrated accounts + uncovered tickers
+    # (ADR-049).
+    securities = repo.securities_to_price(
+        cooldown_days=PRICE_UNAVAILABLE_COOLDOWN_DAYS,
+    )
     if not securities:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         repo.set_setting("tiingo_last_refresh_at", now)
@@ -233,6 +343,11 @@ def refresh_latest_prices_into(
     client = TiingoClient(api_key)
     try:
         prices, errors = client.fetch_latest(by_symbol.keys())
+    except RateLimitedError as e:
+        return RefreshResult(
+            fetched_at=last or None, new_prices_count=0,
+            errors=[_record_rate_limit(repo, e.retry_after_seconds)],
+        )
     except PriceFetchError as e:
         return RefreshResult(
             fetched_at=last or None, new_prices_count=0, errors=[str(e)],
@@ -277,7 +392,16 @@ def backfill_missing_history_into(
             fetched_at=None, new_prices_count=0,
             errors=["No Tiingo API key set."],
         )
-    securities = repo.securities_missing_history(min_points=min_points)
+    until = _rate_limited_until(repo)
+    if until is not None:
+        return RefreshResult(
+            fetched_at=None, new_prices_count=0, errors=[_backoff_message(until)],
+        )
+    # securities_missing_history already excludes orphan (no-txn) securities and
+    # ones inside the give-up cooldown (ADR-049).
+    securities = repo.securities_missing_history(
+        min_points=min_points, cooldown_days=PRICE_UNAVAILABLE_COOLDOWN_DAYS,
+    )
     if not securities:
         return RefreshResult(
             fetched_at=repo.get_setting("tiingo_last_refresh_at") or None,
@@ -296,8 +420,25 @@ def backfill_missing_history_into(
             ]
             if rows:
                 repo.bulk_upsert_security_prices(rows)
+                repo.clear_security_price_unavailable(sec.id)
                 count += len(rows)
-        except PriceFetchError as e:
+            else:
+                # Successful call, empty series → Tiingo doesn't cover this
+                # ticker. Give up for the cooldown so it isn't re-fetched every
+                # launch (ADR-049).
+                repo.mark_security_price_unavailable(
+                    sec.id, when=_now_utc().isoformat(timespec="seconds"),
+                )
+                errors.append(f"{sec.symbol}: no price history available")
+        except RateLimitedError as e:
+            errors.append(_record_rate_limit(repo, e.retry_after_seconds))
+            break
+        except SymbolNotFoundError as e:
+            repo.mark_security_price_unavailable(
+                sec.id, when=_now_utc().isoformat(timespec="seconds"),
+            )
+            errors.append(str(e))
+        except PriceFetchError as e:  # transient (network) — retry next launch
             errors.append(str(e))
         except Exception as e:  # noqa: BLE001 — collect, keep going
             errors.append(f"{sec.symbol}: {e}")
@@ -346,6 +487,11 @@ def backfill_security_history_into(
     sym = (symbol or "").strip()
     if not sym:
         raise PriceFetchError("This security has no ticker symbol to fetch.")
+    until = _rate_limited_until(repo)
+    if until is not None:
+        return RefreshResult(
+            fetched_at=None, new_prices_count=0, errors=[_backoff_message(until)],
+        )
     client = TiingoClient(api_key)
     errors: list[str] = []
     count = 0
@@ -354,7 +500,20 @@ def backfill_security_history_into(
         rows = [(security_id, on_date, price, "tiingo") for on_date, price in series]
         if rows:
             repo.bulk_upsert_security_prices(rows)
+            repo.clear_security_price_unavailable(security_id)
             count = len(rows)
+        else:
+            repo.mark_security_price_unavailable(
+                security_id, when=_now_utc().isoformat(timespec="seconds"),
+            )
+            errors.append(f"{sym}: no price history available")
+    except RateLimitedError as e:
+        errors.append(_record_rate_limit(repo, e.retry_after_seconds))
+    except SymbolNotFoundError as e:
+        repo.mark_security_price_unavailable(
+            security_id, when=_now_utc().isoformat(timespec="seconds"),
+        )
+        errors.append(str(e))
     except PriceFetchError as e:
         errors.append(str(e))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -376,7 +535,16 @@ def backfill_historical_into(
         raise PriceFetchError(
             "No Tiingo API key set. Add one in Manage ▸ Securities first."
         )
-    securities = repo.list_securities_with_symbol()
+    until = _rate_limited_until(repo)
+    if until is not None:
+        return RefreshResult(
+            fetched_at=None, new_prices_count=0, errors=[_backoff_message(until)],
+        )
+    # Only held (≥1 txn), non-given-up tickers (ADR-049) — skip orphan
+    # securities from un-migrated accounts.
+    securities = repo.securities_to_price(
+        cooldown_days=PRICE_UNAVAILABLE_COOLDOWN_DAYS,
+    )
     if not securities:
         return RefreshResult(fetched_at=None, new_prices_count=0, errors=[])
 
@@ -392,8 +560,22 @@ def backfill_historical_into(
             ]
             if rows:
                 repo.bulk_upsert_security_prices(rows)
+                repo.clear_security_price_unavailable(sec.id)
                 count += len(rows)
-        except PriceFetchError as e:
+            else:
+                repo.mark_security_price_unavailable(
+                    sec.id, when=_now_utc().isoformat(timespec="seconds"),
+                )
+                errors.append(f"{sec.symbol}: no price history available")
+        except RateLimitedError as e:
+            errors.append(_record_rate_limit(repo, e.retry_after_seconds))
+            break
+        except SymbolNotFoundError as e:
+            repo.mark_security_price_unavailable(
+                sec.id, when=_now_utc().isoformat(timespec="seconds"),
+            )
+            errors.append(str(e))
+        except PriceFetchError as e:  # transient (network) — retry next launch
             errors.append(str(e))
         except Exception as e:  # noqa: BLE001 — collect, keep going
             errors.append(f"{sec.symbol}: {e}")
