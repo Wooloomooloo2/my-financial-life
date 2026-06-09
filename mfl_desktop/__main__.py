@@ -18,7 +18,10 @@ from PySide6.QtCore import QThreadPool, QRunnable
 
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.fx import refresh_latest_into
-from mfl_desktop.prices import refresh_latest_prices_into
+from mfl_desktop.prices import (
+    backfill_missing_history_into,
+    refresh_latest_prices_into,
+)
 from mfl_desktop.ui.register_window import RegisterWindow
 from mfl_desktop.ui.theme import apply_theme
 
@@ -48,9 +51,19 @@ class _FxRefreshRunnable(QRunnable):
 
 
 class _PriceRefreshRunnable(QRunnable):
-    """Background launch refresh of security prices (ADR-044). Mirrors the FX
-    runnable: own Repository connection, once-per-day at most, silent on
-    failure (missing Tiingo key / flaky network never blocks launch)."""
+    """Background launch refresh of security prices (ADR-044/047). Mirrors the
+    FX runnable: own Repository connection, silent on failure (missing Tiingo
+    key / flaky network never blocks launch).
+
+    Three steps, cheapest first (ADR-047):
+      1. seed_prices_from_transactions — instant, no network, no key needed;
+         prices the untickered majority from their own trades (and catches up
+         the whole history on first launch).
+      2. backfill_missing_history_into — auto-fetch full history for any
+         tickered security that doesn't have it yet (newly tickered/imported);
+         self-limiting, so it's not a per-launch re-fetch of everything.
+      3. refresh_latest_prices_into — today's close (own 24h throttle).
+    """
 
     def __init__(self, db_path: Path) -> None:
         super().__init__()
@@ -60,6 +73,8 @@ class _PriceRefreshRunnable(QRunnable):
         try:
             bg = Repository(self._db_path)
             try:
+                bg.seed_prices_from_transactions()
+                backfill_missing_history_into(bg)
                 refresh_latest_prices_into(bg)
             finally:
                 bg.close()

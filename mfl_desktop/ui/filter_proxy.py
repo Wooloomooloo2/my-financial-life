@@ -1,9 +1,10 @@
 """Filter / sort proxy for the register.
 
-Filters on free-text search (payee, memo, amount, date), status, and
-category id. Sorts on the underlying value of each column so amounts sort
-numerically and dates chronologically — the source model's formatted
-strings are not what gets compared.
+Filters on free-text search (payee, memo, amount, date, and — for investment
+rows — security symbol + name), status, and category id. Sorts on the
+underlying value of each column so amounts sort numerically and dates
+chronologically — the source model's formatted strings are not what gets
+compared.
 
 Amount search is comma-insensitive: typing "3250" or "3,250" both match a
 3,250.00 transaction. Both signed and absolute forms of the amount are
@@ -55,6 +56,8 @@ class TransactionFilterProxy(QSortFilterProxyModel):
                 row.payee_name,
                 row.memo,
                 row.posted_date,
+                row.security_symbol,   # investment rows: search by ticker…
+                row.security_name,     # …and by security name
                 f"{row.amount:.2f}",
                 f"{abs(row.amount):.2f}",
             ])).lower()

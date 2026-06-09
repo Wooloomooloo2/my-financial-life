@@ -48,6 +48,7 @@ class BulkEditDialog(QDialog):
         categories: list[CategoryChoice],
         selection_count: int,
         payee_names: Optional[list[str]] = None,
+        security_context: Optional[tuple[int, str, str]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -55,6 +56,10 @@ class BulkEditDialog(QDialog):
         self.setModal(True)
         self._categories = categories
         self._values: Optional[dict] = None
+        # ADR-048: when every selected row is the same investment security,
+        # offer a Symbol field that re-tickers that security. (id, name,
+        # current_symbol); None for cash selections or a mixed-security set.
+        self._security_context = security_context
 
         # ── field widgets ──
 
@@ -103,6 +108,20 @@ class BulkEditDialog(QDialog):
         self._memo_edit.setPlaceholderText("(leave empty to clear)")
         self._memo_check.toggled.connect(self._memo_edit.setEnabled)
 
+        # Investment-only Symbol row (ADR-048). Edits the security master, not
+        # the transactions — so it's only offered when the whole selection is
+        # one security.
+        self._symbol_check: Optional[QCheckBox] = None
+        self._symbol_edit: Optional[QLineEdit] = None
+        if self._security_context is not None:
+            _sid, sec_name, current_symbol = self._security_context
+            self._symbol_check = QCheckBox("Symbol:")
+            self._symbol_edit = QLineEdit()
+            self._symbol_edit.setEnabled(False)
+            self._symbol_edit.setText(current_symbol or "")
+            self._symbol_edit.setPlaceholderText("ticker, e.g. TSLA (blank = clear)")
+            self._symbol_check.toggled.connect(self._symbol_edit.setEnabled)
+
         # ── layout ──
 
         grid = QGridLayout()
@@ -114,12 +133,21 @@ class BulkEditDialog(QDialog):
         grid.addWidget(self._status_combo,   2, 1)
         grid.addWidget(self._memo_check,     3, 0)
         grid.addWidget(self._memo_edit,      3, 1)
+        if self._symbol_check is not None:
+            grid.addWidget(self._symbol_check, 4, 0)
+            grid.addWidget(self._symbol_edit,  4, 1)
         grid.setColumnStretch(1, 1)
 
-        hint = QLabel(
+        hint_text = (
             "Tick the fields you want to change. Empty Payee or Memo clears "
             "that field on every selected transaction."
         )
+        if self._security_context is not None:
+            hint_text += (
+                f"  Symbol sets the ticker on “{self._security_context[1]}” "
+                "itself — it applies to every transaction of that security."
+            )
+        hint = QLabel(hint_text)
         hint.setWordWrap(True)
 
         buttons = QDialogButtonBox(
@@ -150,6 +178,7 @@ class BulkEditDialog(QDialog):
             self._category_check.isChecked(),
             self._status_check.isChecked(),
             self._memo_check.isChecked(),
+            self._symbol_check is not None and self._symbol_check.isChecked(),
         ])
         if not any_checked:
             QMessageBox.warning(
@@ -175,6 +204,10 @@ class BulkEditDialog(QDialog):
             result["status"] = self._status_combo.currentText()
         if self._memo_check.isChecked():
             result["memo"] = self._memo_edit.text()
+        if self._symbol_check is not None and self._symbol_check.isChecked():
+            # Not a txn field — the handler pops this and routes it to
+            # Repository.update_security for the selection's security.
+            result["symbol"] = self._symbol_edit.text().strip()
         self._values = result
         self.accept()
 

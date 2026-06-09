@@ -72,7 +72,7 @@ _LOSS = "#dc2626"
 
 _TABLE_HEADERS = (
     "Symbol", "Security", "Cost", "Market value",
-    "Unrealized", "Realized", "Dividends", "Total return",
+    "Unrealized", "Realized", "Dividends", "Total return", "Return %",
 )
 
 
@@ -252,6 +252,8 @@ class InvestmentReturnsWindow(QMainWindow):
         self._total_value.setStyleSheet(
             "color: #0f172a; font-size: 22px; font-weight: bold;"
         )
+        self._roi_value = QLabel()
+        self._roi_value.setStyleSheet("color: #475569;")
         self._note_value = QLabel()
         self._note_value.setWordWrap(True)
         self._note_value.setStyleSheet("color: #b45309; font-style: italic;")
@@ -275,6 +277,7 @@ class InvestmentReturnsWindow(QMainWindow):
         layout.addSpacing(6)
         layout.addWidget(self._mini_section_title("Total return"))
         layout.addWidget(self._total_value)
+        layout.addWidget(self._roi_value)
         layout.addSpacing(6)
         layout.addWidget(self._note_value)
         layout.addStretch(1)
@@ -310,6 +313,16 @@ class InvestmentReturnsWindow(QMainWindow):
         p = numer / denom * 100
         sign = "+" if p >= 0 else "-"
         return f" ({sign}{abs(p):.1f}%)"
+
+    @staticmethod
+    def _roi(numer: float, denom: float) -> str:
+        """Return-on-cost as a standalone percent (no surrounding parens).
+        Blank when there's no cost deployed (denom 0)."""
+        if not denom:
+            return "—"
+        p = numer / denom * 100
+        sign = "+" if p >= 0 else "-"
+        return f"{sign}{abs(p):.1f}%"
 
     # ── period resolution + conversion ──
 
@@ -433,12 +446,14 @@ class InvestmentReturnsWindow(QMainWindow):
             for s in res.by_security:
                 m = merged.setdefault(s.security_id, {
                     "symbol": s.symbol, "name": s.name, "shares": 0.0,
-                    "cost": Decimal("0"), "mv": Decimal("0"),
+                    "cost": Decimal("0"), "cost_sold": Decimal("0"),
+                    "mv": Decimal("0"),
                     "unreal": Decimal("0"), "realized": Decimal("0"),
                     "div": Decimal("0"), "priced": False,
                 })
                 m["shares"] += s.shares
                 m["cost"] += self._conv(s.cost_basis, acct.currency, end_iso)
+                m["cost_sold"] += self._conv(s.cost_basis_sold, acct.currency, end_iso)
                 m["realized"] += self._conv(s.realized_window, acct.currency, end_iso)
                 m["div"] += self._conv(s.dividends_window, acct.currency, end_iso)
                 if s.market_value is not None:
@@ -451,12 +466,17 @@ class InvestmentReturnsWindow(QMainWindow):
         for m in rows:
             unreal = m["unreal"] if m["priced"] else Decimal("0")
             m["total"] = unreal + m["realized"] + m["div"]
+            # Cost deployed = cost of shares still held + cost of shares sold in
+            # the window — the capital that produced this row's return (ADR-046
+            # amendment), so a fully-sold position shows its real cost, not £0.
+            m["cost_total"] = m["cost"] + m["cost_sold"]
         rows.sort(key=lambda m: (
             0 if m["shares"] > 1e-9 else 1, -float(m["total"]), m["name"].lower(),
         ))
 
         # Portfolio totals from merged rows (consistent with the table).
         tot_cost = sum((m["cost"] for m in rows if m["shares"] > 1e-9), Decimal("0"))
+        tot_cost_deployed = sum((m["cost_total"] for m in rows), Decimal("0"))
         tot_mv = sum((m["mv"] for m in rows if m["priced"]), Decimal("0"))
         tot_unreal = sum((m["unreal"] for m in rows if m["priced"]), Decimal("0"))
         tot_realized = sum((m["realized"] for m in rows), Decimal("0"))
@@ -473,9 +493,9 @@ class InvestmentReturnsWindow(QMainWindow):
         self._update_summary(
             d_from=d_from, d_to=d_to, accounts=accounts,
             security_ids=security_ids,
-            cost=tot_cost, mv=tot_mv, unreal=tot_unreal,
-            realized=tot_realized, div=tot_div, total=tot_total,
-            unpriced=unpriced,
+            cost=tot_cost, cost_deployed=tot_cost_deployed, mv=tot_mv,
+            unreal=tot_unreal, realized=tot_realized, div=tot_div,
+            total=tot_total, unpriced=unpriced,
         )
 
     def _populate_table(self, rows: list[dict]) -> None:
@@ -486,7 +506,7 @@ class InvestmentReturnsWindow(QMainWindow):
             cells = [
                 (m["symbol"], Qt.AlignLeft, None),
                 (m["name"], Qt.AlignLeft, None),
-                (self._money(m["cost"]), Qt.AlignRight, None),
+                (self._money(m["cost_total"]), Qt.AlignRight, None),
                 (self._money(m["mv"]) if priced else "—", Qt.AlignRight, None),
                 (
                     self._signed(unreal) + self._pct(float(unreal), float(m["cost"]))
@@ -496,8 +516,9 @@ class InvestmentReturnsWindow(QMainWindow):
                 ),
                 (self._signed(m["realized"]), Qt.AlignRight, self._colour(m["realized"])),
                 (self._money(m["div"]), Qt.AlignRight, None),
+                (self._signed(m["total"]), Qt.AlignRight, self._colour(m["total"])),
                 (
-                    self._signed(m["total"]) + self._pct(float(m["total"]), float(m["cost"])),
+                    self._roi(float(m["total"]), float(m["cost_total"])),
                     Qt.AlignRight,
                     self._colour(m["total"]),
                 ),
@@ -522,7 +543,7 @@ class InvestmentReturnsWindow(QMainWindow):
 
     def _update_summary(
         self, *, d_from, d_to, accounts, security_ids,
-        cost, mv, unreal, realized, div, total, unpriced,
+        cost, cost_deployed, mv, unreal, realized, div, total, unpriced,
     ) -> None:
         key = self._current_filters.period_key
         period_label = _PERIOD_LABELS.get(key, key)
@@ -543,7 +564,14 @@ class InvestmentReturnsWindow(QMainWindow):
             x for x in (acct_line, sec_line, ccy_line) if x
         ))
 
-        self._cost_value.setText(f"Cost basis: {self._money(cost)}")
+        # "Cost" = capital deployed (held + sold in the window); the parenthetical
+        # held figure clarifies when a position has been (partly) sold.
+        if cost_deployed != cost:
+            self._cost_value.setText(
+                f"Cost (held + sold): {self._money(cost_deployed)}"
+            )
+        else:
+            self._cost_value.setText(f"Cost basis: {self._money(cost_deployed)}")
         self._market_value.setText(f"Market value: {self._money(mv)}")
         self._unrealized_value.setText(
             f"Unrealized: {self._signed(unreal)}{self._pct(float(unreal), float(cost))}"
@@ -551,12 +579,13 @@ class InvestmentReturnsWindow(QMainWindow):
         self._unrealized_value.setStyleSheet(f"color: {self._colour(unreal) or '#0f172a'};")
         self._realized_value.setText(f"Realized (in period): {self._signed(realized)}")
         self._dividends_value.setText(f"Dividends (in period): {self._money(div)}")
-        self._total_value.setText(
-            f"{self._signed(total)}{self._pct(float(total), float(cost))}"
-        )
+        self._total_value.setText(self._signed(total))
         self._total_value.setStyleSheet(
             f"color: {self._colour(total) or '#0f172a'}; "
             "font-size: 22px; font-weight: bold;"
+        )
+        self._roi_value.setText(
+            f"Return on cost: {self._roi(float(total), float(cost_deployed))}"
         )
 
         notes: list[str] = []
@@ -577,7 +606,7 @@ class InvestmentReturnsWindow(QMainWindow):
         self._period_value.setText(message)
         for lab in (self._cost_value, self._market_value, self._unrealized_value,
                     self._realized_value, self._dividends_value, self._filters_value,
-                    self._note_value):
+                    self._roi_value, self._note_value):
             lab.setText("")
         self._total_value.setText("—")
 

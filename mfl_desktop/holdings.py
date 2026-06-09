@@ -390,7 +390,8 @@ class SecurityReturn:
     symbol: str
     name: str
     shares: float
-    cost_basis: Decimal
+    cost_basis: Decimal                  # cost of shares STILL HELD at window end
+    cost_basis_sold: Decimal             # cost of shares SOLD within the window
     market_value: Optional[Decimal]
     unrealized: Optional[Decimal]
     realized_window: Decimal
@@ -408,7 +409,8 @@ class ReturnsResult:
     the value line never collapses (flagged via ``fully_priced``)."""
     points: list[ReturnPoint] = field(default_factory=list)
     by_security: list[SecurityReturn] = field(default_factory=list)
-    cost_basis: Decimal = Decimal("0.00")
+    cost_basis: Decimal = Decimal("0.00")           # held at window end
+    cost_basis_sold: Decimal = Decimal("0.00")      # sold within the window
     market_value: Decimal = Decimal("0.00")
     unrealized: Decimal = Decimal("0.00")
     realized_window: Decimal = Decimal("0.00")
@@ -466,6 +468,7 @@ def compute_returns(
     lots: dict[int, deque[_Lot]] = {}
     realized_win: dict[int, float] = {}
     dividends_win: dict[int, float] = {}
+    cost_sold_win: dict[int, float] = {}   # cost basis removed by in-window sells
     meta: dict[int, tuple[str, str]] = {}
 
     ordered = sorted(txns, key=lambda r: (r.posted_date, r.id))
@@ -485,6 +488,7 @@ def compute_returns(
             lots.setdefault(sid, deque())
             realized_win.setdefault(sid, 0.0)
             dividends_win.setdefault(sid, 0.0)
+            cost_sold_win.setdefault(sid, 0.0)
             in_window = t.posted_date >= window_start
             qty = float(t.quantity) if t.quantity is not None else 0.0
 
@@ -515,6 +519,7 @@ def compute_returns(
                             queue.popleft()
                     if in_window:
                         realized_win[sid] += proceeds - cost_removed
+                        cost_sold_win[sid] += cost_removed
             elif is_income(t.action):
                 if in_window:
                     dividends_win[sid] += float(t.amount)
@@ -549,6 +554,7 @@ def compute_returns(
     last_sample = samples[-1]
     by_security: list[SecurityReturn] = []
     tot_cost = Decimal("0.00")
+    tot_cost_sold = Decimal("0.00")
     tot_mv = Decimal("0.00")
     tot_unreal = Decimal("0.00")
     tot_realized = Decimal("0.00")
@@ -562,9 +568,10 @@ def compute_returns(
         shares = sum(lot.qty for lot in queue)
         realized_w = _to_money(realized_win.get(sid, 0.0))
         dividends_w = _to_money(dividends_win.get(sid, 0.0))
+        cost_sold_w = _to_money(cost_sold_win.get(sid, 0.0))
         held = shares > _EPS
 
-        if not held and realized_w == 0 and dividends_w == 0:
+        if not held and realized_w == 0 and dividends_w == 0 and cost_sold_w == 0:
             # Fully exited before the window with no in-window flows — skip.
             continue
 
@@ -592,9 +599,11 @@ def compute_returns(
         total_return = unreal_for_total + realized_w + dividends_w
         tot_realized += realized_w
         tot_div += dividends_w
+        tot_cost_sold += cost_sold_w
         by_security.append(SecurityReturn(
             security_id=sid, symbol=symbol, name=name, shares=shares,
-            cost_basis=cost_basis, market_value=market_value,
+            cost_basis=cost_basis, cost_basis_sold=cost_sold_w,
+            market_value=market_value,
             unrealized=unrealized, realized_window=realized_w,
             dividends_window=dividends_w, total_return=total_return,
             priced=priced,
@@ -610,6 +619,7 @@ def compute_returns(
         points=points,
         by_security=by_security,
         cost_basis=tot_cost,
+        cost_basis_sold=tot_cost_sold,
         market_value=tot_mv,
         unrealized=tot_unreal,
         realized_window=tot_realized,

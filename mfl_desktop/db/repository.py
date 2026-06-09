@@ -1404,7 +1404,62 @@ class Repository:
             for r in cur
         ]
 
+    def update_security(
+        self, security_id: int, *,
+        name: Optional[str] = None,
+        symbol: Optional[str] = None,
+        type_: Optional[str] = None,
+    ) -> None:
+        """Edit a security's master fields (ADR-047, Stock Record screen).
+
+        ``None`` means 'leave unchanged'; pass an empty string for ``symbol`` or
+        ``type_`` to clear it to NULL. Setting a symbol on a previously
+        untickered security re-enables Tiingo for it (and surfaces it to the
+        launch-time auto-backfill). Raises ``ValueError`` on a blank name or a
+        name that collides with another security (``name`` is the unique QIF
+        reference). Commits.
+        """
+        sets: list[str] = []
+        params: list = []
+        if name is not None:
+            clean = name.strip()
+            if not clean:
+                raise ValueError("Security name can't be blank.")
+            dup = self._conn.execute(
+                "SELECT id FROM security WHERE name = ? AND id != ?",
+                (clean, security_id),
+            ).fetchone()
+            if dup is not None:
+                raise ValueError(
+                    f"Another security is already named {clean!r}."
+                )
+            sets.append("name = ?")
+            params.append(clean)
+        if symbol is not None:
+            sets.append("symbol = ?")
+            params.append(symbol.strip() or None)
+        if type_ is not None:
+            sets.append("type = ?")
+            params.append(type_.strip() or None)
+        if not sets:
+            return
+        params.append(security_id)
+        self._conn.execute(
+            f"UPDATE security SET {', '.join(sets)} WHERE id = ?", params,
+        )
+        self.commit()
+
     # ── Security prices (ADR-044) ──
+
+    # Price-source precedence (ADR-047): manual > tiingo > transaction. The
+    # guard is the `WHERE` appended to an upsert's DO UPDATE so a write of a
+    # given source never overwrites a price from a higher-priority source on the
+    # same date. A manual entry (explicit user action) overwrites anything.
+    _PRICE_OVERWRITE_GUARD = {
+        "manual": "",
+        "tiingo": " WHERE security_price.source != 'manual'",
+        "transaction": " WHERE security_price.source NOT IN ('manual', 'tiingo')",
+    }
 
     def upsert_security_price(
         self, *,
@@ -1415,14 +1470,20 @@ class Repository:
         currency: Optional[str] = None,
     ) -> None:
         """Insert or replace one security's price on a date. Mirrors
-        upsert_fx_rate. Commits immediately."""
+        upsert_fx_rate. Commits immediately.
+
+        Honours the source-precedence rule (ADR-047): a ``tiingo`` write won't
+        clobber a ``manual`` price, and a ``transaction``-derived write won't
+        clobber a ``manual`` or ``tiingo`` price, on the same date. ``manual``
+        (the Stock Record / Securities-dialog entry path) always wins."""
+        guard = self._PRICE_OVERWRITE_GUARD.get(source, "")
         self._conn.execute(
             "INSERT INTO security_price "
             "(security_id, price_date, price, currency, source) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(security_id, price_date) DO UPDATE SET "
             "  price = excluded.price, currency = excluded.currency, "
-            "  source = excluded.source",
+            "  source = excluded.source" + guard,
             (security_id, price_date, float(price), currency, source),
         )
         self.commit()
@@ -1467,7 +1528,12 @@ class Repository:
     ) -> None:
         """Upsert many (security_id, price_date, price, source) rows in one
         transaction — the historical-backfill path (ADR-045), which would
-        otherwise pay a commit per day."""
+        otherwise pay a commit per day.
+
+        This is the Tiingo backfill path; per the source-precedence rule
+        (ADR-047) the conflict clause leaves a ``manual`` price on a given date
+        untouched (a user-typed price out-ranks a provider fetch), but does
+        overwrite ``tiingo`` and ``transaction`` rows."""
         if not rows:
             return
         self._conn.executemany(
@@ -1475,7 +1541,8 @@ class Repository:
             "(security_id, price_date, price, currency, source) "
             "VALUES (?, ?, ?, NULL, ?) "
             "ON CONFLICT(security_id, price_date) DO UPDATE SET "
-            "  price = excluded.price, source = excluded.source",
+            "  price = excluded.price, source = excluded.source "
+            "  WHERE security_price.source != 'manual'",
             [(sid, d, float(p), src) for sid, d, p, src in rows],
         )
         self.commit()
@@ -1517,6 +1584,98 @@ class Repository:
             security_id=row["security_id"], price_date=row["price_date"],
             price=row["price"], currency=row["currency"], source=row["source"],
         )
+
+    def delete_security_price(self, security_id: int, price_date: str) -> None:
+        """Remove one stored price point (ADR-047, Stock Record screen). No-op
+        if absent. Commits."""
+        self._conn.execute(
+            "DELETE FROM security_price WHERE security_id = ? AND price_date = ?",
+            (security_id, price_date),
+        )
+        self.commit()
+
+    def securities_missing_history(self, min_points: int = 2) -> list[SecurityRow]:
+        """Tickered, non-archived securities with fewer than ``min_points``
+        *real* stored price rows — i.e. never properly backfilled. Feeds the
+        launch-time auto-backfill (ADR-047) so a newly tickered or freshly
+        imported security gets its full Tiingo history without anyone clicking
+        'Backfill history'.
+
+        Only ``manual`` / ``tiingo`` rows count as "history"; ``transaction``-
+        derived prices (the sparse per-trade points seeded for untickered
+        holdings) do NOT — so when a previously untickered security is given a
+        ticker, its handful of trade-derived prices don't mask it from the
+        backfill, and the real end-of-day series is fetched on the next launch."""
+        cur = self._conn.execute(
+            "SELECT s.id, s.iri, s.name, "
+            "       COALESCE(s.symbol, '') AS symbol, "
+            "       COALESCE(s.type, '') AS type "
+            "FROM security s "
+            "LEFT JOIN security_price sp ON sp.security_id = s.id "
+            "WHERE s.archived_at IS NULL AND COALESCE(s.symbol, '') != '' "
+            "GROUP BY s.id "
+            "HAVING SUM(CASE WHEN sp.source IN ('manual', 'tiingo') "
+            "                THEN 1 ELSE 0 END) < ? "
+            "ORDER BY s.name COLLATE NOCASE",
+            (min_points,),
+        )
+        return [
+            SecurityRow(
+                id=r["id"], iri=r["iri"], name=r["name"],
+                symbol=r["symbol"], type=r["type"],
+            )
+            for r in cur
+        ]
+
+    def seed_prices_from_transactions(
+        self, *, security_ids: Optional[list[int]] = None,
+    ) -> int:
+        """Seed ``security_price`` from the per-share price on investment trades
+        of UNTICKERED securities (ADR-047).
+
+        A Buy/Sell/ReinvDiv of a security with no ticker carries its own
+        per-share price (``txn.price``) — the only price signal available for
+        the holdings Tiingo can't fetch. For each such row we record
+        ``(security_id, posted_date, price)`` with ``source='transaction'``.
+        ``price IS NOT NULL`` naturally selects trades/reinvests and skips cash
+        ``Div``/``Cash`` rows (which carry no price). Restricted to securities
+        whose symbol is blank, so a tickered security's clean end-of-day Tiingo
+        series is never polluted with an intraday execution price.
+
+        Honours source precedence (manual > tiingo > transaction): the upsert
+        only overwrites an existing ``transaction``-derived row, never a manual
+        or Tiingo price on the same date. Idempotent — safe to run on every
+        import and at launch. ``security_ids`` restricts the sweep to the
+        just-imported securities (``None`` = all). Returns the affected row
+        count. Commits.
+        """
+        sql = (
+            "INSERT INTO security_price "
+            "(security_id, price_date, price, currency, source) "
+            "SELECT t.security_id, t.posted_date, t.price, NULL, 'transaction' "
+            "FROM txn t "
+            "JOIN security s ON s.id = t.security_id "
+            "WHERE t.price IS NOT NULL AND t.price > 0 "
+            "  AND COALESCE(s.symbol, '') = '' "
+            "  AND s.archived_at IS NULL "
+        )
+        params: list = []
+        if security_ids:
+            placeholders = ",".join("?" for _ in security_ids)
+            sql += f"  AND t.security_id IN ({placeholders}) "
+            params.extend(security_ids)
+        # When one security has several priced trades on the SAME day, the PK
+        # collapses them; the last visited row wins. We don't ORDER BY (SQLite
+        # forbids it on the SELECT feeding an upsert) — same-day, same-security
+        # prices differ only intraday, which is below the resolution we store.
+        sql += (
+            "ON CONFLICT(security_id, price_date) DO UPDATE SET "
+            "  price = excluded.price, source = 'transaction' "
+            "  WHERE security_price.source = 'transaction'"
+        )
+        cur = self._conn.execute(sql, params)
+        self.commit()
+        return cur.rowcount
 
     def find_payee_id_by_name(self, name: str) -> Optional[int]:
         """Case-sensitive lookup. Returns None if no payee has that name."""
@@ -1916,6 +2075,42 @@ class Repository:
         )
         return cur.lastrowid
 
+    def update_investment_transaction(
+        self, txn_id: int, *,
+        posted_date: str,
+        amount: Decimal,
+        payee_id: Optional[int],
+        category_id: int,
+        status: str,
+        memo: str,
+        action: Optional[str],
+        security_id: Optional[int],
+        quantity: Optional[Decimal],
+        price: Optional[Decimal],
+        commission: Optional[Decimal],
+    ) -> None:
+        """Update every editable field of one investment transaction in a single
+        write (ADR-048 — the Investment Transaction edit dialog). ``amount`` is
+        the SIGNED CASH IMPACT, the same contract as ``insert_transaction`` (Buy
+        negative, Sell/Div positive, share-only actions zero), so cash balance =
+        SUM(amount) stays correct. Commits."""
+        self._conn.execute(
+            "UPDATE txn SET posted_date = ?, amount = ?, payee_id = ?, "
+            "  category_id = ?, status = ?, memo = ?, action = ?, "
+            "  security_id = ?, quantity = ?, price = ?, commission = ? "
+            "WHERE id = ?",
+            (
+                posted_date, decimal_to_pence(amount), payee_id,
+                category_id, status, memo or None, action or None,
+                security_id,
+                float(quantity) if quantity is not None else None,
+                float(price) if price is not None else None,
+                decimal_to_pence(commission) if commission is not None else None,
+                txn_id,
+            ),
+        )
+        self.commit()
+
     def merge_into_manual_transaction(
         self,
         manual_id: int,
@@ -2075,6 +2270,50 @@ class Repository:
             params.append(since)
         sql += "ORDER BY t.posted_date ASC, t.id ASC"
         cur = self._conn.execute(sql, params)
+        return [
+            TransactionRow(
+                id=r["id"], iri=r["iri"],
+                account_id=r["account_id"], account_name=r["account_name"],
+                posted_date=r["posted_date"], amount=pence_to_decimal(r["amount"]),
+                payee_id=r["payee_id"], payee_name=r["payee_name"],
+                category_id=r["category_id"], category_name=r["category_name"],
+                status=r["status"], memo=r["memo"],
+                running_balance=Decimal("0.00"),
+                transfer_id=r["transfer_id"],
+                action=r["action"], security_id=r["security_id"],
+                security_name=r["security_name"],
+                security_symbol=r["security_symbol"],
+                quantity=r["quantity"], price=r["price"],
+            )
+            for r in cur
+        ]
+
+    def list_transactions_for_security(
+        self, security_id: int,
+    ) -> list[TransactionRow]:
+        """Every investment transaction referencing one security, across all
+        accounts, chronologically (ADR-047, Stock Record screen). Running
+        balance is not meaningful across accounts and is reported as 0. Mirrors
+        ``list_all_transactions``' join shape."""
+        cur = self._conn.execute(
+            "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
+            "       t.posted_date, t.amount, "
+            "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
+            "       t.category_id, COALESCE(c.name, '') AS category_name, "
+            "       t.status, COALESCE(t.memo, '') AS memo, "
+            "       t.transfer_id, "
+            "       t.action, t.security_id, t.quantity, t.price, "
+            "       COALESCE(s.name, '') AS security_name, "
+            "       COALESCE(s.symbol, '') AS security_symbol "
+            "FROM txn t "
+            "JOIN      account a  ON a.id = t.account_id "
+            "LEFT JOIN payee p    ON p.id = t.payee_id "
+            "LEFT JOIN category c ON c.id = t.category_id "
+            "LEFT JOIN security s ON s.id = t.security_id "
+            "WHERE t.security_id = ? "
+            "ORDER BY t.posted_date ASC, t.id ASC",
+            (security_id,),
+        )
         return [
             TransactionRow(
                 id=r["id"], iri=r["iri"],

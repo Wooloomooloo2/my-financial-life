@@ -42,8 +42,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.db.repository import Repository
+from mfl_desktop.db.repository import Repository, SecurityRow
 from mfl_desktop.prices import backfill_historical_into, refresh_latest_prices_into
+from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 
 
 def _fmt_refresh_time(iso_ts: Optional[str]) -> str:
@@ -122,8 +123,16 @@ class SecuritiesDialog(QDialog):
             ["Symbol", "Security", "Price", "As of", "Source"]
         )
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.verticalHeader().setVisible(False)
+        self._table.setToolTip(
+            "Double-click a security to open its Stock Record "
+            "(price history, transactions, ticker)."
+        )
+        self._table.cellDoubleClicked.connect(self._on_row_double_clicked)
+        # Row index → SecurityRow, kept in step with _reload_table.
+        self._row_securities: list[SecurityRow] = []
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -131,6 +140,17 @@ class SecuritiesDialog(QDialog):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         prices_layout.addWidget(self._table)
+
+        open_row = QHBoxLayout()
+        open_row.addStretch(1)
+        self._open_record_btn = QPushButton("Open stock record")
+        self._open_record_btn.setToolTip(
+            "Open the selected security's Stock Record — price history, "
+            "transactions, and ticker editing."
+        )
+        self._open_record_btn.clicked.connect(self._on_open_stock_record)
+        open_row.addWidget(self._open_record_btn)
+        prices_layout.addLayout(open_row)
 
         # Add-manual-price row.
         add_row = QHBoxLayout()
@@ -178,6 +198,7 @@ class SecuritiesDialog(QDialog):
         """List every security with its latest price (or '—' when unpriced),
         sorted by name. Doubles as the 'which holdings still need a price' view."""
         securities = self._repo.list_securities()
+        self._row_securities = securities
         latest = self._repo.latest_prices()
         self._table.setRowCount(len(securities))
         for i, s in enumerate(securities):
@@ -196,6 +217,28 @@ class SecuritiesDialog(QDialog):
                 self._table.setItem(i, 2, dash)
                 self._table.setItem(i, 3, QTableWidgetItem(""))
                 self._table.setItem(i, 4, QTableWidgetItem(""))
+
+    # ── stock record ────────────────────────────────────────────────────
+
+    def _on_row_double_clicked(self, row: int, _column: int) -> None:
+        self._open_record_for_row(row)
+
+    def _on_open_stock_record(self) -> None:
+        row = self._table.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self, "Stock record", "Select a security first.",
+            )
+            return
+        self._open_record_for_row(row)
+
+    def _open_record_for_row(self, row: int) -> None:
+        if not (0 <= row < len(self._row_securities)):
+            return
+        security = self._row_securities[row]
+        StockRecordDialog(self._repo, security, self).exec()
+        # Ticker / prices may have changed — refresh the latest-price view.
+        self._reload_table()
 
     # ── button handlers ─────────────────────────────────────────────────
 

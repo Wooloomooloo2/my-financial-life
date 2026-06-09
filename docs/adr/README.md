@@ -68,7 +68,9 @@ ADRs are written at the time a decision is made and are not retrospective docume
 | [ADR-043](ADR-043-investment-accounts-and-qif-import.md) | Investment accounts & QIF import — security master, txn investment columns, action→cash-sign mapping (arc plan + round 1) | 2026-06-08 | Accepted |
 | [ADR-044](ADR-044-investment-holdings-and-prices.md) | Investment holdings (FIFO) + prices (Tiingo + manual) + market-value net worth (round 2) | 2026-06-09 | Accepted |
 | [ADR-045](ADR-045-investment-dashboard.md) | Investment dashboard — tabbed summary; value-over-time chart (Overview) + cost-vs-value bars (Positions) + historical prices; Returns/Dividends/Allocation tabs to come | 2026-06-09 | Accepted (amended) |
-| [ADR-046](ADR-046-investment-returns-report.md) | Investment Returns report — cross-account total return (cost / unrealized / realized / dividends), period-scoped flows, stacked-composition chart; supersedes ADR-045's Returns/Dividends tabs | 2026-06-09 | Accepted |
+| [ADR-046](ADR-046-investment-returns-report.md) | Investment Returns report — cross-account total return (cost / unrealized / realized / dividends), period-scoped flows, stacked-composition chart; supersedes ADR-045's Returns/Dividends tabs; **amended** with cost-of-shares-sold + return-on-cost (ROI) | 2026-06-09 | Accepted (amended) |
+| [ADR-047](ADR-047-investment-pricing-automation-and-stock-record.md) | Investment pricing — transaction-derived prices for untickered holdings, launch auto-backfill of missing history, editable ticker, source precedence (manual>tiingo>transaction), and the per-security Stock Record screen | 2026-06-09 | Accepted |
+| [ADR-048](ADR-048-investment-transaction-create-edit.md) | Investment transaction create + edit — one action-driven dialog (New on an investment account + double-click a row); signed-cash-impact derivation; investment rows become dialog-edited | 2026-06-09 | Accepted |
 
 ---
 

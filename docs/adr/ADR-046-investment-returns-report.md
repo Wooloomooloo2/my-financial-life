@@ -57,3 +57,17 @@ When all selected accounts share a currency the report aggregates natively; a mi
 - The return math lives in `holdings.py` next to the FIFO engine, not the UI — any future per-account embed or export reuses `compute_returns`.
 - The no-pie rule (ADR-018) stands; this report adds no pie.
 - Historical *net worth* (as-of a past date using that date's prices) is still not a thing — `compute_account_values` is a today snapshot. This report's chart uses historical prices correctly for the per-account/portfolio value line, but the net-worth headline is unchanged.
+
+---
+
+## Amendment (2026-06-09) — cost of shares sold + return on cost (ROI)
+
+**Why.** For a position that's been (partly) sold, the report's "Cost" column showed only the cost basis of shares *still held*, so a fully-liquidated holding read **$0.00** — the owner saw VWID (sold in full on 2026-04-17) show Cost $0 / Market value — / Unrealized — despite a +$19,443.11 total return, and asked "where's the cost basis? I want return on cost." Cost basis of currently-held shares is the right *snapshot* figure, but it doesn't tell you the capital that produced a realized return.
+
+**Change.** The FIFO replay in `holdings.compute_returns` already computes `cost_removed` per in-window sell (it's the cost side of `realized = proceeds − cost_removed`); it now **accumulates** that into a new `cost_basis_sold` on `SecurityReturn` and `ReturnsResult` (period-scoped, same as realized/dividends). The report defines **Cost (deployed) = cost of shares still held + cost of shares sold in the window** — the capital that generated the row's return — and adds a **Return % (ROI) = total return ÷ cost deployed**:
+- Per-security table: the **Cost** column now shows deployed cost (held + sold), and a new **Return %** column shows ROI. Unrealized's own `%` still divides by *held* cost (gain on what you hold); the Total-return `%` moved into the dedicated Return % column.
+- Summary panel: "Cost basis" becomes "**Cost (held + sold)**" when any shares were sold, and a "**Return on cost: ±X%**" line sits under the big total-return figure.
+
+**Verified on the live data:** VWID (fully sold) now shows **Cost $31,533.15** (= $44,600.78 proceeds − $13,067.63 realized), Return % **+61.7%**; the whole-portfolio totals read **Cost (held + sold) $297,459.60 / Return on cost +12.7%** on **+$37,911.30** total return; held-only positions (DIVO +15.1%, SCHD +11.3%) are unaffected since they have no sold cost.
+
+**Trade-off / still open.** ROI-on-cost treats **reinvested distributions as deployed capital** (the standard cost-basis view) — it isn't a time-weighted or money-weighted return, so it slightly overstates "deployed" by the reinvested amounts. **IRR (money-weighted return)** is the rigorous companion the owner also asked for; it's deferred to its own pass because it needs dated cash-flow plumbing (signed `txn.amount` per security + a terminal market value, and an *opening* market value at the window start for non-`max` periods) plus a root-finder and no-sign-change handling. Tracked as the next increment on this report.

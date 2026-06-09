@@ -57,6 +57,10 @@ class TransactionTableModel(QAbstractTableModel):
         ("Memo",     "memo",            True),
         ("Amount",   "amount",          True),
     ]
+    # ADR-048: investment rows are edited through the InvestmentTransactionDialog
+    # (double-click the row), not inline — so every column is non-editable here.
+    # That also frees the table's double-click to open the dialog instead of an
+    # inline editor.
     COLUMNS_INVEST = [
         ("Date",     "posted_date",     False),
         ("Action",   "action",          False),
@@ -64,8 +68,8 @@ class TransactionTableModel(QAbstractTableModel):
         ("Security", "security_name",   False),
         ("Qty",      "quantity",        False),
         ("Price",    "price",           False),
-        ("Status",   "status",          True),
-        ("Memo",     "memo",            True),
+        ("Status",   "status",          False),
+        ("Memo",     "memo",            False),
         ("Amount",   "amount",          False),
         ("Balance",  "running_balance", False),
     ]

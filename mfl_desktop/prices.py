@@ -113,6 +113,38 @@ class TiingoClient:
                 out.append((on_date, float(close)))
         return out
 
+    def fetch_metadata(self, symbol: str) -> Optional[dict]:
+        """Return Tiingo's metadata object for a ticker (``{'ticker','name',
+        'description',...}``) or ``None``. Powers the Stock/transaction dialogs'
+        symbol→security-name auto-fill (ADR-048). One ticker per call; raises
+        PriceFetchError on a missing key or provider error."""
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+        if not self._api_key:
+            raise PriceFetchError(
+                "No Tiingo API key set. Add one in Manage ▸ Securities."
+            )
+        url = (
+            f"{_BASE_URL}/{urllib.parse.quote(sym)}"
+            f"?{urllib.parse.urlencode({'token': self._api_key, 'format': 'json'})}"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=self._timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read().decode("utf-8"))
+                msg = body.get("detail") or body.get("message") or str(e)
+            except Exception:
+                msg = str(e)
+            raise PriceFetchError(f"{sym}: {msg}") from e
+        except urllib.error.URLError as e:
+            raise PriceFetchError(
+                f"Could not reach Tiingo for {sym}: {e.reason}"
+            ) from e
+        return payload if isinstance(payload, dict) else None
+
     def _fetch_one(self, symbol: str) -> tuple[Optional[float], str]:
         payload = self._request(symbol, start_date=None)
         if not payload:
@@ -222,6 +254,110 @@ def refresh_latest_prices_into(
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repo.set_setting("tiingo_last_refresh_at", now)
+    return RefreshResult(fetched_at=now, new_prices_count=count, errors=errors)
+
+
+def backfill_missing_history_into(
+    repo: "Repository", *, min_points: int = 2, on_progress=None,
+) -> RefreshResult:
+    """Fetch full daily history for ONLY the tickered securities that don't yet
+    have it (ADR-047) — the launch-time auto-backfill.
+
+    ``Repository.securities_missing_history`` returns tickered securities with
+    fewer than ``min_points`` stored prices (a lone "latest" close counts as
+    missing). One Tiingo call per such security. This is naturally
+    self-limiting: once a security is backfilled it drops out of the list, so a
+    daily launch doesn't re-fetch securities that already have history — only
+    newly tickered or freshly imported ones. No-op when the key is unset or
+    nothing is missing; silent-friendly so the launch path can ignore failures.
+    """
+    api_key = repo.get_setting("tiingo_api_key")
+    if not api_key:
+        return RefreshResult(
+            fetched_at=None, new_prices_count=0,
+            errors=["No Tiingo API key set."],
+        )
+    securities = repo.securities_missing_history(min_points=min_points)
+    if not securities:
+        return RefreshResult(
+            fetched_at=repo.get_setting("tiingo_last_refresh_at") or None,
+            new_prices_count=0, errors=[],
+        )
+
+    client = TiingoClient(api_key)
+    errors: list[str] = []
+    count = 0
+    total = len(securities)
+    for i, sec in enumerate(securities):
+        try:
+            series = client.fetch_historical(sec.symbol)
+            rows = [
+                (sec.id, on_date, price, "tiingo") for on_date, price in series
+            ]
+            if rows:
+                repo.bulk_upsert_security_prices(rows)
+                count += len(rows)
+        except PriceFetchError as e:
+            errors.append(str(e))
+        except Exception as e:  # noqa: BLE001 — collect, keep going
+            errors.append(f"{sec.symbol}: {e}")
+        if on_progress is not None:
+            try:
+                on_progress(i + 1, total)
+            except Exception:
+                pass
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    repo.set_setting("tiingo_last_refresh_at", now)
+    return RefreshResult(fetched_at=now, new_prices_count=count, errors=errors)
+
+
+def lookup_symbol_name(repo: "Repository", symbol: str) -> Optional[str]:
+    """Best-effort security name for a ticker via Tiingo metadata (ADR-048) —
+    used to auto-fill the Security field from a typed symbol. Returns ``None``
+    when there's no API key, the provider can't be reached, or the ticker is
+    unknown, so the caller silently falls back to manual name entry."""
+    key = repo.get_setting("tiingo_api_key")
+    if not key:
+        return None
+    try:
+        meta = TiingoClient(key).fetch_metadata(symbol)
+    except Exception:  # noqa: BLE001 — best-effort; offline/unknown → manual
+        return None
+    if not meta:
+        return None
+    name = (meta.get("name") or "").strip()
+    return name or None
+
+
+def backfill_security_history_into(
+    repo: "Repository", *, security_id: int, symbol: str,
+    start_date: Optional[str] = None,
+) -> RefreshResult:
+    """Fetch full daily history for ONE security (ADR-047) — backs the Stock
+    Record screen's "Fetch from Tiingo" button after the user sets/corrects a
+    ticker. Raises PriceFetchError when the key is missing or the security has
+    no symbol; per-symbol fetch errors are collected, not raised."""
+    api_key = repo.get_setting("tiingo_api_key")
+    if not api_key:
+        raise PriceFetchError(
+            "No Tiingo API key set. Add one in Manage ▸ Securities first."
+        )
+    sym = (symbol or "").strip()
+    if not sym:
+        raise PriceFetchError("This security has no ticker symbol to fetch.")
+    client = TiingoClient(api_key)
+    errors: list[str] = []
+    count = 0
+    try:
+        series = client.fetch_historical(sym, start_date)
+        rows = [(security_id, on_date, price, "tiingo") for on_date, price in series]
+        if rows:
+            repo.bulk_upsert_security_prices(rows)
+            count = len(rows)
+    except PriceFetchError as e:
+        errors.append(str(e))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return RefreshResult(fetched_at=now, new_prices_count=count, errors=errors)
 
 

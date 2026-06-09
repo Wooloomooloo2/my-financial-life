@@ -71,6 +71,7 @@ from mfl_desktop.reports.filters import (
     TYPE_SPENDING_OVER_TIME,
 )
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
+from mfl_desktop.ui.investment_transaction_dialog import InvestmentTransactionDialog
 from mfl_desktop.ui.transfer_destination_dialog import (
     TransferDestinationDialog,
     no_other_accounts_message,
@@ -245,6 +246,9 @@ class RegisterWindow(QMainWindow):
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_table_context_menu)
+        # ADR-048: double-clicking an investment row opens the edit dialog
+        # (investment cells are read-only inline, so this is the edit path).
+        self._table.doubleClicked.connect(self._on_table_double_clicked)
 
         # Proxy is created once; source model swaps on account change.
         self._model: TransactionTableModel = TransactionTableModel(repo, account_id=None)
@@ -657,6 +661,11 @@ class RegisterWindow(QMainWindow):
                 "Create an account before adding transactions.",
             )
             return
+        # ADR-048: on an investment account, New Transaction opens the
+        # investment form (Buy/Sell/Div/…) rather than the cash dialog.
+        if self._account is not None and self._account.family == "investment":
+            self._open_investment_txn_dialog(seed=None)
+            return
         default_id = self._account.id if self._account is not None else None
         dialog = NewTransactionDialog(
             accounts=accounts,
@@ -776,6 +785,37 @@ class RegisterWindow(QMainWindow):
         self._model.reload()
         self._refresh_sidebar_balances()
         self.statusBar().showMessage("Transaction added", 4000)
+
+    def _on_table_double_clicked(self, proxy_index) -> None:
+        """ADR-048: double-clicking an investment row opens the edit dialog.
+        For cash accounts this is a no-op — their cells are inline-editable, so
+        Qt's own double-click edit trigger handles them."""
+        if self._account is None or self._account.family != "investment":
+            return
+        if not proxy_index.isValid():
+            return
+        source_index = self._proxy.mapToSource(proxy_index)
+        row = self._model.row_at(source_index.row())
+        if row.action is None:
+            return          # a plain cash row that happens to sit here
+        self._open_investment_txn_dialog(seed=row)
+
+    def _open_investment_txn_dialog(self, seed) -> None:
+        """Open the investment transaction dialog in create (seed=None) or edit
+        mode, then reload the register + sidebar on a successful save."""
+        if self._account is None:
+            return
+        dialog = InvestmentTransactionDialog(
+            self._repo, self._account, seed=seed, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._model.reload()
+        self._refresh_sidebar_balances()
+        self.statusBar().showMessage(
+            "Transaction updated" if seed is not None else "Transaction added",
+            4000,
+        )
 
     def _on_model_data_changed(self, top_left, _bottom_right, _roles) -> None:
         """Detect inline edits that need post-processing:
@@ -1249,16 +1289,53 @@ class RegisterWindow(QMainWindow):
                 "Bulk edit needs at least 2 selected transactions.", 4000,
             )
             return
+        # ADR-048: if every selected row is the SAME investment security, offer
+        # a Symbol field that re-tickers that security (the ticker lives on the
+        # security master, so it only makes sense for a single-security set).
+        security_context = None
+        sec_ids: set[int] = set()
+        a_sec_row = None
+        for proxy_idx in self._table.selectionModel().selectedRows():
+            src = self._proxy.mapToSource(proxy_idx)
+            if not src.isValid():
+                continue
+            r = self._model.row_at(src.row())
+            if r.security_id is not None:
+                sec_ids.add(r.security_id)
+                a_sec_row = r
+        if len(sec_ids) == 1 and a_sec_row is not None:
+            security_context = (
+                a_sec_row.security_id,
+                a_sec_row.security_name,
+                a_sec_row.security_symbol,
+            )
+
         dialog = BulkEditDialog(
             self._categories,
             len(ids),
             payee_names=self._repo.list_payee_names(),
+            security_context=security_context,
             parent=self,
         )
         if dialog.exec() != BulkEditDialog.Accepted:
             return
         changes = dialog.values()
         if not changes:
+            return
+
+        # Symbol is a security-master edit, not a txn field — apply it through
+        # update_security and strip it before the bulk txn update.
+        new_symbol = changes.pop("symbol", None)
+        if new_symbol is not None and security_context is not None:
+            try:
+                self._repo.update_security(security_context[0], symbol=new_symbol)
+            except ValueError as e:
+                QMessageBox.warning(self, "Bulk edit", str(e))
+                return
+        if not changes:
+            # Only the symbol was changed — reload so the Symbol column updates.
+            self._model.reload()
+            self.statusBar().showMessage("Symbol updated", 4000)
             return
 
         # ADR-020 category-driven transfers: if the user picked a

@@ -448,6 +448,23 @@ class ImportService:
             self._repo.rollback()
             raise
 
+        # ADR-047: seed price history for any UNTICKERED securities from the
+        # per-share price on their just-imported trades — the only price signal
+        # available for holdings Tiingo can't fetch. Runs after the import has
+        # committed and in its own transaction; a hiccup here must not fail an
+        # otherwise-successful import (the launch-time sweep re-runs it anyway).
+        if security_ids:
+            try:
+                self._repo.seed_prices_from_transactions(
+                    security_ids=list(security_ids.values()),
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Price seeding from imported transactions failed; "
+                    "untickered securities will be seeded on next launch.",
+                    exc_info=True,
+                )
+
         del self._pending[token]
         logger.info(
             f"Import committed: {imported} new, {skipped} skipped, "
