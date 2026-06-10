@@ -35,6 +35,8 @@ class TransactionFilterProxy(QSortFilterProxyModel):
         self.invalidateRowsFilter()
 
     def set_status(self, status: str) -> None:
+        # "All" = no filter; "Unreconciled" = every status except Reconciled
+        # (Pending / Uncleared / Cleared); anything else = exact status match.
         self._status = status
         self.invalidateRowsFilter()
 
@@ -45,7 +47,10 @@ class TransactionFilterProxy(QSortFilterProxyModel):
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
         model: TransactionTableModel = self.sourceModel()
         row = model.row_at(source_row)
-        if self._status != "All" and row.status != self._status:
+        if self._status == "Unreconciled":
+            if row.status == "Reconciled":
+                return False
+        elif self._status != "All" and row.status != self._status:
             return False
         if self._category_id is not None and row.category_id != self._category_id:
             return False

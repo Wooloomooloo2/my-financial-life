@@ -1716,6 +1716,36 @@ class Repository:
         ).fetchone()
         return row["d"] if row and row["d"] else None
 
+    def securities_currently_held(self, *, eps: float = 1e-6) -> set[int]:
+        """Security ids with a net open share position (> 0) across all accounts
+        — backs the 'Show only held securities' filter on the Securities dialog.
+
+        Net shares = Σ share-in quantities − Σ share-out quantities, classified
+        with the shared ``qif_actions`` predicates (the same sets the holdings
+        engine and the QIF importer use) so this can't drift from them. Excludes
+        fully-sold positions (net ~0) and never-held orphan securities. Stock
+        splits aren't applied — consistent with ``compute_holdings_view`` — so a
+        post-split holding is still correctly reported as held (sign, not
+        magnitude, is what matters here)."""
+        from mfl_desktop.import_engine.qif_actions import (
+            is_share_in, is_share_out,
+        )
+        net: dict[int, float] = {}
+        for r in self._conn.execute(
+            "SELECT security_id, action, quantity FROM txn "
+            "WHERE security_id IS NOT NULL AND action IS NOT NULL "
+            "  AND quantity IS NOT NULL"
+        ):
+            qty = float(r["quantity"] or 0.0)
+            if qty <= 0:
+                continue
+            sid = r["security_id"]
+            if is_share_in(r["action"]):
+                net[sid] = net.get(sid, 0.0) + qty
+            elif is_share_out(r["action"]):
+                net[sid] = net.get(sid, 0.0) - qty
+        return {sid for sid, q in net.items() if q > eps}
+
     def mark_security_price_unavailable(
         self, security_id: int, *, when: Optional[str] = None,
     ) -> None:

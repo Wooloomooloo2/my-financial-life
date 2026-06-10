@@ -24,6 +24,7 @@ from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
@@ -118,6 +119,34 @@ class SecuritiesDialog(QDialog):
         # ── Prices table ──────────────────────────────────────────────────
         prices_box = QGroupBox("Securities and latest prices")
         prices_layout = QVBoxLayout(prices_box)
+
+        # Filter row — search by symbol/name + a held-only toggle. The list can
+        # run to ~90 securities (many carried in from un-migrated accounts), so
+        # narrowing to what's actually held is the common case.
+        filter_row = QHBoxLayout()
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search symbol or name…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.textChanged.connect(lambda _t: self._apply_filter())
+        self._held_only = QCheckBox("Show only held securities")
+        self._held_only.setToolTip(
+            "Hide securities you no longer hold (fully sold) and ones carried "
+            "in from accounts not yet migrated (no transactions)."
+        )
+        self._held_only.toggled.connect(lambda _c: self._apply_filter())
+        self._count_label = QLabel("")
+        self._count_label.setStyleSheet("QLabel { color: #64748B; }")
+        filter_row.addWidget(QLabel("Filter:"))
+        filter_row.addWidget(self._search_edit, 1)
+        filter_row.addWidget(self._held_only)
+        filter_row.addWidget(self._count_label)
+        prices_layout.addLayout(filter_row)
+
+        # Caches populated by _reload_table; the filter renders from these.
+        self._all_securities: list[SecurityRow] = []
+        self._latest: dict = {}
+        self._held_ids: set[int] = set()
+
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
             ["Symbol", "Security", "Price", "As of", "Source"]
@@ -195,16 +224,32 @@ class SecuritiesDialog(QDialog):
     # ── data refreshers ─────────────────────────────────────────────────
 
     def _reload_table(self) -> None:
-        """List every security with its latest price (or '—' when unpriced),
-        sorted by name. Doubles as the 'which holdings still need a price' view."""
-        securities = self._repo.list_securities()
-        self._row_securities = securities
-        latest = self._repo.latest_prices()
-        self._table.setRowCount(len(securities))
-        for i, s in enumerate(securities):
+        """Refresh the cached securities, latest prices, and held-set from the
+        repository, then render through the current search / held-only filter.
+        Called on open and after any write (refresh, backfill, manual price,
+        Stock Record edit)."""
+        self._all_securities = self._repo.list_securities()
+        self._latest = self._repo.latest_prices()
+        self._held_ids = self._repo.securities_currently_held()
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        """Render the table from the cached data, applying the search needle
+        (symbol or name) and the held-only toggle. Cheap — no DB hit — so it's
+        safe to call on every keystroke."""
+        needle = self._search_edit.text().strip().lower()
+        held_only = self._held_only.isChecked()
+        visible = [
+            s for s in self._all_securities
+            if (not held_only or s.id in self._held_ids)
+            and (not needle or needle in f"{s.symbol or ''} {s.name}".lower())
+        ]
+        self._row_securities = visible
+        self._table.setRowCount(len(visible))
+        for i, s in enumerate(visible):
             self._table.setItem(i, 0, QTableWidgetItem(s.symbol or ""))
             self._table.setItem(i, 1, QTableWidgetItem(s.name))
-            price_row = latest.get(s.id)
+            price_row = self._latest.get(s.id)
             if price_row is not None:
                 price_item = QTableWidgetItem(f"{price_row.price:,.4f}".rstrip("0").rstrip("."))
                 price_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -217,6 +262,9 @@ class SecuritiesDialog(QDialog):
                 self._table.setItem(i, 2, dash)
                 self._table.setItem(i, 3, QTableWidgetItem(""))
                 self._table.setItem(i, 4, QTableWidgetItem(""))
+        total = len(self._all_securities)
+        suffix = "" if held_only else f" · {len(self._held_ids)} held"
+        self._count_label.setText(f"Showing {len(visible)} of {total}{suffix}")
 
     # ── stock record ────────────────────────────────────────────────────
 

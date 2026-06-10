@@ -198,7 +198,9 @@ class RegisterWindow(QMainWindow):
         self._window_combo.currentIndexChanged.connect(self._on_window_change)
 
         status_combo = QComboBox()
-        status_combo.addItems(["All", *STATUSES])
+        # "Unreconciled" is a meta-status (everything except Reconciled), handy
+        # for working down the rows that still need clearing/reconciling.
+        status_combo.addItems(["All", "Unreconciled", *STATUSES])
         status_combo.currentTextChanged.connect(lambda s: self._proxy.set_status(s))
 
         self._category_combo = QComboBox()
