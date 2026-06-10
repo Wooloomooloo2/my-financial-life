@@ -156,6 +156,52 @@ class InvestmentReturnsFilters:
         return _from_dict(cls, raw)
 
 
+# ── Sankey (ADR-056) ────────────────────────────────────────────────────────
+
+# Income → Total → Expenses flow. Period presets are finance-native and
+# distinct from the spending presets: month-to-date and last-month matter for a
+# cash-flow view. "custom" uses custom_start / custom_end.
+SANKEY_PERIOD_KEYS: tuple[str, ...] = ("ytd", "mtd", "last_month", "custom")
+SANKEY_VALUE_MODES: tuple[str, ...] = ("amount", "percent")
+
+
+@dataclass(frozen=True)
+class SankeyFilters:
+    """Persisted filter set for a saved Sankey report (ADR-056).
+
+    ``depth`` is how many category levels deep the diagram expands (1 = top
+    level only). ``threshold_pct`` folds any node worth less than that % of the
+    side's total into a single "Other" node (0 = show everything). ``value_mode``
+    toggles labels between absolute amounts and a % of total. Income vs expense
+    is read from ``category.kind`` (transfers are excluded).
+    """
+
+    period_key: str = "ytd"
+    custom_start: Optional[str] = None     # ISO date, only when period_key == "custom"
+    custom_end:   Optional[str] = None
+    depth: int = 2
+    threshold_pct: float = 0.0
+    value_mode: str = "amount"
+
+    # ── round-trip helpers ──
+
+    @classmethod
+    def default(cls) -> "SankeyFilters":
+        return cls()
+
+    def to_json(self) -> str:
+        return json.dumps(_asdict_for_json(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, blob: str) -> "SankeyFilters":
+        raw = json.loads(blob) if blob else {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"SankeyFilters: expected JSON object, got {type(raw).__name__}"
+            )
+        return _from_dict(cls, raw)
+
+
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 # Maps the report.type enum value to its filter dataclass. Adding a new
@@ -163,6 +209,7 @@ class InvestmentReturnsFilters:
 _FILTER_CLASSES: dict[str, type] = {
     TYPE_SPENDING_OVER_TIME: SpendingOverTimeFilters,
     TYPE_INVESTMENT_RETURNS: InvestmentReturnsFilters,
+    TYPE_SANKEY: SankeyFilters,
 }
 
 

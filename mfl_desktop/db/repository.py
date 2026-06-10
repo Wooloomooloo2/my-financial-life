@@ -3072,6 +3072,47 @@ class Repository:
             for r in cur
         ]
 
+    def sankey_category_totals(
+        self, *, date_from: str, date_to: str,
+    ) -> dict[str, dict[int, int]]:
+        """Period-scoped income and expense totals per category for the Sankey
+        report (ADR-056).
+
+        Income = inflows (``amount > 0``) on ``kind='income'`` categories;
+        expense = outflows (``amount < 0``) on ``kind='expense'`` categories
+        (strict, matching ``spending_aggregates`` semantics). Transfers
+        (``kind='transfer'``) are excluded entirely — they move money between
+        the owner's own accounts and are neither income nor expense. Reads the
+        split-unrolled ``txn_category_line`` view (ADR-051), so a split lands on
+        each line's own category.
+
+        Returns ``{'income': {category_id: pence}, 'expense': {category_id:
+        pence}}`` with pence ≥ 0, keyed by the leaf category the txn/line
+        carries. The caller rolls these up the category tree.
+        """
+        income: dict[int, int] = {}
+        expense: dict[int, int] = {}
+        cur = self._conn.execute(
+            "SELECT c.kind AS kind, t.category_id AS cid, "
+            "  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
+            "           ELSE -t.amount END) AS pence "
+            "FROM txn_category_line t "
+            "JOIN category c ON c.id = t.category_id "
+            "WHERE t.posted_date BETWEEN ? AND ? "
+            "  AND ( (c.kind = 'income'  AND t.amount > 0) "
+            "     OR (c.kind = 'expense' AND t.amount < 0) ) "
+            "GROUP BY t.category_id, c.kind",
+            (date_from, date_to),
+        )
+        for r in cur:
+            cid = int(r["cid"])
+            pence = int(r["pence"])
+            if r["kind"] == "income":
+                income[cid] = pence
+            else:
+                expense[cid] = pence
+        return {"income": income, "expense": expense}
+
     def list_categories_flat(
         self, kinds: Optional[tuple[str, ...]] = None,
     ) -> list[CategoryChoice]:

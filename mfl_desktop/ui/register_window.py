@@ -64,6 +64,7 @@ from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.new_report_dialog import NewReportDialog
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
 from mfl_desktop.ui.investment_returns_window import InvestmentReturnsWindow
+from mfl_desktop.ui.sankey_report_window import SankeyReportWindow
 from mfl_desktop.reports.filters import (
     TYPE_INCOME_EXPENSE,
     TYPE_INVESTMENT_RETURNS,
@@ -648,6 +649,10 @@ class RegisterWindow(QMainWindow):
             self._on_investment_returns_report
         )
         reports_menu.addAction(self._investment_returns_action)
+
+        self._sankey_action = QAction("&Sankey (Income → Expenses)…", self)
+        self._sankey_action.triggered.connect(self._on_sankey_report)
+        reports_menu.addAction(self._sankey_action)
 
         self._net_worth_action = QAction("&Net Worth…", self)
         self._net_worth_action.triggered.connect(self._on_net_worth)
@@ -2309,6 +2314,10 @@ class RegisterWindow(QMainWindow):
         (ADR-046)."""
         self._open_bare_report(TYPE_INVESTMENT_RETURNS)
 
+    def _on_sankey_report(self) -> None:
+        """Reports menu → Sankey. Opens the *bare* window (ADR-056)."""
+        self._open_bare_report(TYPE_SANKEY)
+
     def _open_bare_report(self, type_key: str) -> None:
         """Open an unattached report window for the given type. Singleton
         per type — repeat menu clicks raise the existing bare window."""
@@ -2321,6 +2330,8 @@ class RegisterWindow(QMainWindow):
             win = SpendingReportWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_INVESTMENT_RETURNS:
             win = InvestmentReturnsWindow.open_bare(self._repo, parent=self)
+        elif type_key == TYPE_SANKEY:
+            win = SankeyReportWindow.open_bare(self._repo, parent=self)
         else:
             # Other types not yet implemented; the menu items for them
             # haven't been added either, but keep the dispatcher honest.
@@ -2359,6 +2370,10 @@ class RegisterWindow(QMainWindow):
             )
         elif report.type == TYPE_INVESTMENT_RETURNS:
             win = InvestmentReturnsWindow.load_from_id(
+                self._repo, report_id, parent=self,
+            )
+        elif report.type == TYPE_SANKEY:
+            win = SankeyReportWindow.load_from_id(
                 self._repo, report_id, parent=self,
             )
         else:
