@@ -30,6 +30,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -152,6 +153,11 @@ class InvestmentReturnsWindow(QMainWindow):
         self._display_ccy = ""
         self._convert_missing = False
         self._convert_fallback = False
+
+        # Best/worst-performer panel state, rebuilt per refresh (the panel has
+        # its OWN timeframe, independent of the report period).
+        self._perf_candidates: list[tuple[int, str, str]] = []  # (sid, symbol, name)
+        self._perf_series: dict[int, list[tuple[str, float]]] = {}  # sid → asc (date, price)
 
         # ── top bar ──
         self._name_label = QLabel()
@@ -305,6 +311,31 @@ class InvestmentReturnsWindow(QMainWindow):
         layout.addWidget(self._roi_value)
         layout.addSpacing(6)
         layout.addWidget(self._note_value)
+        layout.addSpacing(10)
+
+        # ── Best / worst performers (own timeframe) ──
+        layout.addWidget(self._mini_section_title("Performers"))
+        self._perf_combo = QComboBox()
+        for label, key in (
+            ("1 month", "1m"), ("3 months", "3m"), ("6 months", "6m"),
+            ("Year to date", "ytd"), ("1 year", "1y"),
+        ):
+            self._perf_combo.addItem(label, key)
+        self._perf_combo.setCurrentIndex(4)   # 1 year
+        self._perf_combo.currentIndexChanged.connect(
+            lambda _i: self._update_performance()
+        )
+        layout.addWidget(self._perf_combo)
+        perf_note = QLabel("Price change over the period (held, priced holdings).")
+        perf_note.setWordWrap(True)
+        perf_note.setStyleSheet("color: #94a3b8; font-size: 10px;")
+        layout.addWidget(perf_note)
+        self._perf_container = QWidget()
+        self._perf_layout = QVBoxLayout(self._perf_container)
+        self._perf_layout.setContentsMargins(0, 4, 0, 0)
+        self._perf_layout.setSpacing(3)
+        layout.addWidget(self._perf_container)
+
         layout.addStretch(1)
         return panel
 
@@ -316,6 +347,108 @@ class InvestmentReturnsWindow(QMainWindow):
             "letter-spacing: 1px;"
         )
         return lab
+
+    # ── best / worst performers ──
+
+    def _perf_start_date(self) -> str:
+        """ISO start date for the performer panel's selected timeframe,
+        measured back from today (YTD = Jan 1 of the current year)."""
+        key = self._perf_combo.currentData()
+        today = date.today()
+        if key == "ytd":
+            return date(today.year, 1, 1).isoformat()
+        days = {"1m": 30, "3m": 91, "6m": 182, "1y": 365}.get(key, 365)
+        return (today - timedelta(days=days)).isoformat()
+
+    def _perf_row(self, symbol: str, name: str, perf: float) -> QWidget:
+        """One performer line: ticker (or truncated name) left, coloured %% right."""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        label = (symbol or "").strip() or (name[:18] + ("…" if len(name) > 18 else ""))
+        left = QLabel(label)
+        left.setStyleSheet("color: #0f172a;")
+        left.setToolTip(name)
+        pct = QLabel(f"{perf:+.1f}%")
+        pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        pct.setStyleSheet(
+            f"color: {'#16a34a' if perf >= 0 else '#dc2626'}; font-weight: 600;"
+        )
+        h.addWidget(left, 1)
+        h.addWidget(pct, 0)
+        return w
+
+    def _perf_subhead(self, text: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setStyleSheet("color: #475569; font-weight: 600; margin-top: 4px;")
+        return lab
+
+    def _update_performance(self) -> None:
+        """Rank the held, priced holdings by price change over the panel's
+        timeframe and show the top / bottom few. Re-runs on a timeframe change
+        without touching the DB (price series are cached at refresh time)."""
+        # Clear the previous list.
+        while self._perf_layout.count():
+            item = self._perf_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        def note(text: str) -> None:
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setStyleSheet("color: #94a3b8; font-style: italic;")
+            self._perf_layout.addWidget(lab)
+
+        if not self._perf_candidates:
+            note("No priced holdings to rank.")
+            return
+
+        start = self._perf_start_date()
+        # Both ends must sit NEAR the window edges, else a sparsely-priced
+        # holding's "nearest-prior" can reach back years and yield a nonsense
+        # %. Require the start price within ~a month before the window start
+        # and the latest price within ~a month of today — which also keeps the
+        # ranking to genuinely price-tracked holdings.
+        _TOL = 31
+        start_floor = (date.fromisoformat(start) - timedelta(days=_TOL)).isoformat()
+        recent_floor = (date.today() - timedelta(days=_TOL)).isoformat()
+        ranked: list[tuple[float, str, str]] = []
+        for sid, symbol, name in self._perf_candidates:
+            series = self._perf_series.get(sid)
+            if not series:
+                continue
+            end_date, end_price = series[-1]
+            if not end_price or end_date < recent_floor:
+                continue                        # no current price → can't rank
+            start_price = start_date = None
+            for d_iso, price in series:         # nearest price on/before start
+                if d_iso <= start:
+                    start_price, start_date = price, d_iso
+                else:
+                    break
+            if not start_price or start_price <= 0 or start_date < start_floor:
+                continue                        # no price near the window start
+            ranked.append(((end_price - start_price) / start_price * 100.0, symbol, name))
+
+        if not ranked:
+            note("Not enough price history for this timeframe.")
+            return
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        best = ranked[:5]
+        # Worst excludes any already shown as best (matters for a tiny portfolio).
+        best_keys = {(s, n) for _p, s, n in best}
+        worst = [r for r in reversed(ranked) if (r[1], r[2]) not in best_keys][:5]
+
+        self._perf_layout.addWidget(self._perf_subhead("Best"))
+        for perf, symbol, name in best:
+            self._perf_layout.addWidget(self._perf_row(symbol, name, perf))
+        if worst:
+            self._perf_layout.addWidget(self._perf_subhead("Worst"))
+            for perf, symbol, name in worst:   # most negative first
+                self._perf_layout.addWidget(self._perf_row(symbol, name, perf))
 
     # ── currency formatting ──
 
@@ -444,11 +577,13 @@ class InvestmentReturnsWindow(QMainWindow):
         )
 
         results = []   # (currency, ReturnsResult)
+        all_series: dict[int, list[tuple[str, float]]] = {}
         for ccy, g in by_ccy.items():
             pser = {
                 sid: [(p.price_date, p.price) for p in self._repo.price_series(sid)]
                 for sid in g["sec_ids"]
             }
+            all_series.update(pser)            # reused by the performer panel
             results.append(
                 (ccy, compute_returns(g["txns"], samples, pser, window_start, security_ids))
             )
@@ -482,6 +617,7 @@ class InvestmentReturnsWindow(QMainWindow):
         for ccy, res in results:
             for s in res.by_security:
                 m = merged.setdefault(s.security_id, {
+                    "sid": s.security_id,
                     "symbol": s.symbol, "name": s.name, "shares": 0.0,
                     "cost": Decimal("0"), "cost_sold": Decimal("0"),
                     "mv": Decimal("0"),
@@ -511,6 +647,14 @@ class InvestmentReturnsWindow(QMainWindow):
             0 if m["shares"] > 1e-9 else 1, -float(m["total"]), m["name"].lower(),
         ))
 
+        # Performer panel inputs: held, priced holdings + their cached price
+        # series (the panel ranks by price change over its own timeframe).
+        self._perf_series = all_series
+        self._perf_candidates = [
+            (m["sid"], m["symbol"], m["name"])
+            for m in rows if m["shares"] > 1e-9 and m["priced"]
+        ]
+
         # Portfolio totals from merged rows (consistent with the table).
         tot_cost = sum((m["cost"] for m in rows if m["shares"] > 1e-9), Decimal("0"))
         tot_cost_deployed = sum((m["cost_total"] for m in rows), Decimal("0"))
@@ -534,6 +678,7 @@ class InvestmentReturnsWindow(QMainWindow):
             unreal=tot_unreal, realized=tot_realized, div=tot_div,
             total=tot_total, unpriced=unpriced,
         )
+        self._update_performance()
 
     def _populate_table(self, rows: list[dict]) -> None:
         # Disable sorting while filling, or each setItem would re-sort the
@@ -665,6 +810,9 @@ class InvestmentReturnsWindow(QMainWindow):
                     self._roi_value, self._note_value):
             lab.setText("")
         self._total_value.setText("—")
+        self._perf_candidates = []
+        self._perf_series = {}
+        self._update_performance()
 
     # ── filter dialog ──
 
