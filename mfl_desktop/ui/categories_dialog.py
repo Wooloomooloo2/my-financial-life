@@ -8,10 +8,12 @@ dialog with reparent layered on top:
   sub-categories inherit silently.
 - **Rename**  — change a single category's name. Sibling-name collisions
   reject; use Merge instead.
-- **Reparent** — move a single category to a new parent. Cycles reject;
-  sibling-name collisions at the target reject. Cross-kind reparents
-  pop an explicit confirmation (ADR-014) — confirming cascades the new
-  kind down the subtree.
+- **Reparent** — move one *or more* selected categories to a new parent.
+  Cycles reject; sibling-name collisions at the target reject (per category,
+  reported without aborting the batch). Cross-kind reparents pop an explicit
+  confirmation (ADR-014) — confirming cascades the new kind down each moved
+  subtree. Multi-select makes re-homing many categories (e.g. marking income
+  by reparenting under an income root) a single action.
 - **Change Kind** — directly change a category's kind. Cascades to
   descendants. Allowed at any level; when the new kind would differ from
   the parent's kind, a warning is shown so the user knows the tree will
@@ -179,7 +181,13 @@ class CategoriesDialog(QDialog):
     def _update_button_state(self) -> None:
         ids = self._selected_ids()
         self._rename_btn.setEnabled(len(ids) == 1)
-        self._reparent_btn.setEnabled(len(ids) == 1)
+        self._reparent_btn.setEnabled(len(ids) >= 1)
+        self._reparent_btn.setToolTip(
+            "Move the selected categories under one new parent. Works on a "
+            "multi-selection — handy for re-homing many categories at once. "
+            "Moving under a different-kind parent cascades the new kind down "
+            "each subtree (ADR-014)."
+        )
         self._change_kind_btn.setEnabled(len(ids) >= 1)
         self._change_kind_btn.setToolTip(
             "Change the kind (income / expense / transfer) on the selected "
@@ -344,27 +352,45 @@ class CategoriesDialog(QDialog):
         self.categories_changed.emit()
 
     def _on_reparent(self) -> None:
+        """Move one or more selected categories under a single chosen parent.
+
+        Bulk-friendly (ADR-013/014): pick the target once and every selected
+        category moves there. The parent picker excludes every selected node
+        and all of their subtrees (a node can't move under itself). Moving
+        under a different-kind parent cascades the new kind down each moved
+        subtree, with one up-front confirmation listing the affected
+        categories. Per-category problems (a name clash at the target) are
+        collected and reported rather than aborting the whole batch."""
         ids = self._selected_ids()
-        if len(ids) != 1:
+        if not ids:
             return
-        cid = ids[0]
-        node = self._nodes_by_id.get(cid)
-        if node is None:
+        nodes = [self._nodes_by_id[c] for c in ids if c in self._nodes_by_id]
+        if not nodes:
             return
-        # Exclude the node and its descendants — those are invalid parents.
-        forbidden = self._repo.category_descendants(cid)
+
+        # Forbidden parents: every selected node + all of its descendants.
+        forbidden: set[int] = set()
+        for c in (n.id for n in nodes):
+            forbidden |= {c} | self._repo.category_descendants(c)
 
         picker = QDialog(self)
-        picker.setWindowTitle(f"Reparent {node.name!r}")
+        bulk = len(nodes) > 1
+        target_label = nodes[0].name if not bulk else f"{len(nodes)} categories"
+        picker.setWindowTitle(
+            f"Reparent {nodes[0].name!r}" if not bulk
+            else f"Reparent {len(nodes)} categories"
+        )
         picker.setModal(True)
-        label = QLabel(f"Move {node.name!r} under which parent?")
+        label = QLabel(f"Move {target_label} under which parent?")
         label.setWordWrap(True)
         combo = QComboBox()
         for pid, plabel in self._build_parent_choices(exclude_ids=forbidden):
             combo.addItem(plabel, userData=pid)
-        # Default selection: the node's current parent (or top level).
+        # Default: the shared current parent if they all have one, else top.
+        parents = {n.parent_id for n in nodes}
+        default_parent = next(iter(parents)) if len(parents) == 1 else None
         for i in range(combo.count()):
-            if combo.itemData(i) == node.parent_id:
+            if combo.itemData(i) == default_parent:
                 combo.setCurrentIndex(i)
                 break
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -374,43 +400,76 @@ class CategoriesDialog(QDialog):
         lay.addWidget(label)
         lay.addWidget(combo)
         lay.addWidget(bb)
-        picker.resize(400, picker.sizeHint().height())
+        picker.resize(420, picker.sizeHint().height())
         if picker.exec() != QDialog.Accepted:
             return
         new_parent_id = combo.currentData()
-        if new_parent_id == node.parent_id:
-            return
+        new_parent = (
+            self._nodes_by_id.get(new_parent_id)
+            if new_parent_id is not None else None
+        )
 
-        # Detect a cross-kind reparent: if the new parent's kind differs from
-        # the moved category's current kind, explicit confirmation is required
-        # (ADR-014). Reparenting to top-level (new_parent_id is None) leaves
-        # kind unchanged.
-        new_kind: Optional[str] = None
-        if new_parent_id is not None:
-            new_parent = self._nodes_by_id.get(new_parent_id)
-            if new_parent is not None and new_parent.kind != node.kind:
-                msg = (
-                    f"Moving {node.name!r} under {new_parent.name!r} also "
-                    f"changes its kind from {node.kind} → {new_parent.kind}. "
-                    f"This applies to {node.name!r} and all of its "
-                    f"subcategories, and reports will treat those "
-                    f"transactions as {new_parent.kind} going forward.\n\n"
-                    f"Continue?"
-                )
-                confirm = QMessageBox.question(
-                    self, "Confirm kind change", msg,
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-                )
-                if confirm != QMessageBox.Yes:
-                    return
-                new_kind = new_parent.kind
-        try:
-            self._repo.reparent_category(cid, new_parent_id, new_kind=new_kind)
-        except ValueError as e:
-            QMessageBox.warning(self, "Could not reparent", str(e))
-            return
+        # Cross-kind reparent: any selected category whose kind differs from
+        # the new parent's gets its kind (and its subtree's) cascaded. One
+        # confirmation covers the whole batch (ADR-014). Moving to top-level
+        # (new_parent is None) never changes kind.
+        cross = (
+            [n for n in nodes if n.kind != new_parent.kind]
+            if new_parent is not None else []
+        )
+        if cross:
+            shown = ", ".join(repr(n.name) for n in cross[:4])
+            extra = "" if len(cross) <= 4 else f" (+{len(cross) - 4} more)"
+            msg = (
+                f"{len(cross)} of the selected categor"
+                f"{'y' if len(cross) == 1 else 'ies'} will change kind to "
+                f"'{new_parent.kind}' (and so will their subcategories): "
+                f"{shown}{extra}.\n\nReports will treat those transactions as "
+                f"'{new_parent.kind}' going forward. Continue?"
+            )
+            if QMessageBox.question(
+                self, "Confirm kind change", msg,
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return
+
+        moved = 0
+        skipped = 0
+        failures: list[tuple[str, str]] = []
+        for n in nodes:
+            if n.parent_id == new_parent_id:
+                skipped += 1
+                continue
+            new_kind = (
+                new_parent.kind
+                if (new_parent is not None and new_parent.kind != n.kind)
+                else None
+            )
+            try:
+                self._repo.reparent_category(n.id, new_parent_id, new_kind=new_kind)
+                moved += 1
+            except ValueError as e:
+                failures.append((n.name, str(e)))
+
         self._reload_tree()
-        self.categories_changed.emit()
+        if moved:
+            self.categories_changed.emit()
+
+        if failures:
+            body = "\n".join(f"• {nm}: {err}" for nm, err in failures[:8])
+            more = "" if len(failures) <= 8 else f"\n…and {len(failures) - 8} more"
+            QMessageBox.warning(
+                self, "Some could not be moved",
+                f"Moved {moved}"
+                + (f", skipped {skipped} already there" if skipped else "")
+                + f".\n\nCouldn't move:\n{body}{more}",
+            )
+        elif bulk:
+            QMessageBox.information(
+                self, "Reparented",
+                f"Moved {moved} categor{'y' if moved == 1 else 'ies'}"
+                + (f"; {skipped} already under the target." if skipped else "."),
+            )
 
     def _on_change_kind(self) -> None:
         """Edit the kind on the selected categories. Cascades to descendants.
