@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from mfl_desktop.account_types import AccountTypeSpec, by_key
 from mfl_desktop.db.money import decimal_to_pence, pence_to_decimal
@@ -114,12 +114,32 @@ class SplitLine:
     """One category line of a split transaction (ADR-051). ``amount`` is a
     signed Decimal (same convention as ``TransactionRow.amount``); the lines of
     a split sum to the parent's total. ``id`` is the ``txn_split`` row id when
-    read back, or ``None`` for a line being passed into a create/update."""
+    read back, or ``None`` for a line being passed into a create/update.
+
+    ``category_kind`` is the line category's kind ('income' / 'expense' /
+    'transfer'); ``transfer_to_account_id`` is set when the line is a transfer
+    (ADR-051 amendment) — the destination account the line moves money to,
+    derived from the partner ``txn`` that shares the line's ``transfer_id``.
+    Both default to the non-transfer case for lines being passed *into* a
+    create/update (the dialog supplies the destination separately)."""
     category_id: int
     category_name: str
     memo: str
     amount: Decimal
     id: Optional[int] = None
+    category_kind: str = "expense"
+    transfer_to_account_id: Optional[int] = None
+
+
+# A split line being passed *into* a create/update. Three-tuple
+# (category_id, memo, amount) is a plain category line; the four-tuple form adds
+# a transfer destination account (ADR-051 amendment) — when present, the line is
+# a transfer and spawns a partner txn there. The 3-tuple form keeps the import
+# path (Banktivity splits, never transfers) working unchanged.
+SplitLineInput = Union[
+    "tuple[int, Optional[str], Decimal]",
+    "tuple[int, Optional[str], Decimal, Optional[int]]",
+]
 
 
 @dataclass(frozen=True)
@@ -2342,33 +2362,170 @@ class Repository:
 
     def _replace_split_lines(
         self, txn_id: int, total_amount: Decimal,
-        lines: list[tuple[int, Optional[str], Decimal]],
+        lines: "list[SplitLineInput]",
     ) -> None:
         """Delete and re-insert the `txn_split` rows for one parent, after
         checking the signed line amounts sum exactly to ``total_amount``.
         Pence are integers, so the check is exact (no float tolerance). Does
-        not commit. ``lines`` is a list of ``(category_id, memo, amount)`` and
-        must be non-empty."""
+        not commit. ``lines`` must be non-empty; each line is
+        ``(category_id, memo, amount)`` or — for a transfer line (ADR-051
+        amendment) — ``(category_id, memo, amount, transfer_to_account_id)``.
+
+        **Transfer lines.** When a line carries a destination account, the line
+        moves money out of the split's account into that account, so a real
+        partner ``txn`` is created there (the source balance stays correct via
+        the parent total; the destination balance only moves because of the
+        partner row). The line and its partner share a fresh ``transfer_id`` and
+        a ``transfer`` parent row records direction + rate. Same-currency only
+        in v1 (``rate=1.0, rate_source='derived'``).
+
+        Edit is tear-down-and-rebuild: any partner txns the split currently owns
+        are deleted first, then recreated from the new line set. (A reconciled
+        partner row is therefore rebuilt — accepted v1 limitation.)"""
         if not lines:
             raise ValueError("A split transaction needs at least one line.")
+        # Normalise each line to (category_id, memo, pence, dest_account_id|None).
+        norm: list[tuple[int, Optional[str], int, Optional[int]]] = []
+        for ln in lines:
+            cid, memo, amt = ln[0], ln[1], ln[2]
+            dest = ln[3] if len(ln) > 3 else None
+            norm.append((cid, memo, decimal_to_pence(amt), dest))
         total_pence = decimal_to_pence(total_amount)
-        line_pence = [
-            (cid, memo, decimal_to_pence(amt)) for cid, memo, amt in lines
-        ]
-        line_sum = sum(p for _, _, p in line_pence)
+        line_sum = sum(p for _, _, p, _ in norm)
         if line_sum != total_pence:
             raise ValueError(
                 f"Split lines must sum to the transaction total "
                 f"({total_pence} pence); got {line_sum}."
             )
+
+        # Source account (the split's own account) — needed for transfer-line
+        # currency checks and the transfer parent's from/to direction. The
+        # parent row is already written when we get here (insert/update both
+        # touch txn first), so its posted_date is the date the partner inherits.
+        prow = self._conn.execute(
+            "SELECT account_id, posted_date FROM txn WHERE id = ?", (txn_id,),
+        ).fetchone()
+        if prow is None:
+            raise ValueError(f"No transaction with id {txn_id}")
+        source_account_id = int(prow["account_id"])
+        source_ccy = self.get_account_currency(source_account_id)
+        parent_date = prow["posted_date"]
+
+        # Tear down the partner txns this split currently owns, then its lines.
+        for r in self._conn.execute(
+            "SELECT transfer_id FROM txn_split "
+            "WHERE txn_id = ? AND transfer_id IS NOT NULL",
+            (txn_id,),
+        ).fetchall():
+            self._conn.execute(
+                "DELETE FROM txn WHERE transfer_id = ?", (r["transfer_id"],),
+            )
         self._conn.execute("DELETE FROM txn_split WHERE txn_id = ?", (txn_id,))
-        for order, (cid, memo, pence) in enumerate(line_pence):
+
+        for order, (cid, memo, pence, dest) in enumerate(norm):
+            transfer_iri: Optional[str] = None
+            if dest is not None:
+                transfer_iri = self._make_split_line_transfer(
+                    source_account_id=source_account_id,
+                    source_ccy=source_ccy,
+                    posted_date=parent_date,
+                    category_id=cid,
+                    line_pence=pence,
+                    dest_account_id=dest,
+                    memo=memo,
+                )
             self._conn.execute(
                 "INSERT INTO txn_split "
-                "(txn_id, category_id, memo, amount, sort_order) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (txn_id, cid, (memo or None), pence, order),
+                "(txn_id, category_id, memo, amount, sort_order, transfer_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (txn_id, cid, (memo or None), pence, order, transfer_iri),
             )
+
+    def _make_split_line_transfer(
+        self, *,
+        source_account_id: int,
+        source_ccy: Optional[str],
+        posted_date: str,
+        category_id: int,
+        line_pence: int,
+        dest_account_id: int,
+        memo: Optional[str],
+    ) -> str:
+        """Create the partner ``txn`` + ``transfer`` parent for one transfer
+        split line and return the shared ``transfer_id`` (ADR-051 amendment).
+
+        The partner amount is ``-line_pence`` (same convention as
+        ``create_transfer``: the two sides carry opposite signs). Direction
+        follows the line sign — a line that takes money *out* of the split
+        account (line < 0) is ``from = source, to = dest``; a line that brings
+        money *in* (line > 0) is the reverse. The partner inherits the split
+        parent's ``posted_date`` so both halves clear on the same day.
+        Same-currency only in v1 (rate 1.0 / 'derived')."""
+        if line_pence == 0:
+            raise ValueError("A transfer split line cannot be zero.")
+        if dest_account_id == source_account_id:
+            raise ValueError(
+                "A transfer split line must transfer to a different account."
+            )
+        if self.get_category_kind(category_id) != "transfer":
+            raise ValueError(
+                "A split line with a destination account must use a "
+                "transfer-kind category."
+            )
+        dest_ccy = self.get_account_currency(dest_account_id)
+        if dest_ccy is None:
+            raise ValueError(f"Unknown destination account {dest_account_id}.")
+        if dest_ccy != source_ccy:
+            raise ValueError(
+                "Split-line transfers must stay within one currency in this "
+                f"version (source {source_ccy}, destination {dest_ccy})."
+            )
+
+        names = self._account_names((source_account_id,))
+        source_name = names.get(source_account_id, "account")
+        transfer_iri = new_transfer_iri()
+        # Money leaves the source on a negative line → the destination receives;
+        # its partner row reads "Transfer from <source>". A positive line is the
+        # reverse flow (the partner pays out to the source).
+        if line_pence < 0:
+            from_id, to_id = source_account_id, dest_account_id
+            partner_payee = self.get_or_create_payee(
+                f"Transfer from {source_name}"
+            )
+        else:
+            from_id, to_id = dest_account_id, source_account_id
+            partner_payee = self.get_or_create_payee(
+                f"Transfer to {source_name}"
+            )
+        self._insert_transfer_half(
+            account_id=dest_account_id,
+            amount=pence_to_decimal(-line_pence),
+            payee_id=partner_payee,
+            category_id=category_id,
+            status="Pending",
+            memo=memo or "",
+            posted_date=posted_date,
+            transfer_id=transfer_iri,
+        )
+        self._insert_transfer_parent(
+            iri=transfer_iri,
+            from_account_id=from_id,
+            to_account_id=to_id,
+            rate=Decimal("1"),
+            rate_source="derived",
+        )
+        return transfer_iri
+
+    def _account_names(self, account_ids: tuple[int, ...]) -> dict[int, str]:
+        """Map account id → name for the given ids (one query)."""
+        if not account_ids:
+            return {}
+        ph = ",".join("?" * len(account_ids))
+        cur = self._conn.execute(
+            f"SELECT id, name FROM account WHERE id IN ({ph})",
+            tuple(account_ids),
+        )
+        return {int(r["id"]): r["name"] for r in cur}
 
     def insert_split_transaction(
         self, *,
@@ -2378,7 +2535,7 @@ class Repository:
         status: str,
         memo: str,
         total_amount: Decimal,
-        lines: list[tuple[int, Optional[str], Decimal]],
+        lines: list[SplitLineInput],
         import_hash: Optional[str],
         import_batch_id: Optional[int],
     ) -> int:
@@ -2401,7 +2558,7 @@ class Repository:
         status: str,
         memo: str,
         total_amount: Decimal,
-        lines: list[tuple[int, Optional[str], Decimal]],
+        lines: list[SplitLineInput],
     ) -> None:
         """Update a split transaction's parent header and replace its lines in
         one write (ADR-051). The parent keeps ``total_amount``; category_id
@@ -2419,7 +2576,7 @@ class Repository:
 
     def convert_plain_to_split(
         self, txn_id: int,
-        lines: list[tuple[int, Optional[str], Decimal]],
+        lines: list[SplitLineInput],
     ) -> None:
         """Turn an existing plain transaction into a split (ADR-051): keep its
         amount/payee/date/status, move category_id to Uncategorised, and attach
@@ -2440,7 +2597,17 @@ class Repository:
     def convert_split_to_plain(self, txn_id: int, category_id: int) -> None:
         """Collapse a split back to a single-category transaction (ADR-051):
         delete its `txn_split` rows and set the parent's category_id. The
-        parent's amount is unchanged. Commits."""
+        parent's amount is unchanged. Any transfer-line partner txns the split
+        owned (ADR-051 amendment) are deleted first so they don't orphan.
+        Commits."""
+        for r in self._conn.execute(
+            "SELECT transfer_id FROM txn_split "
+            "WHERE txn_id = ? AND transfer_id IS NOT NULL",
+            (txn_id,),
+        ).fetchall():
+            self._conn.execute(
+                "DELETE FROM txn WHERE transfer_id = ?", (r["transfer_id"],),
+            )
         self._conn.execute("DELETE FROM txn_split WHERE txn_id = ?", (txn_id,))
         self._conn.execute(
             "UPDATE txn SET category_id = ? WHERE id = ?",
@@ -2457,24 +2624,33 @@ class Repository:
         if not txn_ids:
             return {}
         ph = ",".join("?" * len(txn_ids))
+        # ``partner`` is the destination half of a transfer LINE (ADR-051
+        # amendment): a transfer split line shares its ``transfer_id`` with one
+        # real ``txn`` in another account, whose account_id is the destination.
         cur = self._conn.execute(
             f"SELECT s.id, s.txn_id, s.category_id, "
             f"       COALESCE(c.name, '') AS category_name, "
-            f"       COALESCE(s.memo, '') AS memo, s.amount "
+            f"       COALESCE(c.kind, 'expense') AS category_kind, "
+            f"       COALESCE(s.memo, '') AS memo, s.amount, "
+            f"       partner.account_id AS transfer_to_account_id "
             f"FROM txn_split s "
             f"LEFT JOIN category c ON c.id = s.category_id "
+            f"LEFT JOIN txn partner ON partner.transfer_id = s.transfer_id "
             f"WHERE s.txn_id IN ({ph}) "
             f"ORDER BY s.txn_id, s.sort_order, s.id",
             tuple(txn_ids),
         )
         out: dict[int, list[SplitLine]] = {}
         for r in cur:
+            dest = r["transfer_to_account_id"]
             out.setdefault(r["txn_id"], []).append(SplitLine(
                 category_id=r["category_id"],
                 category_name=r["category_name"],
                 memo=r["memo"],
                 amount=pence_to_decimal(r["amount"]),
                 id=r["id"],
+                category_kind=r["category_kind"],
+                transfer_to_account_id=int(dest) if dest is not None else None,
             ))
         return out
 
@@ -3147,6 +3323,17 @@ class Repository:
                 f"DELETE FROM txn WHERE id IN ({placeholders})",
                 tuple(expanded),
             )
+            # Demote any split line whose transfer partner just went away
+            # (ADR-051 amendment) — e.g. the user deleted the destination half
+            # of a split-line transfer directly. The split parent survives and
+            # stays balanced; the line simply stops being a transfer. (Deleting
+            # the split parent itself instead removes its partners via the
+            # expansion above, so this only fires for orphaned line refs.)
+            self._conn.execute(
+                "UPDATE txn_split SET transfer_id = NULL "
+                "WHERE transfer_id IS NOT NULL AND transfer_id NOT IN "
+                "  (SELECT transfer_id FROM txn WHERE transfer_id IS NOT NULL)"
+            )
             self.commit()
             return cur.rowcount
         except Exception:
@@ -3158,7 +3345,12 @@ class Repository:
         of any id whose row has a transfer_id. Stable iteration order:
         original ids first, then any added partners. Used by both the
         delete path and the UI's confirmation prompt so the user sees the
-        true count of rows that will be removed."""
+        true count of rows that will be removed.
+
+        A split parent's own ``txn.transfer_id`` is NULL — its transfer links
+        live on its ``txn_split`` lines (ADR-051 amendment) — so the inner set
+        also pulls transfer_ids from the parents' split lines, ensuring a
+        split's line partners are deleted with it."""
         if not txn_ids:
             return []
         placeholders = ",".join("?" * len(txn_ids))
@@ -3167,8 +3359,11 @@ class Repository:
             f"transfer_id IN ("
             f"  SELECT transfer_id FROM txn "
             f"  WHERE id IN ({placeholders}) AND transfer_id IS NOT NULL"
+            f"  UNION "
+            f"  SELECT transfer_id FROM txn_split "
+            f"  WHERE txn_id IN ({placeholders}) AND transfer_id IS NOT NULL"
             f")",
-            tuple(txn_ids),
+            (*txn_ids, *txn_ids),
         )
         partners = {r["id"] for r in cur}
         # Preserve original ordering; append unseen partners at the end.
@@ -5243,10 +5438,13 @@ class Repository:
         # Read from the split-unrolled view (ADR-051): a split parent yields one
         # row per category line (line category + line amount), so budget actuals
         # bucket each line under its own budgeted ancestor. A non-split txn maps
-        # to itself. Splits are never transfers, so split lines always carry
-        # transfer_id NULL and skip the cancellation branch below. The `t2`
-        # subquery deliberately stays on the base `txn` table — transfer pairing
-        # is a parent-row concept, not a per-line one.
+        # to itself. A split *line* may now be a transfer (ADR-051 amendment):
+        # the view exposes the LINE's own transfer_id, so the cancellation branch
+        # below handles it just like a parent-level transfer — an in-perimeter
+        # split-line transfer cancels (its partner txn t2 sits in the perimeter),
+        # an out-of-perimeter one counts as real cross-perimeter flow. The `t2`
+        # subquery stays on base `txn` because the partner is always a real txn
+        # row (the source side lives on the split parent, id != t.txn_id).
         sql = (
             "WITH peri AS ("
             "  SELECT account_id FROM budget_account WHERE budget_id = ?"

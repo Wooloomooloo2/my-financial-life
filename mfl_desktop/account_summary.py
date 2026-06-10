@@ -548,7 +548,11 @@ def top_categories(
     carries lines for a parent txn, each line contributes to its own category
     (negative lines only) instead of the parent's Uncategorised bucket. A
     parent with no lines supplied falls back to its own category — so callers
-    that don't fetch splits get the old, total-on-parent behaviour."""
+    that don't fetch splits get the old, total-on-parent behaviour.
+
+    Transfer-kind split lines (ADR-051 amendment) are skipped: a −£30
+    "Transfer to Savings" line moves money, it isn't spend — consistent with the
+    Spending report, which only aggregates ``category.kind = 'expense'``."""
     split_lines_by_txn = split_lines_by_txn or {}
     totals: dict[int, Decimal] = {}
     labels: dict[int, str] = {}
@@ -562,7 +566,7 @@ def top_categories(
         lines = split_lines_by_txn.get(t.id)
         if lines:
             for ln in lines:
-                if ln.amount >= 0:
+                if ln.amount >= 0 or ln.category_kind == "transfer":
                     continue
                 add(ln.category_id, ln.category_name or "(Uncategorised)",
                     -ln.amount)

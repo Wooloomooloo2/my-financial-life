@@ -15,9 +15,14 @@ and must sum to the total. The dialog enforces that with a live **Unassigned**
 figure that has to reach zero before Save enables. Line amounts are signed, so a
 −120.00 groceries line plus a +20.00 cashback line net to a −100.00 total.
 
-Splits are category-only and never transfers (ADR-051): the per-line category
-picker excludes transfer-kind categories. The dialog writes through the
-Repository and calls ``accept()``; the caller reloads.
+A split line may be a **transfer** (ADR-051 amendment): pick a transfer-kind
+category on a line and a "Transfer to" account picker becomes active for that
+line. On save, that line spawns a real partner ``txn`` in the chosen account
+(the source balance stays correct via the parent total; the destination balance
+moves because of the partner). Same-currency only in v1 — the destination picker
+offers only accounts whose currency matches the split's account. A non-transfer
+line leaves the picker disabled. The dialog writes through the Repository and
+calls ``accept()``; the caller reloads.
 """
 from __future__ import annotations
 
@@ -57,6 +62,7 @@ STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 _COL_CATEGORY = 0
 _COL_MEMO = 1
 _COL_AMOUNT = 2
+_COL_DEST = 3
 
 
 class SplitTransactionDialog(QDialog):
@@ -80,13 +86,22 @@ class SplitTransactionDialog(QDialog):
         self._repo = repo
         self._account = account
         self._seed = seed
-        # Transfer-kind categories can't appear on a split line (ADR-051).
-        self._categories = [c for c in categories if c.kind != "transfer"]
+        # All categories are selectable, including transfers (ADR-051
+        # amendment): a transfer-kind line reveals the per-line destination
+        # picker below.
+        self._categories = list(categories)
+        self._kind_by_id = {c.id: c.kind for c in self._categories}
+        # Candidate transfer destinations: same currency, not this account
+        # (cross-currency split-line transfers are deferred — see docstring).
+        self._dest_accounts = [
+            a for a in repo.list_accounts()
+            if a.id != account.id and a.currency == account.currency
+        ]
 
         self.setWindowTitle(
             "Edit split transaction" if seed else "New split transaction"
         )
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(680)
 
         outer = QVBoxLayout(self)
 
@@ -124,12 +139,15 @@ class SplitTransactionDialog(QDialog):
         form.addRow("Total:", self._total)
 
         # ── lines table ──
-        self._table = QTableWidget(0, 3)
-        self._table.setHorizontalHeaderLabels(["Category", "Memo", "Amount"])
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(
+            ["Category", "Memo", "Amount", "Transfer to"]
+        )
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(_COL_CATEGORY, QHeaderView.Stretch)
         hdr.setSectionResizeMode(_COL_MEMO, QHeaderView.Stretch)
         hdr.setSectionResizeMode(_COL_AMOUNT, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(_COL_DEST, QHeaderView.ResizeToContents)
         self._table.verticalHeader().setVisible(False)
         outer.addWidget(self._table)
 
@@ -180,6 +198,7 @@ class SplitTransactionDialog(QDialog):
         for ln in lines:
             self._add_line(
                 category_id=ln.category_id, memo=ln.memo, amount=ln.amount,
+                transfer_to_account_id=ln.transfer_to_account_id,
             )
 
     def _populate_from_prefill(self, prefill: dict) -> None:
@@ -211,6 +230,7 @@ class SplitTransactionDialog(QDialog):
         category_id: Optional[int] = None,
         memo: str = "",
         amount: Optional[Decimal] = None,
+        transfer_to_account_id: Optional[int] = None,
     ) -> None:
         row = self._table.rowCount()
         self._table.insertRow(row)
@@ -226,6 +246,50 @@ class SplitTransactionDialog(QDialog):
         amount_edit.setPlaceholderText("signed")
         amount_edit.textChanged.connect(self._recompute)
         self._table.setCellWidget(row, _COL_AMOUNT, amount_edit)
+
+        dest = self._make_dest_combo(transfer_to_account_id)
+        self._table.setCellWidget(row, _COL_DEST, dest)
+        # Toggle the destination picker as the line's category changes. The
+        # editable category combo fires currentTextChanged on every keystroke;
+        # selected_category_id only resolves once the text exactly matches an
+        # item, so a half-typed category reads as non-transfer (picker stays
+        # disabled) until a transfer category is actually chosen.
+        combo.currentTextChanged.connect(
+            lambda _t, c=combo, d=dest: self._sync_dest_enabled(c, d)
+        )
+        self._sync_dest_enabled(combo, dest)
+
+    def _make_dest_combo(
+        self, selected_id: Optional[int] = None,
+    ) -> QComboBox:
+        """A per-line transfer-destination picker (same-currency accounts only).
+        Index 0 is a "—" placeholder meaning no destination (``userData`` None);
+        the rest carry account ids."""
+        combo = QComboBox()
+        combo.addItem("—", userData=None)
+        for a in self._dest_accounts:
+            combo.addItem(a.name, userData=a.id)
+        if selected_id is not None:
+            idx = combo.findData(selected_id)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        combo.currentIndexChanged.connect(self._recompute)
+        return combo
+
+    def _sync_dest_enabled(
+        self, category_combo: QComboBox, dest_combo: QComboBox,
+    ) -> None:
+        """Enable the destination picker only for a transfer-kind line; clear
+        it back to "—" when the line isn't (or is no longer) a transfer."""
+        is_transfer = self._line_is_transfer(category_combo)
+        dest_combo.setEnabled(is_transfer)
+        if not is_transfer and dest_combo.currentIndex() != 0:
+            dest_combo.setCurrentIndex(0)
+        self._recompute()
+
+    def _line_is_transfer(self, category_combo: QComboBox) -> bool:
+        cid = selected_category_id(category_combo)
+        return cid is not None and self._kind_by_id.get(cid) == "transfer"
 
     def _remove_selected_line(self) -> None:
         row = self._table.currentRow()
@@ -264,16 +328,34 @@ class SplitTransactionDialog(QDialog):
             self._table.rowCount() >= 1
             and all_parse
             and remainder == Decimal("0.00")
+            and self._transfer_lines_ok()
         )
         self._set_save_enabled(ok)
+
+    def _transfer_lines_ok(self) -> bool:
+        """Every transfer-kind line needs a chosen destination and a non-zero
+        amount (a zero transfer is meaningless)."""
+        for row in range(self._table.rowCount()):
+            combo = self._table.cellWidget(row, _COL_CATEGORY)
+            if combo is None or not self._line_is_transfer(combo):
+                continue
+            dest = self._table.cellWidget(row, _COL_DEST)
+            if dest is None or dest.currentData() is None:
+                return False
+            amt = self._line_amount(row)
+            if amt is None or amt == Decimal("0.00"):
+                return False
+        return True
 
     def _set_save_enabled(self, enabled: bool) -> None:
         self._buttons.button(QDialogButtonBox.Save).setEnabled(enabled)
 
     # ── save ──
 
-    def _collect_lines(self) -> Optional[list[tuple[int, str, Decimal]]]:
-        lines: list[tuple[int, str, Decimal]] = []
+    def _collect_lines(
+        self,
+    ) -> Optional[list[tuple[int, str, Decimal, Optional[int]]]]:
+        lines: list[tuple[int, str, Decimal, Optional[int]]] = []
         for row in range(self._table.rowCount()):
             combo = self._table.cellWidget(row, _COL_CATEGORY)
             cid = selected_category_id(combo) if combo is not None else None
@@ -292,7 +374,27 @@ class SplitTransactionDialog(QDialog):
                 return None
             memo_edit = self._table.cellWidget(row, _COL_MEMO)
             memo = memo_edit.text().strip() if memo_edit is not None else ""
-            lines.append((int(cid), memo, amt))
+
+            # Transfer lines carry a destination account; non-transfer lines
+            # never do (any stale selection is ignored).
+            dest_id: Optional[int] = None
+            if self._line_is_transfer(combo):
+                dest = self._table.cellWidget(row, _COL_DEST)
+                dest_id = dest.currentData() if dest is not None else None
+                if dest_id is None:
+                    QMessageBox.warning(
+                        self, "Split transaction",
+                        f"Pick a destination account for transfer line "
+                        f"{row + 1}.",
+                    )
+                    return None
+                if amt == Decimal("0.00"):
+                    QMessageBox.warning(
+                        self, "Split transaction",
+                        f"A transfer line can't be zero (line {row + 1}).",
+                    )
+                    return None
+            lines.append((int(cid), memo, amt, dest_id))
         return lines
 
     def _on_save(self) -> None:

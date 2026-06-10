@@ -95,3 +95,37 @@ The parser→service normalised dict gains an optional **`splits`** key (`[{cate
 - **Split-line categories are visible everywhere category usage is derived.** A split line's category lives in `txn_split.category_id`, so the "which categories are used / how often" queries were updated to read the `txn_category_line` view rather than `txn` directly: `list_category_tree` (the category manager's usage count), `count_category_transactions` (delete/merge confirmation), and `distinct_category_ids_for_account` (the register's filter combo). Because the view emits a split's lines (not its Uncategorised parent), a split parent correctly does **not** inflate the Uncategorised count, and a category used only on split lines now shows its true usage and is offered as a register filter. `TransactionRow` carries `split_category_ids` (one extra `GROUP_CONCAT` in the list queries) so the register filter proxy surfaces a "—Split—" parent when the user filters by any of its line categories. The **Spending report** already attributed correctly (its aggregation reads the view) and lists every expense category in its filter regardless of usage, so it needed no change.
 - **Import never loses a transaction.** An unbalanced or malformed Banktivity split is auto-balanced (remainder line) and logged, not dropped — consistent with the ADR-038 "trust the data, surface the oddity" stance.
 - **Deferred:** QIF split import (`S`/`E`/`$` lines in `!Type:Bank`/`!Type:CCard` sections — currently skipped) is a cheap later extension of the same `splits` dict contract; the OFX/QFX/generic-CSV paths simply never emit `splits`. Per-line transfers and investment splits remain out of scope.
+
+---
+
+## Amendment — transfer categories on split lines (2026-06-10, Accepted)
+
+The original "a split is never a transfer" rule (above) was a v1 simplification, not a hard constraint of the design. The owner wanted to split one outflow across both categories **and** a transfer — e.g. a £100 payment recorded as −£70 Groceries + −£30 *Transfer to Savings* in a single entry. This amendment lifts the rule for split **lines** while preserving everything that made the parent-total design safe.
+
+### Model
+
+A split's parent `txn` still carries the full signed total, so the **source** balance and every money-layer query stay untouched — exactly as before. A line that uses a **transfer-kind category** additionally:
+
+- carries its own **`transfer_id`** (new nullable column on `txn_split`, migration **0018**, mirroring `txn.transfer_id`: plain TEXT, no FK);
+- spawns a **real partner `txn`** in the chosen destination account, sharing that `transfer_id`, with `amount = −line_amount` (the two halves carry opposite signs, same convention as `create_transfer`). The partner is an ordinary single transaction, *not* itself a split — so the **destination** balance moves correctly because a real row landed there (a `txn_split` row alone moves no money out of the source);
+- writes a **`transfer` parent row** recording direction + rate. Direction follows the line sign (line `< 0` ⇒ `from = source, to = dest`; line `> 0` ⇒ reversed).
+
+A txn "is a split" is still "has ≥1 `txn_split` row"; the split parent's own `txn.transfer_id` stays NULL — the transfer links live on the lines.
+
+**Scope (v1): same-currency only.** The destination picker offers only accounts whose currency matches the split's account, so every split-line transfer is `rate = 1.0, rate_source = 'derived'`. Cross-currency split-line transfers are deferred (the per-line FX UI is heavier and the FX layer is separately incomplete). Investment accounts are still excluded.
+
+### What changed, and what didn't
+
+- **The `txn_category_line` view** (migration 0018 recreates it) now sources `transfer_id` from the **line** (`s.transfer_id`) for split rows instead of the parent. This is the only change the budget perimeter needs: `list_perimeter_txns`'s intra-perimeter `NOT EXISTS (… t2 …)` cancellation now sees a split-line transfer's partner and **cancels it when the destination is in-perimeter / counts it when out** — verified both ways. The `t2` subquery stays on base `txn` because the partner is always a real `txn` row.
+- **`spending_aggregates` is unchanged** — it filters `category.kind = 'expense'`, so transfer-kind lines drop out of spend automatically. **`top_categories`** (the in-memory unroll) gained a one-line skip of transfer-kind lines to match.
+- **`_replace_split_lines`** is now transfer-aware: on every insert/update it tears down the partner txns the split currently owns and rebuilds them from the new line set (`_make_split_line_transfer` reuses `_insert_transfer_half` / `_insert_transfer_parent`). It accepts both the legacy 3-tuple line and a 4-tuple `(category_id, memo, amount, transfer_to_account_id)`, so the **import path is untouched** (Banktivity splits are never transfers and keep passing 3-tuples).
+- **Delete is symmetric.** `expand_transfer_partners` also pulls partners reached via `txn_split.transfer_id`, so deleting a split parent removes its line partners (and the confirm count is right). Deleting a partner *directly* instead **demotes** the line — `delete_transactions` clears any now-dangling `txn_split.transfer_id` so the split parent survives, balanced, with that line reverted to a plain category line. `convert_split_to_plain` deletes the partners before collapsing.
+- **The dialog** drops the transfer-kind exclusion and adds a per-line **"Transfer to"** picker, enabled only for a transfer-kind line (same-currency destinations only). Save gates on every transfer line having a non-zero amount and a chosen destination; edit mode seeds each line's destination from the partner.
+
+### Known limitation
+
+Editing a split is **tear-down-and-rebuild**: a transfer line's partner txn is deleted and recreated. If that partner had been **reconciled** into a statement, the rebuild loses its reconciled/statement link. Accepted for v1 (splitting-with-transfers is new and editing a reconciled split already prompts a confirm); a future diff-and-preserve pass could keep the partner row stable across edits.
+
+### Verification (2026-06-10)
+
+Headless on a temp copy of the live DB (25 checks): migration 0018 applies (schema_version 18; column + recreated view present); a −70 expense + −30 transfer split lands one +30 partner in the destination, leaves the source balance −100 and `compute_account_balances` consistent, moves the destination +30; spending + top-categories attribute the −70 and omit the −30; the split line reports its destination + `category_kind`; editing tears down the old partner and rebuilds it in the new destination; the sum invariant still rejects mismatches; deleting the parent removes the partner, `convert_split_to_plain` removes it, and deleting the partner directly demotes the line (parent stays balanced). Budget perimeter cancellation verified both in- and out-of-perimeter. **Qt smoke** (offscreen, PySide6 6.11.1 / miniforge base, 8 checks): the "Transfer to" picker shows only for transfer lines, lists only same-currency accounts, Save gates on a chosen destination, reverting to an expense clears + disables it, and edit mode seeds the destination.
