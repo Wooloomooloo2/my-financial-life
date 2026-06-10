@@ -1,7 +1,7 @@
 # ADR-049 — Tiingo request-waste reduction: orphan-skip, give-up memory, and 429 back-off
 
-**Date:** 2026-06-09
-**Status:** Accepted
+**Date:** 2026-06-09 (amended 2026-06-10)
+**Status:** Accepted (amended — see *Amendment 2026-06-10* at the foot)
 **Related:** ADR-044 (Tiingo price client + `security_price` + the launch refresh — this constrains all of it), ADR-047 (auto-backfill via `securities_missing_history` + `_PriceRefreshRunnable` — the very paths that were re-fetching every launch; also the source of the "uncovered ticker retried per launch" open item this closes), ADR-043 (`security` master + the `txn.security_id` link used to tell a held security from an orphan).
 
 ---
@@ -50,3 +50,21 @@ These compose: launch order stays `seed_prices_from_transactions` → `backfill_
 - **Deferred (explicitly):** a real **request-budget tracker** (rolling hour/day counters, resumable partial backfill that picks up where it left off) is the next step if the owner imports many more tickered accounts; this ADR's back-off is reactive (stop once told no), not proactive (pace to stay under). Also deferred: surfacing give-up state in the Securities/Stock Record UI (a "Tiingo: not covered" hint) and a manual "retry now" that clears the cooldown — the per-security Fetch button already bypasses it.
 - **Rejected — reduce history granularity to weekly/monthly:** doesn't reduce request count (one request per ticker regardless), so it can't address a rate-limit problem; it only trims stored rows at the cost of chart detail. Kept daily.
 - **Rejected — delete/auto-archive orphan securities:** destructive and premature; the owner intends to migrate the accounts that hold them. Skipping them at fetch time is reversible and needs no decision about data the owner still wants.
+
+---
+
+## Amendment 2026-06-10 — the history backfill was never actually fetching history
+
+**Symptom.** The owner ran "pull all history" again and reported it *"didn't really seem to update much history and told me I used all my tokens again in one update."* Inspection of the live DB: **42 `security_price` rows of `source='tiingo'` across 36 tickered securities, every row dated 2026-06-08 or -09** — i.e. nothing but the last two days' latest-close refreshes. No security had an actual historical series, despite the backfill having been run repeatedly.
+
+**Root cause — a defect in the original ADR-044 client that this very ADR's narrative mis-stated.** The Context section above asserts that Tiingo's daily endpoint *"returns a security's entire series in one HTTP request regardless of date range."* That is only true **when a `startDate` is supplied.** `GET /tiingo/daily/<ticker>/prices` **with no date parameters returns only the latest single end-of-day row.** `TiingoClient.fetch_historical` called `_request(sym, start_date=None)` and its docstring claimed *"None lets Tiingo return its default window (several years)"* — both wrong. So every history backfill (`backfill_historical_into`, `backfill_missing_history_into`, `backfill_security_history_into`) fetched exactly **one row** per ticker, identical to a latest-refresh.
+
+**This silently defeated waste-stopper §2's premise.** A security only leaves `securities_missing_history(min_points=2)` once it has ≥2 real prices. Because the backfill never landed more than one row, securities never crossed that threshold, so `backfill_missing_history_into` re-fetched ~all of them on **every launch** — and `refresh_latest_prices_into` fetched ~all of them again — ≈60 requests/launch, repeatedly, blowing the 50/hour cap. The orphan-skip and 429 back-off shipped in this ADR were real and working; they were masking, not fixing, this deeper bug (the back-off was firing because the backfill kept generating ~60 requests it shouldn't have needed to).
+
+**Fix (one change, centralised).** `fetch_historical` now sends `HISTORY_START_DATE = "1900-01-01"` (a new module constant) when the caller passes no `start_date`. Tiingo clamps it to each security's inception, so one request returns the whole series — which is what the rest of this ADR always assumed. `_fetch_one` / `refresh_latest_prices_into` are unchanged: they deliberately send **no** `startDate` because they genuinely want only the latest row. An explicit `start_date` from a caller is still respected.
+
+**Knock-on benefit — this also fixes the request-volume complaint at steady state.** Once a backfill lands a full multi-year series, those securities cross `min_points=2` **permanently** and drop out of `securities_missing_history` for good, so the per-launch re-fetch storm stops; steady state collapses to the 24h-throttled latest-refresh (~35 tickers < 50/hour).
+
+**Known residual (accepted, not fixed here).** The *first* catch-up launch after this fix still wants ~23 history + ~35 latest ≈ 58 requests, over the 50/hour cap, so it 429s partway. But now **partial progress sticks** (each backfilled security drops out permanently) and the §3 back-off window prevents wasteful retries, so it self-heals across ~2 hourly windows. A proactive request-budget pacer remains the deferred heavier follow-up (already noted under Consequences). Also note: ~9 securities that accumulated 2 *latest-close* rows during the bug era now satisfy `min_points=2` and so won't auto-backfill — the deliberate **Backfill history** button (`backfill_historical_into`, which fetches all held tickers regardless of count) is the way to pull their real history.
+
+**Verification.** Headless URL-construction test (no quota spent): `fetch_historical('DIVO')` now emits `…/prices?…&startDate=1900-01-01` and returns the full series; an explicit `start_date` is passed through verbatim; `_fetch_one` still emits a URL with no `startDate`. A live positive test (full series actually returned) was blocked by the active 429 window at diagnosis time and is to be confirmed by the owner clicking **Backfill history** once the window clears.

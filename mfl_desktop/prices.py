@@ -45,6 +45,13 @@ RATE_LIMIT_BACKOFF_SECONDS = 3600
 # is then retried automatically (a ticker that gains coverage heals itself).
 PRICE_UNAVAILABLE_COOLDOWN_DAYS = 30
 
+# Default earliest date for a history backfill (ADR-049 amendment). Tiingo's
+# daily-prices endpoint returns only the latest SINGLE row when no startDate is
+# sent; the full series requires an explicit startDate. This far-past date is
+# clamped by Tiingo to each security's inception, so one call returns the whole
+# history. Used whenever fetch_historical is called without an explicit start.
+HISTORY_START_DATE = "1900-01-01"
+
 _BASE_URL = "https://api.tiingo.com/tiingo/daily"
 
 
@@ -130,11 +137,13 @@ class TiingoClient:
         """Full daily close series for one symbol, ascending by date. Tiingo
         returns the whole history in a single call, so a backfill is one
         request per ticker. ``start_date`` ('YYYY-MM-DD') bounds the earliest
-        day; None lets Tiingo return its default window (several years)."""
+        day; when None we send ``HISTORY_START_DATE`` (a far-past date Tiingo
+        clamps to inception) — **without a startDate Tiingo's prices endpoint
+        returns only the latest single row, not history** (ADR-049 amendment)."""
         sym = (symbol or "").strip().upper()
         if not sym:
             return []
-        payload = self._request(sym, start_date=start_date)
+        payload = self._request(sym, start_date=start_date or HISTORY_START_DATE)
         out: list[tuple[str, float]] = []
         for row in payload:
             close = row.get("close")
