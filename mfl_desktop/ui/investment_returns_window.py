@@ -76,6 +76,23 @@ _TABLE_HEADERS = (
 )
 
 
+class _SortItem(QTableWidgetItem):
+    """Table cell that sorts on a value stashed in ``Qt.UserRole`` rather than
+    its display text — so a "$1,234.56" or "+12.3%" or "—" cell orders
+    numerically. Falls back to case-insensitive text when no sort value is set
+    (the Symbol / Security columns)."""
+
+    def __lt__(self, other: "QTableWidgetItem") -> bool:
+        a = self.data(Qt.UserRole)
+        b = other.data(Qt.UserRole)
+        if a is not None and b is not None:
+            try:
+                return float(a) < float(b)
+            except (TypeError, ValueError):
+                pass
+        return self.text().casefold() < other.text().casefold()
+
+
 def _sym(currency: Optional[str]) -> str:
     return _CURRENCY_SYMBOLS.get((currency or "").upper(), "")
 
@@ -171,7 +188,15 @@ class InvestmentReturnsWindow(QMainWindow):
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setAlternatingRowColors(True)
+        # Click-to-sort. Numeric columns sort on a stored value (Qt.UserRole)
+        # via _SortItem, not on the formatted "$1,234.56" / "—" text. The
+        # indicator starts cleared so a fresh load keeps the report's default
+        # order (held first, by total return); once the user clicks a header
+        # the choice sticks across filter changes.
+        self._table.setSortingEnabled(True)
         hh = self._table.horizontalHeader()
+        hh.setSortIndicatorShown(True)
+        hh.setSortIndicator(-1, Qt.AscendingOrder)
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
         for col in range(2, len(_TABLE_HEADERS)):
@@ -511,36 +536,55 @@ class InvestmentReturnsWindow(QMainWindow):
         )
 
     def _populate_table(self, rows: list[dict]) -> None:
+        # Disable sorting while filling, or each setItem would re-sort the
+        # partly-built table and scramble row/column alignment. Re-enabled after
+        # — Qt then applies the header's current sort indicator (none on a fresh
+        # load → keeps the insertion order set by _refresh's rows.sort).
+        self._table.setSortingEnabled(False)
         self._table.setRowCount(len(rows))
+        _LOW = float("-inf")   # unpriced cells ("—") sort to the bottom
         for r, m in enumerate(rows):
             priced = m["priced"]
             unreal = m["unreal"] if priced else None
+            cost_total = float(m["cost_total"])
+            # (display text, alignment, colour, numeric sort key — None = sort by text)
             cells = [
-                (m["symbol"], Qt.AlignLeft, None),
-                (m["name"], Qt.AlignLeft, None),
-                (self._money(m["cost_total"]), Qt.AlignRight, None),
-                (self._money(m["mv"]) if priced else "—", Qt.AlignRight, None),
+                (m["symbol"], Qt.AlignLeft, None, None),
+                (m["name"], Qt.AlignLeft, None, None),
+                (self._money(m["cost_total"]), Qt.AlignRight, None, cost_total),
+                (
+                    self._money(m["mv"]) if priced else "—",
+                    Qt.AlignRight, None,
+                    float(m["mv"]) if priced else _LOW,
+                ),
                 (
                     self._signed(unreal) + self._pct(float(unreal), float(m["cost"]))
                     if unreal is not None else "—",
                     Qt.AlignRight,
                     self._colour(unreal),
+                    float(unreal) if unreal is not None else _LOW,
                 ),
-                (self._signed(m["realized"]), Qt.AlignRight, self._colour(m["realized"])),
-                (self._money(m["div"]), Qt.AlignRight, None),
-                (self._signed(m["total"]), Qt.AlignRight, self._colour(m["total"])),
+                (self._signed(m["realized"]), Qt.AlignRight, self._colour(m["realized"]),
+                 float(m["realized"])),
+                (self._money(m["div"]), Qt.AlignRight, None, float(m["div"])),
+                (self._signed(m["total"]), Qt.AlignRight, self._colour(m["total"]),
+                 float(m["total"])),
                 (
-                    self._roi(float(m["total"]), float(m["cost_total"])),
+                    self._roi(float(m["total"]), cost_total),
                     Qt.AlignRight,
                     self._colour(m["total"]),
+                    float(m["total"]) / cost_total if cost_total else _LOW,
                 ),
             ]
-            for c, (text, align, colour) in enumerate(cells):
-                item = QTableWidgetItem(text)
+            for c, (text, align, colour, sortkey) in enumerate(cells):
+                item = _SortItem(text)
                 item.setTextAlignment(int(align | Qt.AlignVCenter))
                 if colour is not None:
                     item.setForeground(QColor(colour))
+                if sortkey is not None:
+                    item.setData(Qt.UserRole, sortkey)
                 self._table.setItem(r, c, item)
+        self._table.setSortingEnabled(True)
 
     @staticmethod
     def _colour(amount) -> Optional[str]:
