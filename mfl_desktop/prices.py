@@ -137,9 +137,11 @@ class TiingoClient:
         """Full daily close series for one symbol, ascending by date. Tiingo
         returns the whole history in a single call, so a backfill is one
         request per ticker. ``start_date`` ('YYYY-MM-DD') bounds the earliest
-        day; when None we send ``HISTORY_START_DATE`` (a far-past date Tiingo
-        clamps to inception) — **without a startDate Tiingo's prices endpoint
-        returns only the latest single row, not history** (ADR-049 amendment)."""
+        day — callers normally pass the security's first-transaction floor so we
+        don't store pre-ownership prices. When None we fall back to
+        ``HISTORY_START_DATE`` (a far-past date Tiingo clamps to inception),
+        because **without a startDate Tiingo's prices endpoint returns only the
+        latest single row, not history** (ADR-049 amendment)."""
         sym = (symbol or "").strip().upper()
         if not sym:
             return []
@@ -423,7 +425,9 @@ def backfill_missing_history_into(
     total = len(securities)
     for i, sec in enumerate(securities):
         try:
-            series = client.fetch_historical(sec.symbol)
+            # Fetch only from this security's first-transaction floor (ADR-049
+            # amendment) — no point storing prices from before it was held.
+            series = client.fetch_historical(sec.symbol, sec.earliest_txn_date)
             rows = [
                 (sec.id, on_date, price, "tiingo") for on_date, price in series
             ]
@@ -501,6 +505,11 @@ def backfill_security_history_into(
         return RefreshResult(
             fetched_at=None, new_prices_count=0, errors=[_backoff_message(until)],
         )
+    # Explicit start_date wins; otherwise floor to this security's first
+    # transaction (ADR-049 amendment) so we don't pull pre-ownership history.
+    # Falls through to fetch_historical's far-past default if there are no txns.
+    if start_date is None:
+        start_date = repo.earliest_transaction_date(security_id)
     client = TiingoClient(api_key)
     errors: list[str] = []
     count = 0
@@ -563,7 +572,11 @@ def backfill_historical_into(
     total = len(securities)
     for i, sec in enumerate(securities):
         try:
-            series = client.fetch_historical(sec.symbol, start_date)
+            # Explicit start_date (caller override) wins; otherwise fetch from
+            # this security's first-transaction floor (ADR-049 amendment).
+            series = client.fetch_historical(
+                sec.symbol, start_date or sec.earliest_txn_date,
+            )
             rows = [
                 (sec.id, on_date, price, "tiingo") for on_date, price in series
             ]

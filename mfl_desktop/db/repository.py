@@ -105,12 +105,19 @@ class TransactionRow:
 class SecurityRow:
     """A row in the securities master (ADR-043). Referenced by `name`
     (the QIF `Y` field); `symbol` is the optional ticker (often blank in
-    Banktivity exports)."""
+    Banktivity exports).
+
+    `earliest_txn_date` (ADR-049 amendment) is the buffered date of this
+    security's first transaction — the floor a history backfill should fetch
+    from, so we don't pull (and store) decades of prices from before the owner
+    ever held it. ``None`` when the row was built by a caller that doesn't need
+    it (only the pricing queries populate it)."""
     id: int
     iri: str
     name: str
     symbol: str
     type: str
+    earliest_txn_date: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1624,7 +1631,12 @@ class Repository:
         cur = self._conn.execute(
             "SELECT s.id, s.iri, s.name, "
             "       COALESCE(s.symbol, '') AS symbol, "
-            "       COALESCE(s.type, '') AS type "
+            "       COALESCE(s.type, '') AS type, "
+            # Buffered first-transaction date — the backfill floor (ADR-049
+            # amendment). 7 days before the first trade so a nearest-prior
+            # price lookup around the buy date still resolves.
+            "       (SELECT date(MIN(t.posted_date), '-7 days') "
+            "          FROM txn t WHERE t.security_id = s.id) AS earliest_txn "
             "FROM security s "
             "LEFT JOIN security_price sp ON sp.security_id = s.id "
             "WHERE s.archived_at IS NULL AND COALESCE(s.symbol, '') != '' "
@@ -1641,6 +1653,7 @@ class Repository:
             SecurityRow(
                 id=r["id"], iri=r["iri"], name=r["name"],
                 symbol=r["symbol"], type=r["type"],
+                earliest_txn_date=r["earliest_txn"],
             )
             for r in cur
         ]
@@ -1665,7 +1678,11 @@ class Repository:
         cur = self._conn.execute(
             "SELECT s.id, s.iri, s.name, "
             "       COALESCE(s.symbol, '') AS symbol, "
-            "       COALESCE(s.type, '') AS type "
+            "       COALESCE(s.type, '') AS type, "
+            # Buffered first-transaction date — the backfill floor (ADR-049
+            # amendment); see securities_missing_history for the rationale.
+            "       (SELECT date(MIN(t.posted_date), '-7 days') "
+            "          FROM txn t WHERE t.security_id = s.id) AS earliest_txn "
             "FROM security s "
             "WHERE s.archived_at IS NULL AND COALESCE(s.symbol, '') != '' "
             "  AND EXISTS (SELECT 1 FROM txn t WHERE t.security_id = s.id) "
@@ -1678,9 +1695,26 @@ class Repository:
             SecurityRow(
                 id=r["id"], iri=r["iri"], name=r["name"],
                 symbol=r["symbol"], type=r["type"],
+                earliest_txn_date=r["earliest_txn"],
             )
             for r in cur
         ]
+
+    def earliest_transaction_date(
+        self, security_id: int, *, buffer_days: int = 7,
+    ) -> Optional[str]:
+        """Buffered date ('YYYY-MM-DD') of a security's first transaction — the
+        floor for a single-security history backfill (ADR-049 amendment, the
+        Stock Record 'Fetch from Tiingo' path). ``buffer_days`` before the first
+        trade so a nearest-prior price lookup around the buy date resolves.
+        Returns ``None`` when the security has no transactions (caller then
+        falls back to the far-past default)."""
+        row = self._conn.execute(
+            "SELECT date(MIN(posted_date), ?) AS d "
+            "FROM txn WHERE security_id = ?",
+            (f"-{int(buffer_days)} days", security_id),
+        ).fetchone()
+        return row["d"] if row and row["d"] else None
 
     def mark_security_price_unavailable(
         self, security_id: int, *, when: Optional[str] = None,
