@@ -26,10 +26,11 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QCompleter,
+    QDateEdit,
     QLineEdit,
     QStyledItemDelegate,
 )
@@ -167,6 +168,33 @@ class CategoryTypeaheadDelegate(QStyledItemDelegate):
         if new_id is None:
             return
         model.setData(index, new_id, Qt.EditRole)
+
+
+class DateEditDelegate(QStyledItemDelegate):
+    """Calendar-popup editor for the register's Date column.
+
+    Uses a ``QDateEdit`` with the same ``yyyy-MM-dd`` display format and
+    calendar popup as the New Transaction dialog, so inline date entry feels
+    identical. The cell stores an ISO date string; the editor parses it on open
+    and writes it back the same way. A QDateEdit can only ever produce a valid
+    date, so no input validation is needed on the way out.
+    """
+
+    _FORMAT = "yyyy-MM-dd"
+
+    def createEditor(self, parent, option, index):
+        editor = QDateEdit(parent)
+        editor.setCalendarPopup(True)
+        editor.setDisplayFormat(self._FORMAT)
+        return editor
+
+    def setEditorData(self, editor: QDateEdit, index) -> None:
+        qd = QDate.fromString(str(index.data(Qt.EditRole) or ""), self._FORMAT)
+        if qd.isValid():
+            editor.setDate(qd)
+
+    def setModelData(self, editor: QDateEdit, model, index) -> None:
+        model.setData(index, editor.date().toString(self._FORMAT), Qt.EditRole)
 
 
 class StatusDelegate(QStyledItemDelegate):

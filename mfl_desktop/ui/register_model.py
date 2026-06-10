@@ -40,7 +40,7 @@ class TransactionTableModel(QAbstractTableModel):
 
     # (header_label, attribute_name, editable)
     COLUMNS_SINGLE = [
-        ("Date",     "posted_date",     False),
+        ("Date",     "posted_date",     True),
         ("Payee",    "payee_name",      True),
         ("Category", "category_name",   True),
         ("Status",   "status",          True),
@@ -49,7 +49,7 @@ class TransactionTableModel(QAbstractTableModel):
         ("Balance",  "running_balance", False),
     ]
     COLUMNS_ALL = [
-        ("Date",     "posted_date",     False),
+        ("Date",     "posted_date",     True),
         ("Account",  "account_name",    False),
         ("Payee",    "payee_name",      True),
         ("Category", "category_name",   True),
@@ -201,6 +201,13 @@ class TransactionTableModel(QAbstractTableModel):
     def _apply_edit(
         self, row: TransactionRow, col_name: str, value,
     ) -> Optional[TransactionRow]:
+        if col_name == "posted_date":
+            try:
+                stored = self._repo.update_transaction_date(row.id, str(value))
+            except ValueError:
+                return None
+            return replace(row, posted_date=stored)
+
         if col_name == "payee_name":
             new_name = str(value).strip()
             payee_id, display = self._repo.update_transaction_payee(row.id, new_name)

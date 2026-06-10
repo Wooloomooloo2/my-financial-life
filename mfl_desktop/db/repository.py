@@ -2688,6 +2688,25 @@ class Repository:
         )
         self.commit()
 
+    def update_transaction_date(self, txn_id: int, new_date: str) -> str:
+        """Set a transaction's posted date ('YYYY-MM-DD'). Returns the stored
+        date. Validates the format (ISO date) so a malformed string can't reach
+        the column and break date-window / running-balance ordering.
+
+        A transfer pair's two halves are NOT date-synced — the two sides of a
+        transfer often clear on different dates (one account posts a day later),
+        so each row keeps its own posted date (unlike amount, which must stay in
+        sign-locked step)."""
+        try:
+            normalized = date.fromisoformat(str(new_date).strip()).isoformat()
+        except ValueError as e:
+            raise ValueError(f"Invalid date: {new_date!r}") from e
+        self._conn.execute(
+            "UPDATE txn SET posted_date = ? WHERE id = ?", (normalized, txn_id),
+        )
+        self.commit()
+        return normalized
+
     def update_transaction_amount(
         self, txn_id: int, new_signed_amount: Decimal,
     ) -> Decimal:

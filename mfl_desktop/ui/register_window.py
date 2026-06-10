@@ -49,6 +49,7 @@ from mfl_desktop.ui.securities_dialog import SecuritiesDialog
 from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
     CategoryTypeaheadDelegate,
+    DateEditDelegate,
     PayeeTypeaheadDelegate,
     StatusDelegate,
 )
@@ -438,6 +439,13 @@ class RegisterWindow(QMainWindow):
         # positions differ between modes.
         for i in range(len(self._model.COLUMNS)):
             self._table.setItemDelegateForColumn(i, None)
+        # Date gets a calendar editor wherever it's editable (cash registers;
+        # investment rows are dialog-edited, so their Date column stays read-only).
+        date_idx = col_index.get("posted_date")
+        if date_idx is not None and self._model.COLUMNS[date_idx][2]:
+            self._table.setItemDelegateForColumn(
+                date_idx, DateEditDelegate(self._table),
+            )
         if "payee_name" in col_index:
             self._table.setItemDelegateForColumn(
                 col_index["payee_name"],
@@ -824,7 +832,7 @@ class RegisterWindow(QMainWindow):
 
         - Category set to a transfer-kind value → pop the destination
           prompt (ADR-020).
-        - Amount changed → reload the model so running balances
+        - Amount or Date changed → reload the model so running balances
           recompute, and refresh sidebar balances.
 
         Other edits — payee, status, memo — pass through without action."""
@@ -832,11 +840,11 @@ class RegisterWindow(QMainWindow):
         if col_idx < 0 or col_idx >= len(self._model.COLUMNS):
             return
         col_name = self._model.COLUMNS[col_idx][1]
-        if col_name == "amount":
-            # Running balance and sidebar totals are stale after an
-            # amount edit; reload picks up the new running balance from
-            # the Repository (computed in list order) and the sidebar
-            # refresh re-sums account totals.
+        if col_name in ("amount", "posted_date"):
+            # Running balance and sidebar totals are stale after an amount edit;
+            # a date edit additionally reorders the row (date is the running-
+            # balance sort key). Reload picks up the new running balances from
+            # the Repository (computed in list order) and re-sums the sidebar.
             self._model.reload()
             self._refresh_sidebar_balances()
             return
