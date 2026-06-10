@@ -7,13 +7,20 @@ and + Debt buttons at the bottom of their columns open the existing
 AccountDialog so adding shows up in the report on accept.
 
 Pies are deliberately substituted with a proportional bar — owner rule.
-Investment and property balances use the same opening + sum(txn.amount)
-formula as cash and credit; the schema's `valuation` table is reserved
-for mark-to-market but isn't wired in v1 (ADR-019).
+Investment balances are market value (cash + Σ shares × latest price, ADR-044);
+property/vehicle use the cash formula until the valuation pipeline lands.
+
+**Currency (ADR-055):** account values come back in each account's *own*
+currency. Everything is converted to a chosen **display currency** (a selector,
+default = the person's base currency) via ``Repository.convert_amount`` before
+any total is summed — otherwise a USD brokerage would be added to GBP at par.
+An account whose rate is missing is *excluded* from the totals (never folded in
+at 1:1) and surfaced in a banner with a one-click path to set the rate.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Optional
 
@@ -21,11 +28,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -37,6 +46,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.account_types import ACCOUNT_TYPES
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui.account_dialog import AccountDialog
+from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.proportional_bar import BarSegment, ProportionalBar
 
 
@@ -52,6 +62,12 @@ _FAMILY_VIEW: list[tuple[str, str, QColor, str]] = [
 
 _ASSET_COLOR = QColor("#16a34a")   # column header
 _DEBT_COLOR = QColor("#dc2626")
+
+_CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
+
+
+def _symbol(currency: str) -> str:
+    return _CCY_SYMBOLS.get((currency or "").upper(), "")
 
 
 @dataclass(frozen=True)
@@ -85,6 +101,41 @@ class NetWorthWindow(QMainWindow):
         self.resize(1240, 720)
         self._repo = repo
 
+        # Currency state, set per refresh.
+        self._display_ccy: str = "GBP"
+        self._converted: dict[int, Optional[Decimal]] = {}
+        self._native: dict[int, Decimal] = {}
+        self._missing: list[tuple[AccountSummary, Decimal]] = []
+        self._fallback_used = False
+
+        # ── top bar: display-currency selector ──
+        top_bar = QWidget()
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(20, 12, 20, 0)
+        top_layout.addWidget(QLabel("Display currency:"))
+        self._ccy_combo = QComboBox()
+        self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
+        top_layout.addWidget(self._ccy_combo)
+        top_layout.addStretch(1)
+        self._populate_ccy_combo()
+
+        # ── missing-rate banner (hidden unless something can't convert) ──
+        self._banner = QFrame()
+        self._banner.setStyleSheet(
+            "QFrame { background: #fef3c7; border: 1px solid #f59e0b; "
+            "border-radius: 6px; }"
+        )
+        banner_layout = QHBoxLayout(self._banner)
+        banner_layout.setContentsMargins(12, 8, 12, 8)
+        self._banner_label = QLabel("")
+        self._banner_label.setWordWrap(True)
+        self._banner_label.setStyleSheet("color: #92400e; border: none;")
+        banner_layout.addWidget(self._banner_label, 1)
+        self._banner_btn = QPushButton("Set exchange rate…")
+        self._banner_btn.clicked.connect(self._on_set_rate)
+        banner_layout.addWidget(self._banner_btn, 0)
+        self._banner.setVisible(False)
+
         # ── columns ──
         self._summary_panel, self._summary_total_lbl, \
             self._bar, self._legend_layout = self._build_summary_panel()
@@ -102,10 +153,41 @@ class NetWorthWindow(QMainWindow):
         splitter.setStretchFactor(2, 1)
         splitter.setSizes([400, 400, 400])
 
-        self.setCentralWidget(splitter)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(8)
+        central_layout.addWidget(top_bar)
+        central_layout.addWidget(self._banner)
+        central_layout.addWidget(splitter, stretch=1)
+        self.setCentralWidget(central)
         self._refresh()
 
     # ── builders ──
+
+    def _populate_ccy_combo(self) -> None:
+        """Fill the display-currency selector from the currencies in use,
+        defaulting to the person's base currency (then GBP, then the first in
+        use). Built once; selection drives the conversion target."""
+        currencies = self._repo.list_distinct_currencies()
+        base = self._repo.get_setting("base_currency")
+        options = sorted(set(currencies) | ({base} if base else set()))
+        if not options:
+            options = ["GBP"]
+        if base and base in options:
+            default = base
+        elif "GBP" in options:
+            default = "GBP"
+        else:
+            default = options[0]
+        self._display_ccy = default
+        self._ccy_combo.blockSignals(True)
+        self._ccy_combo.clear()
+        for ccy in options:
+            self._ccy_combo.addItem(ccy, ccy)
+        i = self._ccy_combo.findData(default)
+        self._ccy_combo.setCurrentIndex(i if i >= 0 else 0)
+        self._ccy_combo.blockSignals(False)
 
     def _build_summary_panel(self) -> tuple[QWidget, QLabel, ProportionalBar, QVBoxLayout]:
         panel = QWidget()
@@ -206,6 +288,74 @@ class NetWorthWindow(QMainWindow):
         layout.addWidget(add_btn)
         return panel, total_lbl, tree
 
+    # ── currency conversion ──
+
+    def _convert_all(
+        self, accounts: list[AccountSummary], native: dict[int, Decimal],
+    ) -> None:
+        """Convert every account's native value to the display currency, into
+        ``self._converted`` (None when no rate is on file). Non-zero
+        unconvertable accounts are collected into ``self._missing`` for the
+        banner. Mirrors ADR-046's _conv, but EXCLUDES rather than 1:1-folds a
+        missing rate — a par-add is exactly the bug this fixes (ADR-055)."""
+        self._converted = {}
+        self._native = dict(native)        # for native-amount tooltips
+        self._missing = []
+        self._fallback_used = False
+        today = date.today().isoformat()
+        for a in accounts:
+            val = native.get(a.id, Decimal("0.00"))
+            if a.currency == self._display_ccy:
+                self._converted[a.id] = val
+                continue
+            converted, fallback = self._repo.convert_amount(
+                val, from_ccy=a.currency, to_ccy=self._display_ccy,
+                on_date=today,
+            )
+            if converted is None:
+                self._converted[a.id] = None
+                if val != 0:
+                    self._missing.append((a, val))
+            else:
+                self._converted[a.id] = converted
+                self._fallback_used = self._fallback_used or fallback
+
+    def _sum_converted(self, members: list[AccountSummary], *, negate: bool) -> Decimal:
+        """Sum the display-currency values of ``members``, skipping any whose
+        rate is missing. ``negate`` flips the sign for liabilities (stored
+        negative, shown as positive owed)."""
+        total = Decimal("0.00")
+        for m in members:
+            v = self._converted.get(m.id)
+            if v is None:
+                continue
+            total += (-v if negate else v)
+        return total
+
+    def _update_banner(self) -> None:
+        """Show / hide the excluded-accounts banner. Groups the missing
+        accounts by currency and states each native sum, so the user knows
+        exactly what's left out and what rate to add."""
+        if not self._missing:
+            self._banner.setVisible(False)
+            return
+        by_ccy: dict[str, tuple[int, Decimal]] = {}
+        for acct, val in self._missing:
+            n, s = by_ccy.get(acct.currency, (0, Decimal("0.00")))
+            by_ccy[acct.currency] = (n + 1, s + abs(val))
+        parts = []
+        for ccy, (n, s) in sorted(by_ccy.items()):
+            parts.append(
+                f"{n} {ccy} account{'s' if n != 1 else ''} "
+                f"({_symbol(ccy)}{s:,.2f})"
+            )
+        self._banner_label.setText(
+            "Excluded from the totals — no exchange rate to "
+            f"{self._display_ccy}: " + "; ".join(parts)
+            + ".  Add a rate to include them."
+        )
+        self._banner.setVisible(True)
+
     # ── data + render ──
 
     def _refresh(self) -> None:
@@ -213,7 +363,11 @@ class NetWorthWindow(QMainWindow):
         # Market value, not cash: investment accounts contribute
         # cash + Σ(shares × latest price); priced via security_price, falling
         # back to cash when unpriced (ADR-044, closing the ADR-019 follow-up).
-        balances = self._repo.compute_account_values()
+        native = self._repo.compute_account_values()
+
+        # Convert to the display currency before any summation (ADR-055).
+        self._convert_all(accounts, native)
+        self._update_banner()
 
         # Group by family.
         by_family: dict[str, list[AccountSummary]] = {}
@@ -229,18 +383,8 @@ class NetWorthWindow(QMainWindow):
                 by_family.get(fam, []),
                 key=lambda a: a.name.lower(),
             )
-            if kind == "debt":
-                # Liability balances are stored negative; display the
-                # debt as a positive amount (£429 owed, not -£429).
-                total = sum(
-                    (-balances.get(m.id, Decimal("0.00")) for m in members),
-                    start=Decimal("0.00"),
-                )
-            else:
-                total = sum(
-                    (balances.get(m.id, Decimal("0.00")) for m in members),
-                    start=Decimal("0.00"),
-                )
+            # Liability balances are stored negative; show debt positive.
+            total = self._sum_converted(members, negate=(kind == "debt"))
             family_totals.append(_FamilyTotal(
                 family=fam, label=label, color=color, kind=kind,
                 accounts=members, total=total,
@@ -275,25 +419,23 @@ class NetWorthWindow(QMainWindow):
         # Type-level totals power the Assets / Debts columns. The summary
         # panel stays family-level (above) so the proportional bar doesn't
         # explode into 5–10 segments.
-        type_totals = self._compute_type_totals(by_family, balances)
+        type_totals = self._compute_type_totals(by_family)
 
         # Assets column header total + tree.
         self._assets_total_lbl.setText(self._format(asset_total))
-        self._fill_tree(self._assets_tree, type_totals, kind="asset",
-                        balances=balances)
+        self._fill_tree(self._assets_tree, type_totals, kind="asset")
 
         # Debts column header total + tree.
         self._debts_total_lbl.setText(self._format(debt_total))
-        self._fill_tree(self._debts_tree, type_totals, kind="debt",
-                        balances=balances)
+        self._fill_tree(self._debts_tree, type_totals, kind="debt")
 
     def _compute_type_totals(
         self,
         accounts_by_family: dict[str, list[AccountSummary]],
-        balances: dict[int, Decimal],
     ) -> list[_TypeTotal]:
         """Roll up accounts by account.type — finer-grained than family —
-        and pair each type with its family colour and kind."""
+        and pair each type with its family colour and kind. Totals are in the
+        display currency (ADR-055), skipping unconvertable accounts."""
         family_color = {fam: color for fam, _, color, _ in _FAMILY_VIEW}
         family_kind = {fam: kind for fam, _, _, kind in _FAMILY_VIEW}
 
@@ -312,16 +454,7 @@ class NetWorthWindow(QMainWindow):
             if not members:
                 continue
             kind = family_kind.get(spec.family, "asset")
-            if kind == "debt":
-                total = sum(
-                    (-balances.get(m.id, Decimal("0.00")) for m in members),
-                    start=Decimal("0.00"),
-                )
-            else:
-                total = sum(
-                    (balances.get(m.id, Decimal("0.00")) for m in members),
-                    start=Decimal("0.00"),
-                )
+            total = self._sum_converted(members, negate=(kind == "debt"))
             result.append(_TypeTotal(
                 type_storage=spec.storage,
                 type_label=spec.label,
@@ -393,7 +526,6 @@ class NetWorthWindow(QMainWindow):
         type_totals: list[_TypeTotal],
         *,
         kind: str,
-        balances: dict[int, Decimal],
     ) -> None:
         tree.clear()
         bold = QFont()
@@ -416,17 +548,46 @@ class NetWorthWindow(QMainWindow):
             tree.addTopLevelItem(group_item)
 
             for acct in tt.accounts:
-                bal = balances.get(acct.id, Decimal("0.00"))
-                shown = -bal if kind == "debt" else bal
-                child = QTreeWidgetItem([
-                    acct.name,
-                    self._format(shown),
-                ])
+                conv = self._converted.get(acct.id)
+                native = self._native.get(acct.id, Decimal("0.00"))
+                if conv is None:
+                    # No rate — show the native value + a flag rather than a
+                    # fabricated converted figure.
+                    shown_native = -native if kind == "debt" else native
+                    child = QTreeWidgetItem([
+                        acct.name,
+                        f"{_symbol(acct.currency)}{shown_native:,.2f} (no rate)",
+                    ])
+                    child.setForeground(1, QBrush(QColor("#b45309")))
+                    child.setToolTip(
+                        1, f"No {acct.currency}→{self._display_ccy} rate on file.",
+                    )
+                else:
+                    shown = -conv if kind == "debt" else conv
+                    child = QTreeWidgetItem([acct.name, self._format(shown)])
+                    if acct.currency != self._display_ccy:
+                        nshown = -native if kind == "debt" else native
+                        child.setToolTip(
+                            1, f"Native: {_symbol(acct.currency)}{nshown:,.2f} "
+                               f"{acct.currency}",
+                        )
                 child.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
                 group_item.addChild(child)
             group_item.setExpanded(True)
 
     # ── actions ──
+
+    def _on_ccy_changed(self, _idx: int) -> None:
+        data = self._ccy_combo.currentData()
+        if data:
+            self._display_ccy = data
+            self._refresh()
+
+    def _on_set_rate(self) -> None:
+        """Open the Currencies dialog so the user can add (or fetch) the
+        missing rate, then re-render with whatever they entered."""
+        CurrenciesDialog(self._repo, self).exec()
+        self._refresh()
 
     def _on_add_asset(self) -> None:
         self._open_account_dialog()
@@ -449,12 +610,13 @@ class NetWorthWindow(QMainWindow):
                 opening_balance=values.opening_balance,
             )
         except Exception as e:
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(
                 self, "Could not create account",
                 f"The account was not created:\n\n{e}",
             )
             return
+        # A new currency may have appeared — keep the selector in step.
+        self._populate_ccy_combo()
         self._refresh()
         # Tell the register window to refresh its sidebar too.
         owner = self.parent()
@@ -464,12 +626,15 @@ class NetWorthWindow(QMainWindow):
 
     # ── formatting ──
 
-    @staticmethod
-    def _format(amount: Decimal) -> str:
-        return f"£{amount:,.2f}"
+    def _format(self, amount: Decimal) -> str:
+        sym = _symbol(self._display_ccy)
+        body = f"{amount:,.2f}"
+        return f"{sym}{body}" if sym else f"{body} {self._display_ccy}"
 
-    @staticmethod
-    def _format_signed(amount: Decimal) -> str:
-        if amount < 0:
-            return f"-£{abs(amount):,.2f}"
-        return f"£{amount:,.2f}"
+    def _format_signed(self, amount: Decimal) -> str:
+        sym = _symbol(self._display_ccy)
+        body = f"{abs(amount):,.2f}"
+        sign = "-" if amount < 0 else ""
+        if sym:
+            return f"{sign}{sym}{body}"
+        return f"{sign}{body} {self._display_ccy}"
