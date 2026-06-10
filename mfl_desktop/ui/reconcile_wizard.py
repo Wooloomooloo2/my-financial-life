@@ -141,6 +141,14 @@ class ReconcileWizard(QDialog):
         self._recompute_guard = False
         self._auto_selected_once = False
         self._baseline_ticks: set[int] = set()
+        # Ending-balance autofill state. The ending balance defaults to the
+        # account's recorded balance *as of the end date* and re-derives when
+        # the end date changes — unless the user types their own figure (taken
+        # from a paper statement), after which we stop overwriting it. The
+        # suppress flag silences the date-change handler during programmatic
+        # seed/load so it doesn't fire mid-population.
+        self._end_balance_user_set = False
+        self._suppress_end_date_autofill = False
 
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self._build_balances_page())
@@ -208,6 +216,11 @@ class ReconcileWizard(QDialog):
 
         self._start_balance.textChanged.connect(self._update_change_label)
         self._end_balance.textChanged.connect(self._update_change_label)
+        # textEdited fires only on user keystrokes (not setText), so it marks a
+        # deliberate override; dateChanged re-derives the ending balance for the
+        # new statement end date.
+        self._end_balance.textEdited.connect(self._on_end_balance_edited)
+        self._end_date.dateChanged.connect(self._on_end_date_changed)
 
         # Automatically select.
         auto_row = QHBoxLayout()
@@ -237,8 +250,13 @@ class ReconcileWizard(QDialog):
 
     def _seed_defaults(self) -> None:
         """Pre-fill page 1 for a NEW statement: starting balance/date from the
-        last reconciliation, ending balance suggested from the account's
-        current recorded balance, ending date = today."""
+        last reconciliation, ending date = today, and ending balance = the
+        account's recorded balance *as of the ending date*.
+
+        The ending balance used to be the account's *current* recorded balance
+        (`compute_account_balances`), which was wrong for any statement that
+        closed before today — it suggested today's balance regardless of the
+        end date. It now tracks the end date via `_derive_ending_balance`."""
         statements = self._repo.list_statements_for_account(self._account.id)
         last_reconciled = next(
             (s for s in statements if s.status == "reconciled"), None
@@ -251,25 +269,52 @@ class ReconcileWizard(QDialog):
             start_d = today.replace(day=1)
             start_bal = self._account.opening_balance
 
-        current_bal = self._repo.compute_account_balances().get(
-            self._account.id, Decimal("0.00")
-        )
-
+        self._suppress_end_date_autofill = True
         self._start_date.setDate(QDate(start_d.year, start_d.month, start_d.day))
         self._end_date.setDate(QDate.currentDate())
         self._start_balance.setText(f"{start_bal:.2f}")
-        self._end_balance.setText(f"{current_bal:.2f}")
-        self._update_change_label()
+        self._suppress_end_date_autofill = False
+        self._derive_ending_balance()
 
     def _load_statement_into_pages(self) -> None:
-        """Populate page 1 from an existing (open/reconciled) statement."""
+        """Populate page 1 from an existing (open/reconciled) statement. The
+        stored ending balance is authoritative, so it is marked user-set —
+        editing the end date afterwards won't silently overwrite it."""
         s = self._statement
         assert s is not None
+        self._suppress_end_date_autofill = True
         self._start_date.setDate(_iso_to_qdate(s.start_date))
         self._end_date.setDate(_iso_to_qdate(s.end_date))
         self._start_balance.setText(f"{s.starting_balance:.2f}")
         self._end_balance.setText(f"{s.ending_balance:.2f}")
+        self._suppress_end_date_autofill = False
+        self._end_balance_user_set = True
         self._update_change_label()
+
+    def _derive_ending_balance(self) -> None:
+        """Set the ending balance to the account's recorded balance as of the
+        statement end date (inclusive). `setText` does not emit `textEdited`,
+        so this never trips the user-override guard."""
+        end_iso = _qdate_to_iso(self._end_date.date())
+        bal = self._repo.balance_as_of(self._account.id, end_iso)
+        self._end_balance.setText(f"{bal:.2f}")
+        self._update_change_label()
+
+    def _on_end_balance_edited(self, _text: str) -> None:
+        """The user typed their own ending balance (e.g. the figure from a
+        paper statement) — stop auto-deriving it from the end date so we don't
+        clobber it."""
+        self._end_balance_user_set = True
+
+    def _on_end_date_changed(self, _qd: QDate) -> None:
+        """Re-derive the suggested ending balance for the new end date. Skipped
+        during programmatic seed/load, in read-only VIEW mode, and once the
+        user has typed their own ending balance."""
+        if self._suppress_end_date_autofill:
+            return
+        if self._mode == "view" or self._end_balance_user_set:
+            return
+        self._derive_ending_balance()
 
     def _page1_change(self) -> Optional[Decimal]:
         start = _parse_amount(self._start_balance.text())

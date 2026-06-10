@@ -345,3 +345,23 @@ Changed/added relative to the original list:
 ### Carried-over decisions unchanged by this amendment
 
 Transfer pairs reconcile independently per side; cross-currency accounts reconcile in native currency (no conversion); reconciled rows are import-immutable and editable only via a confirm; reopen reverts linked rows to `Cleared` (lossy on prior Pending/Uncleared, accepted); one open statement per account.
+
+---
+
+## Amendment — 2026-06-10 (ending-balance default tracks the statement end date)
+
+**Status:** Accepted. A correctness fix to the page-1 ending-balance *default*; everything else above stands. No schema change.
+
+**The bug.** The Banktivity-aligned amendment (point #1) says the entry screen collects an **Ending Balance** and the starting balance auto-populates from the prior reconciliation. The as-built `_seed_defaults` auto-populated the **ending** balance from `compute_account_balances()` — the account's **current/latest** recorded balance — regardless of the ending date. Reconciling a statement that closed weeks ago therefore suggested *today's* balance, not the balance at the statement's close. The owner reported this directly: *"the 'ending balance' … is supposed to reflect the balance at the end of the statement period, but it seems to just pick up the latest balance. If I change the end-date … it should change the 'ending balance' to be the balance on that date."*
+
+**The decision.** The suggested ending balance is now the account's **recorded balance as of the statement end date (inclusive)**, and it **re-derives whenever the end date changes** — with a guard so a deliberately typed figure isn't clobbered.
+
+1. **New `Repository.balance_as_of(account_id, as_of_date) -> Decimal`** — `opening_balance + SUM(amount) WHERE posted_date <= as_of_date`. Same `opening + Σ amount` shape as `compute_account_balances` and the ADR-041 running-balance seed, but **inclusive** of the boundary day (the windowing seed uses `< since`; a statement's ending balance counts every txn dated *on or before* the close). Pure cash ledger — no market-value/valuation adjustment, consistent with reconciliation operating on the transaction ledger.
+
+2. **`reconcile_wizard._seed_defaults`** seeds the ending balance via `balance_as_of(end_date)` instead of `compute_account_balances()`. **`_derive_ending_balance`** re-runs it; the end-date picker's `dateChanged` triggers it.
+
+3. **User-override guard.** The ending balance is the field where a user types the figure off their paper statement. `textEdited` (which fires only on keystrokes, not on programmatic `setText`) flags the field as user-set; once set, end-date changes no longer overwrite it. Loaded statements (resume/view) mark the stored ending balance as user-set on load, so editing the end date never silently overwrites the authoritative stored figure; the auto-derive is also skipped in read-only VIEW mode. A `_suppress_end_date_autofill` flag silences the date-change handler during the programmatic seed/load population.
+
+**Why a default and not a hard-computed field.** The auto-derived value is a *suggestion* — the genuine purpose of reconciliation is still to compare the bank's ending balance (typed by the user) against the records via the live **Missing** counter (point #2). The fix only makes the suggestion correct for the chosen period and keeps it in sync as the date is adjusted, without taking the field away from the user.
+
+**Files touched:** `mfl_desktop/db/repository.py` (new `balance_as_of`); `mfl_desktop/ui/reconcile_wizard.py` (`_seed_defaults` rewrite, new `_derive_ending_balance` / `_on_end_date_changed` / `_on_end_balance_edited`, `dateChanged` + `textEdited` wiring, `_load_statement_into_pages` marks stored balance user-set). **Verified:** `balance_as_of` checked end-to-end on a temp DB built from the real migrations — boundary day inclusive, future-dated txns excluded, opening-only date returns the opening balance.
