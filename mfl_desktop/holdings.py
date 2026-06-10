@@ -85,6 +85,20 @@ def _transfer_out(queue: "deque[_Lot]", qty: float, pen: "deque[_Lot]") -> float
     return remaining
 
 
+def _apply_split(queue: "deque[_Lot]", ratio: float) -> None:
+    """Apply a stock split to a FIFO queue (ADR-054): multiply every open lot's
+    share count by ``ratio`` and divide its per-share cost by ``ratio``, so the
+    total cost basis is unchanged and the market value stays continuous across
+    the split (the post-split shares meet the post-split price). ``ratio`` is
+    new shares per old — 5 for a 5-for-1 split, 0.1 for a reverse 1-for-10. A
+    non-positive or ~1.0 ratio is a no-op."""
+    if ratio <= 0 or abs(ratio - 1.0) <= _EPS:
+        return
+    for lot in queue:
+        lot.qty *= ratio
+        lot.unit_cost /= ratio
+
+
 def _transfer_in(queue: "deque[_Lot]", qty: float, pen: "deque[_Lot]") -> float:
     """Satisfy up to ``qty`` of an incoming ShrsIn from the transfer ``pen``,
     carrying each matched lot's cost basis onto ``queue`` (ADR-053). Returns the
@@ -228,11 +242,15 @@ def compute_holdings_view(
                 )
 
         elif is_split(t.action):
-            logger.info(
-                "Holdings: stock split on security %d not applied (ratio "
-                "handling deferred, ADR-044). Verify this holding manually.", sid,
-            )
-            incomplete[sid] = True
+            ratio = float(t.quantity) if t.quantity else 0.0
+            if ratio > 0:
+                _apply_split(lots[sid], ratio)        # ADR-054
+            else:
+                incomplete[sid] = True
+                logger.info(
+                    "Holdings: stock split on security %d has no ratio "
+                    "(quantity) — skipped; verify this holding.", sid,
+                )
         # XIn / XOut and cash-only actions (Div / CGShort / …) don't move lots.
 
     holdings: list[Holding] = []
@@ -407,8 +425,9 @@ def compute_value_history(
                     remaining -= take
                     if lot.qty <= _EPS:
                         queue.popleft()
-            # splits (deferred) and XIn/XOut don't move lots here — same as
-            # compute_holdings_view.
+            elif is_split(t.action):
+                _apply_split(lots[sid], float(t.quantity) if t.quantity else 0.0)
+            # XIn/XOut don't move lots here — same as compute_holdings_view.
 
         invested = 0.0
         market = 0.0
@@ -619,7 +638,9 @@ def compute_returns(
             elif is_income(t.action):
                 if in_window:
                     dividends_win[sid] += float(t.amount)
-            # splits + XIn/XOut: no lot move, no income (ADR-044 deferral).
+            elif is_split(t.action):
+                _apply_split(lots[sid], float(t.quantity) if t.quantity else 0.0)
+            # XIn/XOut: no lot move, no income (round-4 transfer-linking).
 
         invested = 0.0
         market = 0.0

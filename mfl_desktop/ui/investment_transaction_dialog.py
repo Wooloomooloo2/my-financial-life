@@ -52,7 +52,8 @@ from mfl_desktop.prices import lookup_symbol_name
 
 # Curated action list for manual entry (label, canonical QIF action stored in
 # txn.action — must match the strings the holdings/returns engines classify via
-# qif_actions). Transfer (XIn/XOut) + StkSplit deliberately omitted in v1.
+# qif_actions). Whole-account transfer (XIn/XOut) deliberately omitted in v1;
+# StkSplit added in ADR-054 (ratio in the quantity field).
 _ACTIONS: list[tuple[str, str]] = [
     ("Buy", "Buy"),
     ("Sell", "Sell"),
@@ -63,6 +64,7 @@ _ACTIONS: list[tuple[str, str]] = [
     ("Short-term cap-gain dist.", "CGShort"),
     ("Shares in (transfer)", "ShrsIn"),
     ("Shares out (transfer)", "ShrsOut"),
+    ("Stock split", "StkSplit"),
     ("Cash in / out", "Cash"),
 ]
 
@@ -84,6 +86,8 @@ def _kind(action: str) -> str:
         return "reinvest"
     if a in ("shrsin", "shrsout"):
         return "shares"
+    if a in ("stksplit", "stocksplit"):
+        return "split"
     if a == "cash":
         return "cash"
     return "income"          # div / intinc / cglong / cgshort
@@ -164,6 +168,11 @@ class InvestmentTransactionDialog(QDialog):
         self._amount.setPlaceholderText("cash amount")
         self._form.addRow("Amount:", self._amount)
 
+        self._ratio = QLineEdit()
+        self._ratio.setPlaceholderText("new shares per old — 5 for 5-for-1, 0.1 for 1-for-10")
+        self._ratio.textChanged.connect(self._recompute_hint)
+        self._form.addRow("Split ratio:", self._ratio)
+
         self._status = QComboBox()
         self._status.addItems(_STATUSES)
         self._status.setCurrentText("Cleared")
@@ -218,7 +227,12 @@ class InvestmentTransactionDialog(QDialog):
         except Exception:
             pass
         if seed.quantity is not None:
-            self._qty.setText(_trim(seed.quantity))
+            # A StkSplit stores its ratio in the quantity field — seed the ratio
+            # input, not the share-quantity input.
+            if _kind(seed.action or "") == "split":
+                self._ratio.setText(_trim(seed.quantity))
+            else:
+                self._qty.setText(_trim(seed.quantity))
         if seed.price is not None:
             self._price.setText(_trim(seed.price))
         self._amount.setText(f"{seed.amount:.2f}")
@@ -236,12 +250,14 @@ class InvestmentTransactionDialog(QDialog):
         show_qty = kind in ("buy", "sell", "reinvest", "shares")
         show_price = kind in ("buy", "sell", "reinvest", "shares")
         show_amount = kind in ("income", "cash")
+        show_ratio = kind == "split"
 
         self._set_row_visible(self._symbol, show_sec)
         self._set_row_visible(self._security, show_sec)
         self._set_row_visible(self._qty, show_qty)
         self._set_row_visible(self._price, show_price)
         self._set_row_visible(self._amount, show_amount)
+        self._set_row_visible(self._ratio, show_ratio)
         self._recompute_hint()
 
     def _current_action(self) -> str:
@@ -257,6 +273,12 @@ class InvestmentTransactionDialog(QDialog):
             base = "Reinvested dividend — no cash moves; counts as income."
         elif kind == "shares":
             base = "Share transfer — no cash moves. Price is optional (cost basis)."
+        elif kind == "split":
+            base = ("Stock split — no cash moves. Your shares ×ratio and cost "
+                    "per share ÷ratio (total cost unchanged).")
+            r = _to_decimal(self._ratio.text())
+            if r is not None and r > 0:
+                base += f"  →  {r:g}-for-1"
         elif kind == "income":
             base = "Enter the cash received (positive)."
         else:  # cash
@@ -338,10 +360,20 @@ class InvestmentTransactionDialog(QDialog):
             else:
                 security_id = self._repo.get_or_create_security(name, typed_symbol)
 
-        # Quantity / price (only relevant to share-moving actions).
+        # Quantity / price (only relevant to share-moving actions). A stock
+        # split carries its RATIO in the quantity field (new shares per old).
         wants_qty = kind in ("buy", "sell", "reinvest", "shares")
         qty = _to_decimal(self._qty.text()) if wants_qty else None
         price = _to_decimal(self._price.text()) if wants_qty else None
+        if kind == "split":
+            qty = _to_decimal(self._ratio.text())
+            if qty is None or qty <= 0:
+                QMessageBox.warning(
+                    self, "Save transaction",
+                    "Enter a positive split ratio (e.g. 5 for a 5-for-1 split, "
+                    "0.1 for a reverse 1-for-10).",
+                )
+                return
         if kind in ("buy", "sell", "reinvest", "shares"):
             if qty is None or qty <= 0:
                 QMessageBox.warning(self, "Save transaction", "Enter a positive quantity.")
@@ -424,7 +456,7 @@ class InvestmentTransactionDialog(QDialog):
         amount is preserved so a re-save never drifts off the imported figure."""
         if kind in ("income", "cash"):
             return _to_decimal(self._amount.text())
-        if kind in ("reinvest", "shares"):
+        if kind in ("reinvest", "shares", "split"):
             return Decimal("0.00")
         # buy / sell
         if qty is None or price is None:
