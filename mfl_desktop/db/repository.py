@@ -89,6 +89,14 @@ class TransactionRow:
     memo: str
     running_balance: Decimal
     transfer_id: Optional[str] = None
+    # `split_count` > 0 marks this row as a split transaction (ADR-051): the
+    # parent keeps the full signed `amount`, while its category lines live in
+    # `txn_split`. The register renders the Category cell as "—Split—" and makes
+    # the row dialog-only when this is non-zero. `split_category_ids` is the set
+    # of categories the lines use, so the register's category filter can surface
+    # a split parent when the user filters by one of its line categories.
+    split_count: int = 0
+    split_category_ids: frozenset = frozenset()
     # Investment fields (ADR-043). `action` is None on an ordinary cash row;
     # set ('Buy'/'Sell'/'Div'/…) on an investment-account row. The rest are
     # populated only when relevant to the action (quantity/price for trades,
@@ -99,6 +107,19 @@ class TransactionRow:
     security_symbol: str = ""
     quantity: Optional[float] = None
     price: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SplitLine:
+    """One category line of a split transaction (ADR-051). ``amount`` is a
+    signed Decimal (same convention as ``TransactionRow.amount``); the lines of
+    a split sum to the parent's total. ``id`` is the ``txn_split`` row id when
+    read back, or ``None`` for a line being passed into a create/update."""
+    category_id: int
+    category_name: str
+    memo: str
+    amount: Decimal
+    id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -491,6 +512,14 @@ class StatementRow:
 
 
 # ── Identifier helpers (ADR-006) ────────────────────────────────────────────
+
+
+def _parse_split_cids(value: Optional[str]) -> frozenset:
+    """Parse a GROUP_CONCAT(category_id) string ('2,3,7') into a frozenset of
+    ints (ADR-051). Empty/None → empty set (the common no-splits case)."""
+    if not value:
+        return frozenset()
+    return frozenset(int(x) for x in value.split(",") if x)
 
 
 def new_transaction_iri() -> str:
@@ -887,6 +916,31 @@ class Repository:
         )
         return {int(r["id"]): pence_to_decimal(r["balance_pence"]) for r in cur}
 
+    def balance_as_of(self, account_id: int, as_of_date: str) -> Decimal:
+        """Recorded cash balance for one account at the *end of* ``as_of_date``
+        (an inclusive ``'YYYY-MM-DD'`` bound):
+        ``opening_balance + SUM(amount) WHERE posted_date <= as_of_date``.
+
+        Same shape as :pymeth:`compute_account_balances` (opening + Σ amount)
+        and the running-balance seed in :pymeth:`list_transactions_for_account`
+        — but inclusive of the boundary day, because a statement's ending
+        balance counts every transaction dated on or before the closing date
+        (the windowing seed uses ``< since``; this uses ``<= as_of_date``).
+        Pure cash ledger, no market-value/valuation adjustment — consistent
+        with reconciliation operating on the transaction ledger (ADR-040)."""
+        opening_row = self._conn.execute(
+            "SELECT opening_balance FROM account WHERE id = ?", (account_id,),
+        ).fetchone()
+        opening = pence_to_decimal(
+            opening_row["opening_balance"] if opening_row else 0
+        )
+        sum_row = self._conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS s FROM txn "
+            "WHERE account_id = ? AND posted_date <= ?",
+            (account_id, as_of_date),
+        ).fetchone()
+        return opening + pence_to_decimal(sum_row["s"])
+
     def compute_account_values(self) -> dict[int, Decimal]:
         """Per-account *market value* (ADR-044) — the figure Net Worth and the
         sidebar should show. For investment accounts this is
@@ -988,9 +1042,15 @@ class Repository:
     def list_category_tree(self) -> list[CategoryNode]:
         """All non-archived categories as a flat list. The dialog reassembles
         the parent/child structure for display."""
+        # Usage counts a category's appearances in the split-unrolled view
+        # (ADR-051): a split line counts under its own category, and a split
+        # parent does NOT count under Uncategorised (the view emits its lines,
+        # not the parent row). For a no-splits ledger this equals COUNT over
+        # `txn`.
         cur = self._conn.execute(
             "SELECT c.id, c.parent_id, c.name, c.source, c.kind, "
-            "       (SELECT COUNT(*) FROM txn t WHERE t.category_id = c.id) AS n "
+            "       (SELECT COUNT(*) FROM txn_category_line t "
+            "        WHERE t.category_id = c.id) AS n "
             "FROM category c "
             "WHERE c.archived_at IS NULL"
         )
@@ -1030,8 +1090,11 @@ class Repository:
         return row is not None
 
     def count_category_transactions(self, category_id: int) -> int:
+        # Count via the split-unrolled view (ADR-051) so split lines on this
+        # category are included — these are the rows the delete/merge path
+        # repoints to the Uncategorised sink.
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM txn WHERE category_id = ?",
+            "SELECT COUNT(*) AS n FROM txn_category_line WHERE category_id = ?",
             (category_id,),
         ).fetchone()
         return int(row["n"]) if row is not None else 0
@@ -1256,6 +1319,14 @@ class Repository:
                 (target_id, *sources),
             )
             moved = cur.rowcount
+            # Split lines reference categories too (ADR-051); re-point them onto
+            # the target as well, otherwise the FK on txn_split.category_id would
+            # block the DELETE below (it has no ON DELETE action, by design).
+            self._conn.execute(
+                f"UPDATE txn_split SET category_id = ? "
+                f"WHERE category_id IN ({placeholders})",
+                (target_id, *sources),
+            )
             self._conn.execute(
                 f"DELETE FROM category WHERE id IN ({placeholders})",
                 tuple(sources),
@@ -1289,6 +1360,13 @@ class Repository:
                     "UPDATE txn SET category_id = ? WHERE category_id = ?",
                     (UNCATEGORISED_ID, category_id),
                 )
+            # Split lines reference categories too (ADR-051); reassign any to
+            # Uncategorised before the row is removed, or the txn_split FK (no
+            # ON DELETE action, by design) would block the DELETE.
+            self._conn.execute(
+                "UPDATE txn_split SET category_id = ? WHERE category_id = ?",
+                (UNCATEGORISED_ID, category_id),
+            )
             self._conn.execute(
                 "DELETE FROM category WHERE id = ?", (category_id,),
             )
@@ -2255,6 +2333,156 @@ class Repository:
         )
         self.commit()
 
+    # ── Split transactions (ADR-051) ──
+    #
+    # A split's parent `txn` row keeps the full signed total and category_id =
+    # Uncategorised(1); the category lines live in `txn_split` and sum to the
+    # parent total. Only category-attribution reads unroll (via the
+    # `txn_category_line` view); the money layer reads the parent total as-is.
+
+    def _replace_split_lines(
+        self, txn_id: int, total_amount: Decimal,
+        lines: list[tuple[int, Optional[str], Decimal]],
+    ) -> None:
+        """Delete and re-insert the `txn_split` rows for one parent, after
+        checking the signed line amounts sum exactly to ``total_amount``.
+        Pence are integers, so the check is exact (no float tolerance). Does
+        not commit. ``lines`` is a list of ``(category_id, memo, amount)`` and
+        must be non-empty."""
+        if not lines:
+            raise ValueError("A split transaction needs at least one line.")
+        total_pence = decimal_to_pence(total_amount)
+        line_pence = [
+            (cid, memo, decimal_to_pence(amt)) for cid, memo, amt in lines
+        ]
+        line_sum = sum(p for _, _, p in line_pence)
+        if line_sum != total_pence:
+            raise ValueError(
+                f"Split lines must sum to the transaction total "
+                f"({total_pence} pence); got {line_sum}."
+            )
+        self._conn.execute("DELETE FROM txn_split WHERE txn_id = ?", (txn_id,))
+        for order, (cid, memo, pence) in enumerate(line_pence):
+            self._conn.execute(
+                "INSERT INTO txn_split "
+                "(txn_id, category_id, memo, amount, sort_order) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (txn_id, cid, (memo or None), pence, order),
+            )
+
+    def insert_split_transaction(
+        self, *,
+        account_id: int,
+        posted_date: str,
+        payee_id: Optional[int],
+        status: str,
+        memo: str,
+        total_amount: Decimal,
+        lines: list[tuple[int, Optional[str], Decimal]],
+        import_hash: Optional[str],
+        import_batch_id: Optional[int],
+    ) -> int:
+        """Insert a split transaction (ADR-051): a parent `txn` row carrying the
+        full signed ``total_amount`` (category_id = Uncategorised) plus one
+        `txn_split` row per line. Lines must sum to ``total_amount``. Does not
+        commit — mirrors ``insert_transaction``; the caller commits."""
+        txn_id = self.insert_transaction(
+            account_id=account_id, posted_date=posted_date, amount=total_amount,
+            payee_id=payee_id, category_id=UNCATEGORISED_ID, status=status,
+            memo=memo, import_hash=import_hash, import_batch_id=import_batch_id,
+        )
+        self._replace_split_lines(txn_id, total_amount, lines)
+        return txn_id
+
+    def update_split_transaction(
+        self, txn_id: int, *,
+        posted_date: str,
+        payee_id: Optional[int],
+        status: str,
+        memo: str,
+        total_amount: Decimal,
+        lines: list[tuple[int, Optional[str], Decimal]],
+    ) -> None:
+        """Update a split transaction's parent header and replace its lines in
+        one write (ADR-051). The parent keeps ``total_amount``; category_id
+        stays at Uncategorised. Lines must sum to ``total_amount``. Commits."""
+        self._conn.execute(
+            "UPDATE txn SET posted_date = ?, amount = ?, payee_id = ?, "
+            "  category_id = ?, status = ?, memo = ? WHERE id = ?",
+            (
+                posted_date, decimal_to_pence(total_amount), payee_id,
+                UNCATEGORISED_ID, status, memo or None, txn_id,
+            ),
+        )
+        self._replace_split_lines(txn_id, total_amount, lines)
+        self.commit()
+
+    def convert_plain_to_split(
+        self, txn_id: int,
+        lines: list[tuple[int, Optional[str], Decimal]],
+    ) -> None:
+        """Turn an existing plain transaction into a split (ADR-051): keep its
+        amount/payee/date/status, move category_id to Uncategorised, and attach
+        the given lines (which must sum to the existing total). Commits."""
+        row = self._conn.execute(
+            "SELECT amount FROM txn WHERE id = ?", (txn_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No transaction with id {txn_id}")
+        total = pence_to_decimal(row["amount"])
+        self._conn.execute(
+            "UPDATE txn SET category_id = ? WHERE id = ?",
+            (UNCATEGORISED_ID, txn_id),
+        )
+        self._replace_split_lines(txn_id, total, lines)
+        self.commit()
+
+    def convert_split_to_plain(self, txn_id: int, category_id: int) -> None:
+        """Collapse a split back to a single-category transaction (ADR-051):
+        delete its `txn_split` rows and set the parent's category_id. The
+        parent's amount is unchanged. Commits."""
+        self._conn.execute("DELETE FROM txn_split WHERE txn_id = ?", (txn_id,))
+        self._conn.execute(
+            "UPDATE txn SET category_id = ? WHERE id = ?",
+            (category_id, txn_id),
+        )
+        self.commit()
+
+    def split_lines_for_txns(
+        self, txn_ids: list[int],
+    ) -> dict[int, list[SplitLine]]:
+        """Category lines for several split transactions, grouped by parent id
+        and ordered within each parent (ADR-051). Used by the account-summary
+        screen to roll split spend up to the right categories."""
+        if not txn_ids:
+            return {}
+        ph = ",".join("?" * len(txn_ids))
+        cur = self._conn.execute(
+            f"SELECT s.id, s.txn_id, s.category_id, "
+            f"       COALESCE(c.name, '') AS category_name, "
+            f"       COALESCE(s.memo, '') AS memo, s.amount "
+            f"FROM txn_split s "
+            f"LEFT JOIN category c ON c.id = s.category_id "
+            f"WHERE s.txn_id IN ({ph}) "
+            f"ORDER BY s.txn_id, s.sort_order, s.id",
+            tuple(txn_ids),
+        )
+        out: dict[int, list[SplitLine]] = {}
+        for r in cur:
+            out.setdefault(r["txn_id"], []).append(SplitLine(
+                category_id=r["category_id"],
+                category_name=r["category_name"],
+                memo=r["memo"],
+                amount=pence_to_decimal(r["amount"]),
+                id=r["id"],
+            ))
+        return out
+
+    def split_lines_for_txn(self, txn_id: int) -> list[SplitLine]:
+        """The category lines of one split transaction, in entry order
+        (ADR-051). Empty list when the transaction has no splits."""
+        return self.split_lines_for_txns([txn_id]).get(txn_id, [])
+
     def merge_into_manual_transaction(
         self,
         manual_id: int,
@@ -2347,12 +2575,16 @@ class Repository:
             "       t.transfer_id, "
             "       t.action, t.security_id, t.quantity, t.price, "
             "       COALESCE(s.name, '') AS security_name, "
-            "       COALESCE(s.symbol, '') AS security_symbol "
+            "       COALESCE(s.symbol, '') AS security_symbol, "
+            "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
             "FROM txn t "
             "JOIN      account a  ON a.id = t.account_id "
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
             "LEFT JOIN security s ON s.id = t.security_id "
+            "LEFT JOIN (SELECT txn_id, COUNT(*) AS c, "
+            "                  GROUP_CONCAT(category_id) AS cids "
+            "           FROM txn_split GROUP BY txn_id) sp ON sp.txn_id = t.id "
             "WHERE t.account_id = ? "
         )
         params: list = [account_id]
@@ -2374,6 +2606,8 @@ class Repository:
                 status=r["status"], memo=r["memo"],
                 running_balance=running,
                 transfer_id=r["transfer_id"],
+                split_count=r["split_count"],
+                split_category_ids=_parse_split_cids(r["split_cids"]),
                 action=r["action"], security_id=r["security_id"],
                 security_name=r["security_name"],
                 security_symbol=r["security_symbol"],
@@ -2401,12 +2635,16 @@ class Repository:
             "       t.transfer_id, "
             "       t.action, t.security_id, t.quantity, t.price, "
             "       COALESCE(s.name, '') AS security_name, "
-            "       COALESCE(s.symbol, '') AS security_symbol "
+            "       COALESCE(s.symbol, '') AS security_symbol, "
+            "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
             "FROM txn t "
             "JOIN      account a  ON a.id = t.account_id "
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
             "LEFT JOIN security s ON s.id = t.security_id "
+            "LEFT JOIN (SELECT txn_id, COUNT(*) AS c, "
+            "                  GROUP_CONCAT(category_id) AS cids "
+            "           FROM txn_split GROUP BY txn_id) sp ON sp.txn_id = t.id "
         )
         params: list = []
         if since is not None:
@@ -2424,6 +2662,8 @@ class Repository:
                 status=r["status"], memo=r["memo"],
                 running_balance=Decimal("0.00"),
                 transfer_id=r["transfer_id"],
+                split_count=r["split_count"],
+                split_category_ids=_parse_split_cids(r["split_cids"]),
                 action=r["action"], security_id=r["security_id"],
                 security_name=r["security_name"],
                 security_symbol=r["security_symbol"],
@@ -2560,7 +2800,12 @@ class Repository:
             f"SELECT {bucket_expr} AS bucket, "
             f"       t.category_id AS category_id, "
             f"       SUM(-t.amount) AS spending_pence "
-            f"FROM txn t "
+            # Read from the split-unrolled view (ADR-051): a split transaction
+            # contributes one row per category line (its line amount + category)
+            # rather than its parent total, so spend lands on the right
+            # categories. A non-split txn maps to itself, so this is identical
+            # to scanning `txn` for the no-splits-in-the-file case.
+            f"FROM txn_category_line t "
             f"JOIN category c ON c.id = t.category_id "
             f"WHERE t.posted_date BETWEEN ? AND ? "
             f"  AND c.kind = 'expense' "
@@ -4995,12 +5240,20 @@ class Repository:
         # we splice the budget_id into a CTE and let the engine resolve
         # everything. Cheaper than two round-trips when the perimeter has
         # 20+ accounts.
+        # Read from the split-unrolled view (ADR-051): a split parent yields one
+        # row per category line (line category + line amount), so budget actuals
+        # bucket each line under its own budgeted ancestor. A non-split txn maps
+        # to itself. Splits are never transfers, so split lines always carry
+        # transfer_id NULL and skip the cancellation branch below. The `t2`
+        # subquery deliberately stays on the base `txn` table — transfer pairing
+        # is a parent-row concept, not a per-line one.
         sql = (
             "WITH peri AS ("
             "  SELECT account_id FROM budget_account WHERE budget_id = ?"
             ") "
-            "SELECT t.id, t.account_id, t.posted_date, t.amount, t.category_id "
-            "FROM txn t "
+            "SELECT t.txn_id AS id, t.account_id, t.posted_date, t.amount, "
+            "       t.category_id "
+            "FROM txn_category_line t "
             "WHERE t.account_id IN (SELECT account_id FROM peri) "
             "  AND t.posted_date BETWEEN ? AND ? "
             "  AND ("
@@ -5008,11 +5261,11 @@ class Repository:
             "    OR NOT EXISTS ("
             "      SELECT 1 FROM txn t2 "
             "      WHERE t2.transfer_id = t.transfer_id "
-            "        AND t2.id != t.id "
+            "        AND t2.id != t.txn_id "
             "        AND t2.account_id IN (SELECT account_id FROM peri)"
             "    )"
             "  ) "
-            "ORDER BY t.posted_date, t.id"
+            "ORDER BY t.posted_date, t.txn_id"
         )
         cur = self._conn.execute(
             sql, (budget_id, period_start, period_end),
@@ -5034,14 +5287,19 @@ class Repository:
         """Category ids actually referenced by txns in a single account
         (when ``account_id`` is set) or across the whole ledger (when
         ``None``). Used by the register's category-filter combo to hide
-        options that wouldn't match anything in the current view."""
+        options that wouldn't match anything in the current view.
+
+        Reads the split-unrolled view (ADR-051) so a category used only on a
+        split line is still offered — the register filter then surfaces the
+        '—Split—' parent via the proxy's split-aware match."""
         if account_id is None:
             cur = self._conn.execute(
-                "SELECT DISTINCT category_id FROM txn"
+                "SELECT DISTINCT category_id FROM txn_category_line"
             )
         else:
             cur = self._conn.execute(
-                "SELECT DISTINCT category_id FROM txn WHERE account_id = ?",
+                "SELECT DISTINCT category_id FROM txn_category_line "
+                "WHERE account_id = ?",
                 (account_id,),
             )
         return {int(r["category_id"]) for r in cur}

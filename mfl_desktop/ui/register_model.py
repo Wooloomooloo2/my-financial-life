@@ -138,6 +138,15 @@ class TransactionTableModel(QAbstractTableModel):
             return Qt.NoItemFlags
         f = Qt.ItemIsSelectable | Qt.ItemIsEnabled
         if self.COLUMNS[index.column()][2]:
+            # Split transactions (ADR-051) are edited through the split dialog
+            # (double-click the row), not inline — the parent total and the
+            # per-line categories have to change together to keep the sum
+            # invariant. So the whole split row is non-editable inline, the
+            # same way investment rows are (which also frees the double-click
+            # to open the dialog instead of an inline editor).
+            row = self._rows[index.row()]
+            if row.split_count:
+                return f
             f |= Qt.ItemIsEditable
         return f
 
@@ -157,6 +166,14 @@ class TransactionTableModel(QAbstractTableModel):
 
         if role in (Qt.DisplayRole, Qt.EditRole):
             value = getattr(row, col_name)
+            # A split transaction (ADR-051) has no single category — its lines
+            # carry the categories. Show the Banktivity-style "—Split—" marker.
+            if (
+                col_name == "category_name"
+                and row.split_count
+                and role == Qt.DisplayRole
+            ):
+                return "—Split—"
             if col_name in ("amount", "running_balance"):
                 return f"{value:,.2f}"
             if col_name == "quantity":
@@ -201,6 +218,10 @@ class TransactionTableModel(QAbstractTableModel):
     def _apply_edit(
         self, row: TransactionRow, col_name: str, value,
     ) -> Optional[TransactionRow]:
+        # Defensive: split rows are dialog-edited (ADR-051); flags() already
+        # blocks inline edits, so this only fires on a programmatic push.
+        if row.split_count:
+            return None
         if col_name == "posted_date":
             try:
                 stored = self._repo.update_transaction_date(row.id, str(value))

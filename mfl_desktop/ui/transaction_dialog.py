@@ -136,6 +136,10 @@ class NewTransactionDialog(QDialog):
         )
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
+        # ADR-051: "Split…" hands the header + amount to the split dialog,
+        # which collects the per-category lines. Category isn't required here.
+        split_btn = buttons.addButton("Split…", QDialogButtonBox.ActionRole)
+        split_btn.clicked.connect(self._on_split)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -143,6 +147,7 @@ class NewTransactionDialog(QDialog):
 
         self.resize(420, self.sizeHint().height())
         self._values: Optional[NewTransactionValues] = None
+        self._split_requested = False
 
     # ── helpers ──
 
@@ -206,6 +211,53 @@ class NewTransactionDialog(QDialog):
         )
         self.accept()
 
+    def _on_split(self) -> None:
+        """ADR-051: validate the header + amount (category not required) and
+        accept with the split flag set. The caller opens the split dialog
+        seeded with these values; the entered amount becomes the split total."""
+        account_id = self._account_combo.currentData()
+        if account_id is None:
+            QMessageBox.warning(self, "Account required", "Pick an account.")
+            return
+        raw = self._amount_edit.text().strip().replace(",", "")
+        if not raw:
+            QMessageBox.warning(
+                self, "Amount required",
+                "Enter the transaction's total amount, then split it across "
+                "categories.",
+            )
+            return
+        try:
+            magnitude = Decimal(raw)
+        except InvalidOperation:
+            QMessageBox.warning(self, "Invalid amount", f"Could not parse {raw!r}.")
+            return
+        if magnitude <= 0:
+            QMessageBox.warning(
+                self, "Invalid amount",
+                "Amount must be greater than zero — use Direction to choose "
+                "money out vs money in.",
+            )
+            return
+        amount = -magnitude if self._direction_out.isChecked() else magnitude
+        qd: QDate = self._date_edit.date()
+        posted_date = date(qd.year(), qd.month(), qd.day()).isoformat()
+        self._values = NewTransactionValues(
+            account_id=int(account_id),
+            posted_date=posted_date,
+            amount=amount,
+            payee_name=self._payee_edit.text().strip(),
+            category_id=1,                 # placeholder — the lines carry categories
+            status=self._status_combo.currentText(),
+            memo=self._memo_edit.text().strip(),
+        )
+        self._split_requested = True
+        self.accept()
+
     def values(self) -> Optional[NewTransactionValues]:
         """Return the validated values, or None if the dialog was cancelled."""
         return self._values
+
+    def split_requested(self) -> bool:
+        """True when the user clicked Split… rather than Save (ADR-051)."""
+        return self._split_requested

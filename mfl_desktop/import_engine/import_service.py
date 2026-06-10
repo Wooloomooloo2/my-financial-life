@@ -70,6 +70,11 @@ class ClassifiedTransaction:
     price: Optional[Decimal] = None
     commission: Optional[Decimal] = None
     linked_account: str = ""
+    # Split lines (ADR-051). Empty for an ordinary single-category row; for a
+    # split, each entry is {category_raw, memo, amount(signed Decimal)} and the
+    # lines sum to the parent's signed amount. Only the Banktivity CSV path
+    # populates this today.
+    splits: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -240,6 +245,7 @@ class ImportService:
             price = raw.get("price")
             commission = raw.get("commission")
             linked_account = raw.get("linked_account", "")
+            splits = raw.get("splits") or []        # ADR-051
 
             fitid = raw.get("fitid", "")
             if fitid:
@@ -310,7 +316,7 @@ class ImportService:
                 status_override=status_ov,
                 action=action, security_name=security_name,
                 quantity=quantity, price=price, commission=commission,
-                linked_account=linked_account,
+                linked_account=linked_account, splits=splits,
             ))
 
         token = uuid.uuid4().hex[:16]
@@ -410,6 +416,33 @@ class ImportService:
                 category_id = self._resolve_category_id(tx.category_raw)
                 payee_id = self._repo.get_or_create_payee(tx.payee_raw)
                 signed_amount = -tx.amount if tx.tx_type == "debit" else tx.amount
+
+                # ADR-051: a split row inserts a parent carrying the signed
+                # total plus one txn_split line per category. Lines are
+                # pre-balanced by the parser (a remainder line is appended when
+                # the source doesn't sum), so they sum to signed_amount.
+                if tx.splits:
+                    lines = [
+                        (
+                            self._resolve_category_id(s.get("category_raw", "")),
+                            s.get("memo", ""),
+                            s["amount"],
+                        )
+                        for s in tx.splits
+                    ]
+                    self._repo.insert_split_transaction(
+                        account_id=pending.account_id,
+                        posted_date=tx.date_iso,
+                        payee_id=payee_id,
+                        status=effective_status,
+                        memo=tx.memo,
+                        total_amount=signed_amount,
+                        lines=lines,
+                        import_hash=tx.import_hash,
+                        import_batch_id=batch_id,
+                    )
+                    imported += 1
+                    continue
 
                 security_id = None
                 if tx.security_name:

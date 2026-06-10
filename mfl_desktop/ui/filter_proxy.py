@@ -52,8 +52,15 @@ class TransactionFilterProxy(QSortFilterProxyModel):
                 return False
         elif self._status != "All" and row.status != self._status:
             return False
-        if self._category_id is not None and row.category_id != self._category_id:
-            return False
+        if self._category_id is not None:
+            # A split parent's own category_id is Uncategorised; match it when
+            # the filtered category is on one of its lines (ADR-051) so
+            # filtering by a split-line category surfaces the "—Split—" row.
+            if (
+                row.category_id != self._category_id
+                and self._category_id not in row.split_category_ids
+            ):
+                return False
         if self._search:
             # Both signed and absolute amount forms are included so a search
             # for "3250" matches both directions of a 3,250.00 transaction.

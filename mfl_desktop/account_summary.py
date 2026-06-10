@@ -30,7 +30,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Iterable, Optional
 
-from mfl_desktop.db.repository import ScheduledTxnRow, TransactionRow
+from mfl_desktop.db.repository import ScheduledTxnRow, SplitLine, TransactionRow
 
 
 # ── period presets ─────────────────────────────────────────────────────────
@@ -537,18 +537,52 @@ def top_payees(period_txns: list[TransactionRow], n: int = 10) -> list[TopNRow]:
     )
 
 
-def top_categories(period_txns: list[TransactionRow], n: int = 10) -> list[TopNRow]:
-    """Top spend categories in the period. Categories always have an
-    id (Uncategorised is itself a real category id, not NULL) so the
-    synthetic bucket here is defensive — it only fires if a future
-    schema change lets ``category_id`` be NULL."""
-    return _top_n_by_id(
-        period_txns,
-        id_of=lambda t: t.category_id,
-        label_of=lambda t: t.category_name or "(Uncategorised)",
-        none_label="(Uncategorised)",
-        n=n,
-    )
+def top_categories(
+    period_txns: list[TransactionRow],
+    n: int = 10,
+    split_lines_by_txn: Optional[dict[int, list[SplitLine]]] = None,
+) -> list[TopNRow]:
+    """Top spend categories in the period, strict-outflow (ADR-018).
+
+    Split transactions (ADR-051) are unrolled: when ``split_lines_by_txn``
+    carries lines for a parent txn, each line contributes to its own category
+    (negative lines only) instead of the parent's Uncategorised bucket. A
+    parent with no lines supplied falls back to its own category — so callers
+    that don't fetch splits get the old, total-on-parent behaviour."""
+    split_lines_by_txn = split_lines_by_txn or {}
+    totals: dict[int, Decimal] = {}
+    labels: dict[int, str] = {}
+
+    def add(cid: int, label: str, outflow: Decimal) -> None:
+        if cid not in labels:
+            labels[cid] = label
+        totals[cid] = totals.get(cid, Decimal("0.00")) + outflow
+
+    for t in period_txns:
+        lines = split_lines_by_txn.get(t.id)
+        if lines:
+            for ln in lines:
+                if ln.amount >= 0:
+                    continue
+                add(ln.category_id, ln.category_name or "(Uncategorised)",
+                    -ln.amount)
+        else:
+            if t.amount >= 0:
+                continue
+            add(t.category_id, t.category_name or "(Uncategorised)", -t.amount)
+
+    grand_total = sum(totals.values(), start=Decimal("0.00"))
+    rows = [
+        TopNRow(
+            label=labels[cid],
+            amount=amount,
+            proportion=float(amount / grand_total) if grand_total > 0 else 0.0,
+            entity_id=cid,
+        )
+        for cid, amount in totals.items()
+    ]
+    rows.sort(key=lambda r: r.amount, reverse=True)
+    return rows[:n]
 
 
 def upcoming_scheduled(

@@ -198,11 +198,26 @@ def _parse_banktivity(lines: list[str]) -> tuple[list[dict], bool]:
 
 def _collapse_banktivity_splits(rows: list[dict]) -> list[dict]:
     """Banktivity split transactions: a parent row has '(split)' in
-    Category/Account, followed by sub-rows with empty Type/Status/Date/Payee.
-    Collapse: keep parent total, append sub-row categories to memo."""
+    Category/Account, followed by sub-rows with empty Type/Status/Date/Payee,
+    each carrying its own Category/Account, signed Amount, and (optionally) a
+    Memo/Note.
+
+    Collapse keeps the parent row and attaches the sub-rows as a structured
+    ``_splits`` list (raw category / memo / signed-amount string). The
+    normaliser turns that into real split lines (ADR-051) — they're no longer
+    flattened into the memo. A '(split)' parent with no sub-rows comes out with
+    an empty ``_splits`` and is treated as a plain Uncategorised transaction."""
     result: list[dict] = []
     pending: Optional[dict] = None
-    split_parts: list[str] = []
+    split_lines: list[dict] = []
+
+    def flush() -> None:
+        nonlocal pending, split_lines
+        if pending is not None:
+            pending["_splits"] = split_lines
+            result.append(pending)
+        pending = None
+        split_lines = []
 
     for row in rows:
         row_type = row.get("Type", "").strip()
@@ -211,16 +226,18 @@ def _collapse_banktivity_splits(rows: list[dict]) -> list[dict]:
             if pending is not None:
                 cat = row.get("Category/Account", "").strip()
                 amt = row.get("Amount", "").strip()
-                if cat:
-                    split_parts.append(f"{cat} ({amt})")
+                memo = (
+                    row.get("Memo", "").strip() or row.get("Note", "").strip()
+                )
+                if cat or amt:
+                    split_lines.append({
+                        "category_raw": cat,
+                        "memo": memo,
+                        "amount_raw": amt,
+                    })
             continue
 
-        if pending is not None:
-            if split_parts:
-                pending["_split_memo"] = " | ".join(split_parts)
-            result.append(pending)
-            pending = None
-            split_parts = []
+        flush()
 
         cat = row.get("Category/Account", "").strip()
         if cat == "(split)":
@@ -228,11 +245,7 @@ def _collapse_banktivity_splits(rows: list[dict]) -> list[dict]:
         else:
             result.append(row)
 
-    if pending is not None:
-        if split_parts:
-            pending["_split_memo"] = " | ".join(split_parts)
-        result.append(pending)
-
+    flush()
     return result
 
 
@@ -280,7 +293,13 @@ def _normalise_banktivity_row(row: dict) -> Optional[dict]:
     category = row.get("Category/Account", "").strip()
     note = row.get("Note", "").strip()
     memo_raw = row.get("Memo", "").strip()
-    split_memo = row.get("_split_memo", "").strip()
+
+    # Split transactions (ADR-051): build real split lines from the sub-rows
+    # the collapser attached, instead of flattening them into the memo. Lines
+    # carry signed amounts; if they don't sum to the parent total (Banktivity
+    # quirk), append an Uncategorised remainder line rather than reject the row
+    # — integer pence make the comparison exact, so no float tolerance.
+    splits = _build_banktivity_splits(row.get("_splits"), amount, tx_type)
 
     # Memo: bank-supplied free text only. The category goes into category_raw
     # (parsed into the category hierarchy by the import service) — no longer
@@ -290,8 +309,6 @@ def _normalise_banktivity_row(row: dict) -> Optional[dict]:
         memo_parts.append(note)
     if memo_raw:
         memo_parts.append(memo_raw)
-    if split_memo:
-        memo_parts.append(f"Split: {split_memo}")
     if row_type.lower() == "transfer":
         memo_parts.append(f"Transfer to {payee_raw}")
     memo = " | ".join(memo_parts)
@@ -302,9 +319,9 @@ def _normalise_banktivity_row(row: dict) -> Optional[dict]:
 
     # category_raw: pass the raw category string through. The import service
     # parses ':' separators into the hierarchical category tree. Drop the
-    # '(split)' sentinel; for split transactions the parent's category isn't
-    # meaningful at the leaf level.
-    category_raw = "" if category in ("", "(split)") else category
+    # '(split)' sentinel; for a split the parent's category isn't meaningful
+    # (the lines carry the categories).
+    category_raw = "" if (category in ("", "(split)") or splits) else category
 
     return {
         "fitid":           "",
@@ -315,7 +332,54 @@ def _normalise_banktivity_row(row: dict) -> Optional[dict]:
         "memo":            memo,
         "status_override": status_override,
         "category_raw":    category_raw,
+        "splits":          splits,        # None unless this is a split (ADR-051)
     }
+
+
+def _build_banktivity_splits(
+    raw_splits: Optional[list[dict]], amount: Decimal, tx_type: str,
+) -> Optional[list[dict]]:
+    """Turn the collapser's raw sub-rows into signed split lines (ADR-051), or
+    None when this isn't a split. ``amount``/``tx_type`` are the parent's
+    magnitude + direction; the parent's signed total is reconstructed so a
+    remainder line can balance the lines exactly."""
+    if not raw_splits:
+        return None
+    parent_signed = amount if tx_type == "credit" else -amount
+    lines: list[dict] = []
+    line_sum = Decimal("0.00")
+    for s in raw_splits:
+        sval = _parse_amount_str(s.get("amount_raw", ""))
+        if sval is None:
+            logger.warning(
+                "Skipping split line with unparseable amount: %r",
+                s.get("amount_raw"),
+            )
+            continue
+        sval = sval.quantize(Decimal("0.01"))
+        cat = s.get("category_raw", "").strip()
+        cat = "" if cat in ("", "(split)") else cat
+        lines.append({
+            "category_raw": cat,
+            "memo": s.get("memo", "").strip(),
+            "amount": sval,
+        })
+        line_sum += sval
+    if not lines:
+        return None
+    remainder = (parent_signed - line_sum).quantize(Decimal("0.01"))
+    if remainder != Decimal("0.00"):
+        logger.warning(
+            "Banktivity split lines sum to %s but the total is %s; adding an "
+            "Uncategorised remainder line of %s.",
+            line_sum, parent_signed, remainder,
+        )
+        lines.append({
+            "category_raw": "",
+            "memo": "Auto-balanced import remainder",
+            "amount": remainder,
+        })
+    return lines
 
 
 def _parse_banktivity_date(date_str: str) -> str:

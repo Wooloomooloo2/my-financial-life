@@ -1172,7 +1172,13 @@ class AccountSummaryWindow(QMainWindow):
             if period_start.isoformat() <= t.posted_date <= period_end.isoformat()
         ]
         payees_rows = top_payees(in_period_txns, n=10)
-        categories_rows = top_categories(in_period_txns, n=10)
+        # Unroll split transactions (ADR-051) so each split line lands on its
+        # own category rather than the parent's Uncategorised bucket.
+        split_ids = [t.id for t in in_period_txns if t.split_count]
+        split_lines_by_txn = self._repo.split_lines_for_txns(split_ids)
+        categories_rows = top_categories(
+            in_period_txns, n=10, split_lines_by_txn=split_lines_by_txn,
+        )
 
         if not txns or not flow_series.buckets:
             self._chart.show_empty("Not enough history yet")

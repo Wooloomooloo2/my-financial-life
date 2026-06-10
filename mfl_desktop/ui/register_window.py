@@ -73,6 +73,7 @@ from mfl_desktop.reports.filters import (
 )
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
 from mfl_desktop.ui.investment_transaction_dialog import InvestmentTransactionDialog
+from mfl_desktop.ui.split_transaction_dialog import SplitTransactionDialog
 from mfl_desktop.ui.transfer_destination_dialog import (
     TransferDestinationDialog,
     no_other_accounts_message,
@@ -689,6 +690,22 @@ class RegisterWindow(QMainWindow):
         if values is None:
             return
 
+        # ADR-051: the user clicked "Split…" — hand the header fields and the
+        # entered amount to the split dialog (which collects the category lines
+        # and persists). Splits aren't supported on investment accounts.
+        if dialog.split_requested():
+            self._open_split_txn_dialog(
+                account_id=values.account_id,
+                prefill={
+                    "posted_date": values.posted_date,
+                    "payee_name": values.payee_name,
+                    "status": values.status,
+                    "memo": values.memo,
+                    "total_amount": values.amount,
+                },
+            )
+            return
+
         # ADR-020: a transfer-kind category turns this into a transfer —
         # prompt for the destination, then create both halves via
         # create_transfer. ADR-035 amendment 2026-06-07: when the
@@ -797,18 +814,63 @@ class RegisterWindow(QMainWindow):
         self.statusBar().showMessage("Transaction added", 4000)
 
     def _on_table_double_clicked(self, proxy_index) -> None:
-        """ADR-048: double-clicking an investment row opens the edit dialog.
-        For cash accounts this is a no-op — their cells are inline-editable, so
-        Qt's own double-click edit trigger handles them."""
-        if self._account is None or self._account.family != "investment":
-            return
+        """Double-click routing for dialog-edited rows:
+
+        - ADR-048: an investment row opens the investment edit dialog.
+        - ADR-051: a split row opens the split edit dialog (works in both the
+          single-account and All-transactions views).
+
+        Plain cash rows are inline-editable, so Qt's own double-click edit
+        trigger handles them and this is a no-op for them."""
         if not proxy_index.isValid():
             return
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
-        if row.action is None:
-            return          # a plain cash row that happens to sit here
-        self._open_investment_txn_dialog(seed=row)
+        if self._account is not None and self._account.family == "investment":
+            if row.action is None:
+                return          # a plain cash row that happens to sit here
+            self._open_investment_txn_dialog(seed=row)
+            return
+        if row.split_count:
+            self._open_split_txn_dialog(seed=row)
+
+    def _open_split_txn_dialog(
+        self, seed=None, prefill=None, account_id=None,
+    ) -> None:
+        """Open the split dialog (ADR-051) in edit (``seed``) or create
+        (``prefill``) mode against a cash/credit account, then reload on save.
+        Resolves the account from the seed row / explicit id / current view."""
+        aid = account_id
+        if aid is None and seed is not None:
+            aid = seed.account_id
+        if aid is None and self._account is not None:
+            aid = self._account.id
+        if aid is None:
+            return
+        account = self._repo.get_account_by_id(aid)
+        if account is None:
+            return
+        if account.family == "investment":
+            QMessageBox.information(
+                self, "Split transaction",
+                "Split transactions aren't supported on investment accounts.",
+            )
+            return
+        # Reconciled rows get the same "change anyway?" confirm as inline edits.
+        if seed is not None and self._repo.is_reconciled(seed.id):
+            if not self._confirm_reconciled_edit(seed.id):
+                return
+        dialog = SplitTransactionDialog(
+            self._repo, account, self._categories,
+            seed=seed, prefill=prefill, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._model.reload()
+        self._refresh_sidebar_balances()
+        self.statusBar().showMessage(
+            "Split updated" if seed is not None else "Split added", 4000,
+        )
 
     def _open_investment_txn_dialog(self, seed) -> None:
         """Open the investment transaction dialog in create (seed=None) or edit
@@ -1305,6 +1367,7 @@ class RegisterWindow(QMainWindow):
         security_context = None
         sec_ids: set[int] = set()
         a_sec_row = None
+        split_parent_ids: list[int] = []        # ADR-051
         for proxy_idx in self._table.selectionModel().selectedRows():
             src = self._proxy.mapToSource(proxy_idx)
             if not src.isValid():
@@ -1313,6 +1376,8 @@ class RegisterWindow(QMainWindow):
             if r.security_id is not None:
                 sec_ids.add(r.security_id)
                 a_sec_row = r
+            if r.split_count:
+                split_parent_ids.append(r.id)
         if len(sec_ids) == 1 and a_sec_row is not None:
             security_context = (
                 a_sec_row.security_id,
@@ -1353,6 +1418,42 @@ class RegisterWindow(QMainWindow):
         # every selected row into a transfer (plus apply any other ticked
         # fields). Otherwise the existing bulk_update path runs as before.
         new_category_id = changes.get("category_id")
+
+        # ADR-051: a split parent has no single category. If the user is setting
+        # a category and the selection includes split transactions, converting
+        # them means discarding their lines — confirm first. (And they can't
+        # become transfers — a split is never a transfer.)
+        if new_category_id is not None and split_parent_ids:
+            if self._category_kind(new_category_id) == "transfer":
+                QMessageBox.warning(
+                    self, "Bulk edit",
+                    f"{len(split_parent_ids)} of the selected transactions are "
+                    "split — split transactions can't be converted to "
+                    "transfers. Remove them from the selection first.",
+                )
+                return
+            resp = QMessageBox.question(
+                self, "Bulk edit",
+                f"{len(split_parent_ids)} of the selected transactions are "
+                "split. Setting a category will convert them to a "
+                "single-category transaction and discard their split lines.\n\n"
+                "Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+            try:
+                for sid in split_parent_ids:
+                    self._repo.convert_split_to_plain(sid, new_category_id)
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Bulk edit",
+                    f"The split conversion was not applied:\n\n{e}",
+                )
+                return
+            # Those rows are now plain; the bulk update below re-applies the
+            # (same) category plus any payee/status/memo changes uniformly.
+
         if (
             new_category_id is not None
             and self._category_kind(new_category_id) == "transfer"
