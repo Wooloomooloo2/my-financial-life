@@ -19,9 +19,16 @@ Scope notes (round 2):
   in the owner's data: a transfer-out mislabelled as ``XIn``.)
 - Stock-split ratio application is deferred — splits are skipped with a logged
   note (the only split in the owner's data is a malformed empty row anyway).
-- Shares transferred in (``ShrsIn``) often carry no price, so their lot has no
-  known basis; the holding is flagged ``basis_incomplete`` and its cost/gain
-  are approximate.
+
+In-kind share transfers (``ShrsIn`` / ``ShrsOut``, ADR-053): a ShrsOut is a
+custodian move, not a sale, so it removes shares with **zero realized gain**
+(treating its $0 cash as proceeds would book the whole cost basis as a phantom
+loss) and parks the popped lots in a per-security "transfer pen"; a later
+matching ``ShrsIn`` pulls its cost basis from that pen, so an out→in transfer
+nets to no realized impact and preserves cost basis across accounts. A ShrsIn
+with no matching prior ShrsOut (e.g. shares that entered the tracked history
+already held elsewhere) still has unknown basis unless the row carries a price —
+its lot is cost-0 and the holding is flagged ``basis_incomplete``.
 """
 from __future__ import annotations
 
@@ -35,7 +42,8 @@ from typing import Optional
 
 from mfl_desktop.db.repository import TransactionRow
 from mfl_desktop.import_engine.qif_actions import (
-    is_income, is_reinvest, is_share_in, is_share_out, is_split,
+    is_income, is_reinvest, is_share_in, is_share_out, is_share_transfer,
+    is_split,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +66,40 @@ class _Lot:
     qty: float
     unit_cost: float          # per-share cost basis (may be 0 when unknown)
     known_basis: bool         # False for transferred-in shares with no price
+
+
+def _transfer_out(queue: "deque[_Lot]", qty: float, pen: "deque[_Lot]") -> float:
+    """Pop FIFO lots totalling up to ``qty`` from ``queue`` and append them to a
+    per-security transfer ``pen`` (basis preserved) — a ShrsOut moves shares
+    without selling them (ADR-053). Returns the quantity that couldn't be
+    satisfied from known lots (transferred out beyond what we have basis for)."""
+    remaining = qty
+    while remaining > _EPS and queue:
+        lot = queue[0]
+        take = min(remaining, lot.qty)
+        pen.append(_Lot(qty=take, unit_cost=lot.unit_cost, known_basis=lot.known_basis))
+        lot.qty -= take
+        remaining -= take
+        if lot.qty <= _EPS:
+            queue.popleft()
+    return remaining
+
+
+def _transfer_in(queue: "deque[_Lot]", qty: float, pen: "deque[_Lot]") -> float:
+    """Satisfy up to ``qty`` of an incoming ShrsIn from the transfer ``pen``,
+    carrying each matched lot's cost basis onto ``queue`` (ADR-053). Returns the
+    quantity still unmatched — shares with no prior ShrsOut to carry basis from,
+    handled by the caller (explicit price, else unknown basis)."""
+    remaining = qty
+    while remaining > _EPS and pen:
+        src = pen[0]
+        take = min(remaining, src.qty)
+        queue.append(_Lot(qty=take, unit_cost=src.unit_cost, known_basis=src.known_basis))
+        src.qty -= take
+        remaining -= take
+        if src.qty <= _EPS:
+            pen.popleft()
+    return remaining
 
 
 @dataclass(frozen=True)
@@ -102,6 +144,7 @@ def compute_holdings_view(
     """
     # FIFO lot queues + realized-gain accumulators, keyed by security_id.
     lots: dict[int, deque[_Lot]] = {}
+    pending: dict[int, deque[_Lot]] = {}    # transfer pen: ShrsOut → matching ShrsIn
     realized: dict[int, float] = {}
     incomplete: dict[int, bool] = {}
     meta: dict[int, tuple[str, str]] = {}   # security_id → (name, symbol)
@@ -125,19 +168,42 @@ def compute_holdings_view(
         if is_share_in(t.action):
             if qty <= _EPS:
                 continue
+            remaining_in = qty
+            if is_share_transfer(t.action):
+                # Transfer in: carry FIFO cost basis from a matching ShrsOut
+                # earlier in the replay rather than treating the shares as free.
+                remaining_in = _transfer_in(
+                    lots[sid], qty, pending.setdefault(sid, deque()),
+                )
+                if remaining_in <= _EPS:
+                    continue
+                # Any shares beyond a matching transfer-out fall through to the
+                # explicit-price / unknown-basis handling for the remainder.
             known = True
             if t.action.strip().lower() in _CASH_BUY_ACTIONS and t.amount != 0:
                 lot_cost = float(abs(t.amount))        # true net cash (incl. commission)
             elif t.price is not None:
-                lot_cost = float(t.price) * qty         # reinvest / shares-in with a price
+                lot_cost = float(t.price) * remaining_in  # reinvest / shares-in with a price
             else:
                 lot_cost = 0.0                           # transferred-in, basis unknown
                 known = False
                 incomplete[sid] = True
-            lots[sid].append(_Lot(qty=qty, unit_cost=lot_cost / qty, known_basis=known))
+            lots[sid].append(
+                _Lot(qty=remaining_in, unit_cost=lot_cost / remaining_in, known_basis=known)
+            )
 
         elif is_share_out(t.action):
             if qty <= _EPS:
+                continue
+            if is_share_transfer(t.action):
+                # Transfer out: remove shares but DON'T realize a gain/loss — a
+                # custodian move, not a sale. Park the popped lots so a matching
+                # ShrsIn can carry their basis (ADR-053).
+                unmatched = _transfer_out(
+                    lots[sid], qty, pending.setdefault(sid, deque()),
+                )
+                if unmatched > _EPS:
+                    incomplete[sid] = True
                 continue
             proceeds = float(abs(t.amount))
             remaining = qty
@@ -300,6 +366,7 @@ def compute_value_history(
         return price_series_by_security[sid][i][1]
 
     lots: dict[int, deque[_Lot]] = {}
+    pending: dict[int, deque[_Lot]] = {}    # transfer pen (ADR-053)
     ordered = sorted(txns, key=lambda r: (r.posted_date, r.id))
     ti = 0
     points: list[ValuePoint] = []
@@ -310,16 +377,29 @@ def compute_value_history(
             ti += 1
             if t.security_id is None or t.action is None:
                 continue
+            sid = t.security_id
             qty = float(t.quantity) if t.quantity is not None else 0.0
-            lots.setdefault(t.security_id, deque())
+            lots.setdefault(sid, deque())
             if is_share_in(t.action) and qty > _EPS:
-                cost, known = _lot_cost(t.action, t.amount, t.price, qty)
-                lots[t.security_id].append(
-                    _Lot(qty=qty, unit_cost=cost / qty, known_basis=known)
+                remaining_in = qty
+                if is_share_transfer(t.action):
+                    # Transfer in: carry basis from a matching ShrsOut so the
+                    # cost line doesn't drop on a custodian move (ADR-053).
+                    remaining_in = _transfer_in(
+                        lots[sid], qty, pending.setdefault(sid, deque()),
+                    )
+                    if remaining_in <= _EPS:
+                        continue
+                cost, known = _lot_cost(t.action, t.amount, t.price, remaining_in)
+                lots[sid].append(
+                    _Lot(qty=remaining_in, unit_cost=cost / remaining_in, known_basis=known)
                 )
             elif is_share_out(t.action) and qty > _EPS:
+                if is_share_transfer(t.action):
+                    _transfer_out(lots[sid], qty, pending.setdefault(sid, deque()))
+                    continue
                 remaining = qty
-                queue = lots[t.security_id]
+                queue = lots[sid]
                 while remaining > _EPS and queue:
                     lot = queue[0]
                     take = min(remaining, lot.qty)
@@ -466,6 +546,7 @@ def compute_returns(
         return security_ids is None or sid in security_ids
 
     lots: dict[int, deque[_Lot]] = {}
+    pending: dict[int, deque[_Lot]] = {}   # transfer pen: ShrsOut → matching ShrsIn
     realized_win: dict[int, float] = {}
     dividends_win: dict[int, float] = {}
     cost_sold_win: dict[int, float] = {}   # cost basis removed by in-window sells
@@ -494,9 +575,19 @@ def compute_returns(
 
             if is_share_in(t.action):
                 if qty > _EPS:
-                    cost, known = _lot_cost(t.action, t.amount, t.price, qty)
+                    remaining_in = qty
+                    if is_share_transfer(t.action):
+                        # Transfer in: carry FIFO cost basis from a matching
+                        # ShrsOut so the round-trip preserves basis and books no
+                        # phantom gain/loss (ADR-053).
+                        remaining_in = _transfer_in(
+                            lots[sid], qty, pending.setdefault(sid, deque()),
+                        )
+                        if remaining_in <= _EPS:
+                            continue
+                    cost, known = _lot_cost(t.action, t.amount, t.price, remaining_in)
                     lots[sid].append(
-                        _Lot(qty=qty, unit_cost=cost / qty, known_basis=known)
+                        _Lot(qty=remaining_in, unit_cost=cost / remaining_in, known_basis=known)
                     )
                     if in_window and is_reinvest(t.action):
                         # Reinvested distribution: income = the reinvested value
@@ -505,6 +596,11 @@ def compute_returns(
                         dividends_win[sid] += reinv
             elif is_share_out(t.action):
                 if qty > _EPS:
+                    if is_share_transfer(t.action):
+                        # Transfer out: remove shares, NO realized gain/loss —
+                        # park the lots for the matching ShrsIn (ADR-053).
+                        _transfer_out(lots[sid], qty, pending.setdefault(sid, deque()))
+                        continue
                     proceeds = float(abs(t.amount))
                     remaining = qty
                     cost_removed = 0.0

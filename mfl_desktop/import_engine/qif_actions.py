@@ -16,6 +16,14 @@ SHARE_IN_ACTIONS = {"buy", "buyx", "shrsin", "reinvdiv", "reinvlg", "reinvsh",
 # Actions whose security leg REMOVES shares.
 SHARE_OUT_ACTIONS = {"sell", "sellx", "shrsout", "shtsell"}
 
+# In-kind share TRANSFERS between accounts (no cash, no sale). These are a
+# subset of the share-in/out sets — a ShrsIn still adds shares and a ShrsOut
+# still removes them — but the holdings engine must NOT treat a ShrsOut as a
+# realizing disposal (proceeds are $0, so it would book the whole cost basis as
+# a phantom loss) and should carry the cost basis across to the matching ShrsIn
+# rather than re-acquiring the shares for free. ADR-053.
+SHARE_TRANSFER_ACTIONS = {"shrsin", "shrsout"}
+
 # Cash distributions / income received into the account (positive cash in).
 CASH_IN_ACTIONS = {"div", "divx", "intinc", "intincx", "miscinc", "miscincx",
                    "cglong", "cglongx", "cgshort", "cgshortx", "cgmid",
@@ -53,6 +61,13 @@ def is_share_out(action: str | None) -> bool:
 
 def is_split(action: str | None) -> bool:
     return _norm(action) in SPLIT_ACTIONS
+
+
+def is_share_transfer(action: str | None) -> bool:
+    """True for an in-kind share transfer between accounts (ShrsIn / ShrsOut).
+    The holdings engine (ADR-053) treats these as custodian moves — no realized
+    gain on the way out, cost basis carried to the matching leg — not sales."""
+    return _norm(action) in SHARE_TRANSFER_ACTIONS
 
 
 def is_income(action: str | None) -> bool:

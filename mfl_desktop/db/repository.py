@@ -1554,6 +1554,78 @@ class Repository:
         )
         self.commit()
 
+    def merge_securities(self, source_ids: list[int], target_id: int) -> int:
+        """Merge one or more securities into ``target_id`` (ADR-052).
+
+        Every transaction and stored price on a source security is re-pointed
+        to the target, then the source ``security`` rows are deleted. Use this
+        to collapse duplicate records that describe the same instrument — e.g.
+        a fund imported under two names ("TIAA CREF CORE IMPACT BD INST" and
+        "Nuveen Core Impact Bond R6", both ticker TSBIX) because
+        ``security.name`` is unique and the importer keys on it.
+
+        Price collisions are resolved by the ADR-047 source precedence
+        (manual > tiingo > transaction): when a source and the target both
+        hold a price on the same date, the higher-precedence source wins and a
+        tie keeps the target's existing row. The comparison is rank-based, so
+        the outcome doesn't depend on the order rows are merged in.
+
+        ``target_id`` is excluded from ``source_ids`` defensively. Returns the
+        count of transactions re-pointed. The repoint + delete run in a single
+        SQL transaction — either the whole merge lands or nothing changes.
+        """
+        sources = [sid for sid in source_ids if sid != target_id]
+        if not sources:
+            return 0
+        if self._conn.execute(
+            "SELECT 1 FROM security WHERE id = ?", (target_id,),
+        ).fetchone() is None:
+            raise ValueError(f"No security with id {target_id}")
+        placeholders = ",".join("?" * len(sources))
+        try:
+            cur = self._conn.execute(
+                f"UPDATE txn SET security_id = ? "
+                f"WHERE security_id IN ({placeholders})",
+                (target_id, *sources),
+            )
+            moved = cur.rowcount
+            # Move the sources' prices onto the target. security_price's PK is
+            # (security_id, price_date), so a plain UPDATE would collide on any
+            # date both records hold — instead INSERT…SELECT and let the
+            # conflict clause keep the higher-precedence price.
+            self._conn.execute(
+                f"INSERT INTO security_price "
+                f"(security_id, price_date, price, currency, source) "
+                f"SELECT ?, price_date, price, currency, source "
+                f"FROM security_price WHERE security_id IN ({placeholders}) "
+                f"ON CONFLICT(security_id, price_date) DO UPDATE SET "
+                f"  price = excluded.price, currency = excluded.currency, "
+                f"  source = excluded.source "
+                f"WHERE (CASE excluded.source WHEN 'manual' THEN 3 "
+                f"         WHEN 'tiingo' THEN 2 ELSE 1 END) "
+                f"    > (CASE security_price.source WHEN 'manual' THEN 3 "
+                f"         WHEN 'tiingo' THEN 2 ELSE 1 END)",
+                (target_id, *sources),
+            )
+            # Drop the now-copied source price rows (the winners are on target).
+            self._conn.execute(
+                f"DELETE FROM security_price WHERE security_id IN ({placeholders})",
+                tuple(sources),
+            )
+            self._conn.execute(
+                f"DELETE FROM security WHERE id IN ({placeholders})",
+                tuple(sources),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        # A trade moved onto an untickered survivor can now seed a transaction
+        # price; seeding skips tickered securities, so this is a no-op when the
+        # survivor carries a symbol. Its own commit, outside the merge txn.
+        self.seed_prices_from_transactions(security_ids=[target_id])
+        return moved
+
     # ── Security prices (ADR-044) ──
 
     # Price-source precedence (ADR-047): manual > tiingo > transaction. The

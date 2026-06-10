@@ -382,8 +382,16 @@ class InvestmentReturnsWindow(QMainWindow):
 
         security_ids: Optional[set[int]] = set(f.security_ids) or None
 
-        # Per-account full-history txns + earliest date.
-        per_account: list[tuple] = []   # (account, txns, price_series)
+        # Group the selected accounts' full-history txns BY CURRENCY, then run
+        # one FIFO replay per currency group. Pooling same-currency accounts is
+        # what lets an in-kind share transfer between two accounts net out
+        # (ShrsOut in one, ShrsIn in the other) — the holdings engine carries
+        # the cost basis across the matched legs only when both are in the same
+        # replay (ADR-053). Grouping by currency (not per-account) keeps the
+        # mixed-currency conversion correct since a rate depends only on the
+        # currency. Transfers across two *different* currencies remain the
+        # round-4 transfer-linking concern.
+        by_ccy: dict[str, dict] = {}   # currency → {"txns": [...], "sec_ids": set}
         earliest: Optional[date] = None
         for acct in accounts:
             txns = self._repo.list_transactions_for_account(acct.id)
@@ -391,12 +399,11 @@ class InvestmentReturnsWindow(QMainWindow):
             if dated:
                 first = date.fromisoformat(min(dated))
                 earliest = first if earliest is None else min(earliest, first)
-            sec_ids = {t.security_id for t in txns if t.security_id is not None}
-            pser = {
-                sid: [(p.price_date, p.price) for p in self._repo.price_series(sid)]
-                for sid in sec_ids
-            }
-            per_account.append((acct, txns, pser))
+            g = by_ccy.setdefault(acct.currency, {"txns": [], "sec_ids": set()})
+            g["txns"].extend(txns)
+            g["sec_ids"].update(
+                t.security_id for t in txns if t.security_id is not None
+            )
 
         d_from, d_to = self._resolve_bounds(earliest)
         samples = _month_end_samples(d_from, d_to)
@@ -405,16 +412,21 @@ class InvestmentReturnsWindow(QMainWindow):
         end_iso = d_to.isoformat()
 
         # Display currency: native if uniform, else first account's currency.
-        currencies = {a.currency for a, _, _ in per_account}
+        currencies = set(by_ccy)
         self._display_ccy = (
             next(iter(currencies)) if len(currencies) == 1
             else accounts[0].currency
         )
 
-        results = [
-            (acct, compute_returns(txns, samples, pser, window_start, security_ids))
-            for acct, txns, pser in per_account
-        ]
+        results = []   # (currency, ReturnsResult)
+        for ccy, g in by_ccy.items():
+            pser = {
+                sid: [(p.price_date, p.price) for p in self._repo.price_series(sid)]
+                for sid in g["sec_ids"]
+            }
+            results.append(
+                (ccy, compute_returns(g["txns"], samples, pser, window_start, security_ids))
+            )
 
         # Aggregate points by sample index (all results share samples_iso).
         n = len(samples_iso)
@@ -424,14 +436,14 @@ class InvestmentReturnsWindow(QMainWindow):
             date_i = samples_iso[i]
             cost = mv = realized = div = Decimal("0")
             fully = True
-            for acct, res in results:
+            for ccy, res in results:
                 if i >= len(res.points):
                     continue
                 p = res.points[i]
-                cost += self._conv(p.cost_basis, acct.currency, date_i)
-                mv += self._conv(p.market_value, acct.currency, date_i)
-                realized += self._conv(p.realized_cum, acct.currency, date_i)
-                div += self._conv(p.dividends_cum, acct.currency, date_i)
+                cost += self._conv(p.cost_basis, ccy, date_i)
+                mv += self._conv(p.market_value, ccy, date_i)
+                realized += self._conv(p.realized_cum, ccy, date_i)
+                div += self._conv(p.dividends_cum, ccy, date_i)
                 fully = fully and p.fully_priced
             any_fallback = any_fallback or not fully
             agg_points.append(ReturnPoint(
@@ -442,7 +454,7 @@ class InvestmentReturnsWindow(QMainWindow):
 
         # Aggregate per-security at end-of-window (convert at end date).
         merged: dict[int, dict] = {}
-        for acct, res in results:
+        for ccy, res in results:
             for s in res.by_security:
                 m = merged.setdefault(s.security_id, {
                     "symbol": s.symbol, "name": s.name, "shares": 0.0,
@@ -452,15 +464,15 @@ class InvestmentReturnsWindow(QMainWindow):
                     "div": Decimal("0"), "priced": False,
                 })
                 m["shares"] += s.shares
-                m["cost"] += self._conv(s.cost_basis, acct.currency, end_iso)
-                m["cost_sold"] += self._conv(s.cost_basis_sold, acct.currency, end_iso)
-                m["realized"] += self._conv(s.realized_window, acct.currency, end_iso)
-                m["div"] += self._conv(s.dividends_window, acct.currency, end_iso)
+                m["cost"] += self._conv(s.cost_basis, ccy, end_iso)
+                m["cost_sold"] += self._conv(s.cost_basis_sold, ccy, end_iso)
+                m["realized"] += self._conv(s.realized_window, ccy, end_iso)
+                m["div"] += self._conv(s.dividends_window, ccy, end_iso)
                 if s.market_value is not None:
-                    m["mv"] += self._conv(s.market_value, acct.currency, end_iso)
+                    m["mv"] += self._conv(s.market_value, ccy, end_iso)
                     m["priced"] = True
                 if s.unrealized is not None:
-                    m["unreal"] += self._conv(s.unrealized, acct.currency, end_iso)
+                    m["unreal"] += self._conv(s.unrealized, ccy, end_iso)
 
         rows = list(merged.values())
         for m in rows:

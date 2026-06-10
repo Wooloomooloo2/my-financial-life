@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import Repository, SecurityRow
 from mfl_desktop.holdings import compute_holdings_view
 from mfl_desktop.prices import PriceFetchError, backfill_security_history_into
+from mfl_desktop.ui.merge_securities_dialog import MergeSecuritiesDialog
 from mfl_desktop.ui.price_history_chart import PriceHistoryChart
 
 # Display currency for quotes / cash on this screen. The owner's portfolio is
@@ -138,6 +139,13 @@ class StockRecordDialog(QDialog):
         )
         self._fetch_btn.clicked.connect(self._on_fetch_from_tiingo)
         btn_row.addWidget(self._fetch_btn)
+        self._merge_btn = QPushButton("Merge…")
+        self._merge_btn.setToolTip(
+            "Combine this security with another record for the same "
+            "instrument (e.g. a fund that arrived under two names)."
+        )
+        self._merge_btn.clicked.connect(self._on_merge)
+        btn_row.addWidget(self._merge_btn)
         btn_row.addStretch(1)
         self._header_status = QLabel("")
         self._header_status.setStyleSheet("QLabel { color: #475569; }")
@@ -380,6 +388,27 @@ class StockRecordDialog(QDialog):
         self._header_status.setText("Saved")
         self._reload_security()
         self._update_fetch_enabled()
+
+    def _on_merge(self) -> None:
+        dlg = MergeSecuritiesDialog(self._repo, self._security, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        n = dlg.moved_count
+        plural = "s" if n != 1 else ""
+        if dlg.absorbed_id == self._sid:
+            # This record was merged away — it no longer exists. Close so the
+            # parent (Securities dialog) refreshes and drops the duplicate.
+            QMessageBox.information(
+                self, "Merge securities",
+                f"Merged into the kept record. {n} transaction{plural} moved.",
+            )
+            self.accept()
+            return
+        # This record survived and absorbed the other — refresh everything.
+        QMessageBox.information(
+            self, "Merge securities", f"Merged in {n} transaction{plural}.",
+        )
+        self._reload_all()
 
     def _on_fetch_from_tiingo(self) -> None:
         symbol = self._symbol_edit.text().strip()

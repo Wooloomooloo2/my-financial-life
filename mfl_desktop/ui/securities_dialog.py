@@ -1,4 +1,4 @@
-"""Manage → Securities… dialog (ADR-044).
+"""Manage → Securities… dialog (ADR-044, ADR-052).
 
 The price-management screen for investment holdings. Mirrors the Currencies
 dialog (ADR-035):
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import Repository, SecurityRow
 from mfl_desktop.prices import backfill_historical_into, refresh_latest_prices_into
+from mfl_desktop.ui.merge_securities_dialog import MergeSecuritiesDialog
 from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 
 
@@ -172,6 +173,14 @@ class SecuritiesDialog(QDialog):
 
         open_row = QHBoxLayout()
         open_row.addStretch(1)
+        self._merge_btn = QPushButton("Merge…")
+        self._merge_btn.setToolTip(
+            "Combine the selected security with another record for the same "
+            "instrument (e.g. a fund imported under two names, or renamed when "
+            "moved between accounts)."
+        )
+        self._merge_btn.clicked.connect(self._on_merge_securities)
+        open_row.addWidget(self._merge_btn)
         self._open_record_btn = QPushButton("Open stock record")
         self._open_record_btn.setToolTip(
             "Open the selected security's Stock Record — price history, "
@@ -286,6 +295,19 @@ class SecuritiesDialog(QDialog):
         security = self._row_securities[row]
         StockRecordDialog(self._repo, security, self).exec()
         # Ticker / prices may have changed — refresh the latest-price view.
+        self._reload_table()
+
+    def _on_merge_securities(self) -> None:
+        row = self._table.currentRow()
+        if not (0 <= row < len(self._row_securities)):
+            QMessageBox.information(
+                self, "Merge securities", "Select a security to merge first.",
+            )
+            return
+        # The selected row is the security in hand; the dialog lets the user
+        # pick the other record (same-ticker matches surfaced first) and choose
+        # which survives. Reload either way — a merge drops the absorbed row.
+        MergeSecuritiesDialog(self._repo, self._row_securities[row], self).exec()
         self._reload_table()
 
     # ── button handlers ─────────────────────────────────────────────────
