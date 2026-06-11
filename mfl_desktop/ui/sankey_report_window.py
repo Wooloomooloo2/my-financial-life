@@ -59,6 +59,12 @@ _OTHER_COLOR = QColor("#cbd5e1")
 _SAVINGS_COLOR = QColor("#16a34a")
 _DEFICIT_COLOR = QColor("#dc2626")
 
+_CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
+
+
+def _symbol_for(currency: str) -> str:
+    return _CCY_SYMBOLS.get((currency or "").upper(), "")
+
 
 class SankeyReportWindow(QMainWindow):
     reports_changed = Signal()
@@ -73,6 +79,7 @@ class SankeyReportWindow(QMainWindow):
         self._loaded_name = report.name if report is not None else None
         self._loaded_folder_id = report.folder_id if report is not None else None
         self._dirty = False
+        self._display_ccy = "GBP"
         self.resize(1280, 760)
 
         self._current_filters: SankeyFilters = (
@@ -141,6 +148,11 @@ class SankeyReportWindow(QMainWindow):
         self._name_label.setStyleSheet("color: #334155; font-weight: bold;")
         row.addWidget(self._name_label)
         row.addStretch(1)
+        row.addWidget(QLabel("Display in:"))
+        self._ccy_combo = QComboBox()
+        self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
+        row.addWidget(self._ccy_combo)
+        self._populate_ccy_combo()
         self._save_button = QPushButton("Save")
         self._save_button.clicked.connect(self._on_save)
         self._save_as_button = QPushButton("Save As…")
@@ -254,6 +266,36 @@ class SankeyReportWindow(QMainWindow):
         v.addWidget(self._note)
         v.addStretch(1)
         return panel
+
+    def _populate_ccy_combo(self) -> None:
+        """Fill the display-currency selector from the currencies in use,
+        defaulting to the base currency (then GBP, then the first in use).
+        Like Net Worth (ADR-055), this is a view preference — not persisted in
+        the saved filters; it re-resolves to the default each time the report
+        opens."""
+        currencies = self._repo.list_distinct_currencies()
+        base = self._repo.get_setting("base_currency")
+        options = sorted(set(currencies) | ({base} if base else set()))
+        if not options:
+            options = ["GBP"]
+        if base and base in options:
+            default = base
+        elif "GBP" in options:
+            default = "GBP"
+        else:
+            default = options[0]
+        self._display_ccy = default
+        self._ccy_combo.blockSignals(True)
+        self._ccy_combo.clear()
+        for ccy in options:
+            self._ccy_combo.addItem(ccy, ccy)
+        i = self._ccy_combo.findData(default)
+        self._ccy_combo.setCurrentIndex(i if i >= 0 else 0)
+        self._ccy_combo.blockSignals(False)
+
+    def _on_ccy_changed(self, *_a) -> None:
+        self._display_ccy = self._ccy_combo.currentData() or "GBP"
+        self._refresh()
 
     # ── control sync ──
 
@@ -410,8 +452,10 @@ class SankeyReportWindow(QMainWindow):
         totals = self._repo.sankey_category_totals(
             date_from=d_from.isoformat(), date_to=d_to.isoformat(),
             account_ids=f.account_ids, category_ids=f.category_ids,
+            display_currency=self._display_ccy,
         )
         income_agg, expense_agg = totals["income"], totals["expense"]
+        self._unconverted = totals.get("unconverted", {})
         income_pence = sum(income_agg.values())
         expense_pence = sum(expense_agg.values())
 
@@ -450,13 +494,17 @@ class SankeyReportWindow(QMainWindow):
             total_income=income_pence / 100.0,
             total_expense=expense_pence / 100.0,
             value_mode=f.value_mode,
+            currency_symbol=_symbol_for(self._display_ccy) or self._display_ccy + " ",
         )
 
     def _update_summary(self, income_p: int, expense_p: int, saved_p: int) -> None:
-        self._income_value.setText(fmt_currency(income_p / 100.0))
-        self._expense_value.setText(fmt_currency(expense_p / 100.0))
+        sym = _symbol_for(self._display_ccy) or self._display_ccy + " "
+        self._income_value.setText(fmt_currency(income_p / 100.0, symbol=sym))
+        self._expense_value.setText(fmt_currency(expense_p / 100.0, symbol=sym))
         sign = "-" if saved_p < 0 else ""
-        self._saved_value.setText(f"{sign}{fmt_currency(abs(saved_p) / 100.0)}")
+        self._saved_value.setText(
+            f"{sign}{fmt_currency(abs(saved_p) / 100.0, symbol=sym)}"
+        )
         self._saved_value.setStyleSheet(
             "font-size: 20px; font-weight: bold; color: "
             + ("#16a34a" if saved_p >= 0 else "#dc2626") + ";"
@@ -469,12 +517,24 @@ class SankeyReportWindow(QMainWindow):
             )
         else:
             self._saving_rate.setText("")
-        # Income comes from category.kind='income'; flag the common setup gap.
-        self._note.setText(
-            "No income categories found — set category kinds in Manage ▸ "
-            "Categories so income appears on the left."
-            if income_p <= 0 and expense_p > 0 else ""
-        )
+        # Priority: excluded (no-rate) amounts, then the kinds-setup hint.
+        unconverted = getattr(self, "_unconverted", {})
+        if unconverted:
+            bits = ", ".join(
+                f"{_symbol_for(c) or c + ' '}{p / 100.0:,.0f} {c}"
+                for c, p in sorted(unconverted.items())
+            )
+            self._note.setText(
+                f"Excluded (no rate to {self._display_ccy}): {bits}. "
+                f"Set rates in Manage ▸ Currencies."
+            )
+        else:
+            # Income comes from category.kind='income'; flag the common gap.
+            self._note.setText(
+                "No income categories found — set category kinds in Manage ▸ "
+                "Categories so income appears on the left."
+                if income_p <= 0 and expense_p > 0 else ""
+            )
 
     def _update_filter_note(self) -> None:
         f = self._current_filters

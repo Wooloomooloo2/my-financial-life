@@ -63,9 +63,10 @@ def nice_ticks(vmax: float, target_count: int = 5) -> tuple[float, float]:
     return axis_max, step
 
 
-def fmt_currency(pounds: float, decimals: int = 0) -> str:
-    """``£1,234`` / ``£1,234.56`` — locale-free, owner is UK-only for now."""
-    return f"£{pounds:,.{decimals}f}"
+def fmt_currency(pounds: float, decimals: int = 0, symbol: str = "£") -> str:
+    """``£1,234`` / ``£1,234.56`` — locale-free. ``symbol`` overrides the
+    currency glyph for reports that convert to a chosen display currency."""
+    return f"{symbol}{pounds:,.{decimals}f}"
 
 
 def legend_chip(name: str, colour: QColor) -> QWidget:

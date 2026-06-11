@@ -66,6 +66,7 @@ class SankeyChart(QWidget):
         self._total_income = 0.0
         self._total_expense = 0.0
         self._value_mode = "amount"
+        self._symbol = "£"
         self._empty_message = "No data for this period."
         self._spine: Optional[SankeyNode] = None
         self._hitmap: list[tuple[QRectF, SankeyNode, float]] = []
@@ -79,12 +80,14 @@ class SankeyChart(QWidget):
         total_income: float,
         total_expense: float,
         value_mode: str = "amount",
+        currency_symbol: str = "£",
     ) -> None:
         self._income = income
         self._expense = expense
         self._total_income = total_income
         self._total_expense = total_expense
         self._value_mode = value_mode
+        self._symbol = currency_symbol
         self.update()
 
     def show_empty(self, message: str) -> None:
@@ -99,7 +102,7 @@ class SankeyChart(QWidget):
         if self._value_mode == "percent":
             pct = (value / side_total * 100.0) if side_total else 0.0
             return f"{pct:.0f}%"
-        return fmt_currency(value)
+        return fmt_currency(value, symbol=self._symbol)
 
     # ── layout ──
 
@@ -311,7 +314,9 @@ class SankeyChart(QWidget):
         painter.setFont(font)
         painter.setPen(QPen(QColor(_INK)))
         cap = "Total income" if self._total_income >= self._total_expense else "Total"
-        amount = fmt_currency(max(self._total_income, self._total_expense))
+        amount = fmt_currency(
+            max(self._total_income, self._total_expense), symbol=self._symbol,
+        )
         r = QRectF(rect.center().x() - 80, rect.top() - 22, 160, 18)
         painter.drawText(r, Qt.AlignHCenter | Qt.AlignBottom, f"{cap}  {amount}")
 
@@ -332,7 +337,8 @@ class SankeyChart(QWidget):
                 QToolTip.showText(
                     event.globalPosition().toPoint()
                     if hasattr(event, "globalPosition") else event.globalPos(),
-                    f"{node.label}\n{fmt_currency(node.value)}  ·  {pct:.1f}%",
+                    f"{node.label}\n{fmt_currency(node.value, symbol=self._symbol)}"
+                    f"  ·  {pct:.1f}%",
                     self,
                 )
                 return

@@ -14,7 +14,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
@@ -3076,7 +3076,8 @@ class Repository:
         self, *, date_from: str, date_to: str,
         account_ids: Optional[Iterable[int]] = None,
         category_ids: Optional[Iterable[int]] = None,
-    ) -> dict[str, dict[int, int]]:
+        display_currency: Optional[str] = None,
+    ) -> dict:
         """Period-scoped income and expense totals per category for the Sankey
         report (ADR-056).
 
@@ -3093,12 +3094,26 @@ class Repository:
         narrowing). The category filter matches the line's own category id, so
         the caller's roll-up reflects only the selected leaves.
 
+        ``display_currency``, when set, converts every category total from its
+        account's native currency into that one currency via the ADR-035 FX
+        layer, so a multi-currency portfolio sums coherently rather than adding
+        bare pence across currencies. Conversion is done per (category,
+        currency) bucket at the **period-end** date (``date_to``) — with the
+        owner's sparse manual rates ``get_fx_rate_nearest`` resolves the same
+        rate at any date, and a period-end snapshot is the natural convention
+        for a flow report. Per ADR-055's policy a bucket with no rate to the
+        display currency is *excluded* (never folded in at 1:1) and its
+        magnitude collected under ``unconverted``. When ``display_currency`` is
+        ``None`` the totals are bare same-units pence (legacy behaviour).
+
         Returns ``{'income': {category_id: pence}, 'expense': {category_id:
-        pence}}`` with pence ≥ 0, keyed by the leaf category the txn/line
-        carries. The caller rolls these up the category tree.
+        pence}, 'unconverted': {currency: pence}}`` with pence ≥ 0, keyed by the
+        leaf category the txn/line carries. The caller rolls these up the
+        category tree.
         """
         income: dict[int, int] = {}
         expense: dict[int, int] = {}
+        unconverted: dict[str, int] = {}
         clauses = [
             "t.posted_date BETWEEN ? AND ?",
             "( (c.kind = 'income'  AND t.amount > 0) "
@@ -3114,23 +3129,34 @@ class Repository:
             clauses.append(f"t.category_id IN ({','.join('?' * len(cats))})")
             params.extend(cats)
         cur = self._conn.execute(
-            "SELECT c.kind AS kind, t.category_id AS cid, "
+            "SELECT c.kind AS kind, t.category_id AS cid, a.currency AS ccy, "
             "  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
             "           ELSE -t.amount END) AS pence "
             "FROM txn_category_line t "
             "JOIN category c ON c.id = t.category_id "
+            "JOIN account a ON a.id = t.account_id "
             "WHERE " + " AND ".join(clauses) + " "
-            "GROUP BY t.category_id, c.kind",
+            "GROUP BY t.category_id, c.kind, a.currency",
             params,
         )
+        target_ccy = (display_currency or "").strip().upper()
         for r in cur:
             cid = int(r["cid"])
             pence = int(r["pence"])
-            if r["kind"] == "income":
-                income[cid] = pence
-            else:
-                expense[cid] = pence
-        return {"income": income, "expense": expense}
+            ccy = (r["ccy"] or "").strip().upper()
+            if target_ccy and ccy and ccy != target_ccy:
+                converted, _fb = self.convert_amount(
+                    Decimal(pence), from_ccy=ccy, to_ccy=target_ccy,
+                    on_date=date_to,
+                )
+                if converted is None:
+                    if pence != 0:
+                        unconverted[ccy] = unconverted.get(ccy, 0) + abs(pence)
+                    continue
+                pence = int(converted.to_integral_value(rounding=ROUND_HALF_UP))
+            bucket = income if r["kind"] == "income" else expense
+            bucket[cid] = bucket.get(cid, 0) + pence
+        return {"income": income, "expense": expense, "unconverted": unconverted}
 
     def list_categories_flat(
         self, kinds: Optional[tuple[str, ...]] = None,
