@@ -86,6 +86,7 @@ class RefreshResult:
     fetched_at: Optional[str]
     new_prices_count: int
     errors: list[str]
+    skipped_count: int = 0     # securities already complete + up to date
 
 
 class TiingoClient:
@@ -413,6 +414,7 @@ def backfill_missing_history_into(
     securities = repo.securities_missing_history(
         min_points=min_points, cooldown_days=PRICE_UNAVAILABLE_COOLDOWN_DAYS,
     )
+    skipped = 0      # the launch path doesn't report a skipped count
     if not securities:
         return RefreshResult(
             fetched_at=repo.get_setting("tiingo_last_refresh_at") or None,
@@ -463,7 +465,10 @@ def backfill_missing_history_into(
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repo.set_setting("tiingo_last_refresh_at", now)
-    return RefreshResult(fetched_at=now, new_prices_count=count, errors=errors)
+    return RefreshResult(
+        fetched_at=now, new_prices_count=count, errors=errors,
+        skipped_count=skipped,
+    )
 
 
 def lookup_symbol_name(repo: "Repository", symbol: str) -> Optional[str]:
@@ -558,13 +563,24 @@ def backfill_historical_into(
         return RefreshResult(
             fetched_at=None, new_prices_count=0, errors=[_backoff_message(until)],
         )
-    # Only held (≥1 txn), non-given-up tickers (ADR-049) — skip orphan
-    # securities from un-migrated accounts.
-    securities = repo.securities_to_price(
+    # Only securities that still NEED history (ADR-049 follow-up): missing,
+    # not reaching back to ownership (the 2-latest-close stragglers), or stale.
+    # A complete, up-to-date series is skipped so a re-click costs ~zero Tiingo
+    # requests — the previous behaviour re-fetched every held ticker each click
+    # and blew the 50/hour cap. ``securities_to_price`` gives the full eligible
+    # count so we can tell the user how many were already up to date.
+    eligible = repo.securities_to_price(
         cooldown_days=PRICE_UNAVAILABLE_COOLDOWN_DAYS,
     )
+    securities = repo.securities_with_incomplete_history(
+        cooldown_days=PRICE_UNAVAILABLE_COOLDOWN_DAYS,
+    )
+    skipped = len(eligible) - len(securities)
     if not securities:
-        return RefreshResult(fetched_at=None, new_prices_count=0, errors=[])
+        return RefreshResult(
+            fetched_at=None, new_prices_count=0, errors=[],
+            skipped_count=skipped,
+        )
 
     client = TiingoClient(api_key)
     errors: list[str] = []
@@ -609,4 +625,7 @@ def backfill_historical_into(
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repo.set_setting("tiingo_last_refresh_at", now)
-    return RefreshResult(fetched_at=now, new_prices_count=count, errors=errors)
+    return RefreshResult(
+        fetched_at=now, new_prices_count=count, errors=errors,
+        skipped_count=skipped,
+    )

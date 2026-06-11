@@ -1870,6 +1870,78 @@ class Repository:
             for r in cur
         ]
 
+    def securities_with_incomplete_history(
+        self, *, min_points: int = 2, min_span_days: int = 30,
+        staleness_days: int = 7, cooldown_days: int = 30,
+        as_of: Optional[date] = None,
+    ) -> list[SecurityRow]:
+        """Tickered, transacted, non-given-up securities whose stored real
+        (``manual`` / ``tiingo``) history is missing, only a sliver, or stale —
+        i.e. the ones a full backfill still has work to do for. Feeds the manual
+        'Backfill history' button so a re-click only spends Tiingo requests on
+        securities that need them; a complete, up-to-date series costs zero
+        (ADR-049 follow-up — the lighter cousin of a request-budget tracker).
+
+        A security is returned when ANY of:
+
+        - **too few points** — fewer than ``min_points`` real prices (never
+          properly backfilled);
+        - **sliver of history** — its real prices span fewer than
+          ``min_span_days`` days *despite* being owned longer than that. This
+          catches the latest-close stragglers left by the ADR-049 backfill bug
+          (a handful of recent closes accumulated by the daily sweep, clearing
+          ``min_points`` but only days long) WITHOUT flagging a fund whose long
+          recent series simply can't reach an old purchase date because Tiingo
+          lacks the early data — re-fetching that is futile, so it's left alone;
+        - **stale** — its latest real price is older than ``staleness_days``
+          (the user returning after an absence; a re-fetch fills the gap). In
+          normal use the daily latest-close sweep keeps this fresh, so this arm
+          stays quiet and a re-click is still free.
+
+        Same orphan-skip + give-up-cooldown waste filters as
+        ``securities_missing_history``."""
+        ref = as_of or date.today()
+        cutoff = (ref - timedelta(days=cooldown_days)).isoformat()
+        stale_before = (ref - timedelta(days=staleness_days)).isoformat()
+        today = ref.isoformat()
+        real = "CASE WHEN sp.source IN ('manual', 'tiingo') THEN 1 ELSE 0 END"
+        real_date = (
+            "CASE WHEN sp.source IN ('manual', 'tiingo') "
+            "THEN sp.price_date END"
+        )
+        cur = self._conn.execute(
+            "SELECT s.id, s.iri, s.name, "
+            "       COALESCE(s.symbol, '') AS symbol, "
+            "       COALESCE(s.type, '') AS type, "
+            "       (SELECT date(MIN(t.posted_date), '-7 days') "
+            "          FROM txn t WHERE t.security_id = s.id) AS earliest_txn "
+            "FROM security s "
+            "LEFT JOIN security_price sp ON sp.security_id = s.id "
+            "WHERE s.archived_at IS NULL AND COALESCE(s.symbol, '') != '' "
+            "  AND EXISTS (SELECT 1 FROM txn t WHERE t.security_id = s.id) "
+            "  AND (s.price_fetch_failed_at IS NULL "
+            "       OR s.price_fetch_failed_at < ?) "
+            "GROUP BY s.id "
+            f"HAVING SUM({real}) < ? "
+            f"    OR MIN({real_date}) IS NULL "
+            # sliver: stored span shorter than min_span_days while owned longer
+            f"    OR ( julianday(MAX({real_date})) - julianday(MIN({real_date})) "
+            "           < ? "
+            "         AND julianday(?) - julianday(earliest_txn) >= ? ) "
+            f"    OR MAX({real_date}) < ? "
+            "ORDER BY s.name COLLATE NOCASE",
+            (cutoff, min_points, min_span_days, today, min_span_days,
+             stale_before),
+        )
+        return [
+            SecurityRow(
+                id=r["id"], iri=r["iri"], name=r["name"],
+                symbol=r["symbol"], type=r["type"],
+                earliest_txn_date=r["earliest_txn"],
+            )
+            for r in cur
+        ]
+
     def earliest_transaction_date(
         self, security_id: int, *, buffer_days: int = 7,
     ) -> Optional[str]:

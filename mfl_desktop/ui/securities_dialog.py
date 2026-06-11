@@ -373,11 +373,24 @@ class SecuritiesDialog(QDialog):
             )
             return
         QApplication.restoreOverrideCursor()
-        self._refresh_status.setText(
-            f"Last refresh: {_fmt_refresh_time(result.fetched_at)} · "
-            f"{result.new_prices_count:,} historical price"
-            f"{'s' if result.new_prices_count != 1 else ''} stored"
+        skipped_note = (
+            f" · {result.skipped_count} already up to date"
+            if result.skipped_count else ""
         )
+        if result.new_prices_count == 0 and not result.errors:
+            # Nothing needed fetching — every held ticker already has a full,
+            # current series, so the click spent no Tiingo requests (ADR-049
+            # follow-up). Say so rather than a bare "0 stored".
+            self._refresh_status.setText(
+                f"History already up to date{skipped_note} — no requests used"
+            )
+        else:
+            self._refresh_status.setText(
+                f"Last refresh: {_fmt_refresh_time(result.fetched_at)} · "
+                f"{result.new_prices_count:,} historical price"
+                f"{'s' if result.new_prices_count != 1 else ''} stored"
+                f"{skipped_note}"
+            )
         if result.errors:
             shown = result.errors[:12]
             more = len(result.errors) - len(shown)
