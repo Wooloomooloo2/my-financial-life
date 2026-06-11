@@ -160,6 +160,7 @@ class RegisterWindow(QMainWindow):
         self._sidebar = Sidebar(
             accounts, folders, balances,
             reports=reports, report_folders=report_folders,
+            repo=repo,
         )
         self._sidebar.selection_changed.connect(self._on_sidebar_change)
         self._sidebar.setContextMenuPolicy(Qt.CustomContextMenu)

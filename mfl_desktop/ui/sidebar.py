@@ -24,6 +24,7 @@ caller.
 """
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Optional
 
@@ -32,7 +33,7 @@ from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import QHeaderView, QTreeWidget, QTreeWidgetItem
 
 from mfl_desktop.db.repository import (
-    AccountSummary, FolderSummary, ReportFolderRow, ReportRow,
+    AccountSummary, FolderSummary, ReportFolderRow, Repository, ReportRow,
 )
 
 _ALL_SENTINEL = "__all__"
@@ -78,9 +79,17 @@ class Sidebar(QTreeWidget):
         balances: dict[int, Decimal],
         reports: Optional[list[ReportRow]] = None,
         report_folders: Optional[list[ReportFolderRow]] = None,
+        repo: Optional[Repository] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        # The repo is used only to convert a *mixed-currency* folder's
+        # members to one display currency for its roll-up total (ADR-055
+        # follow-up — a bare cross-currency sum is the bug we fixed in Net
+        # Worth). Repo-less callers (tests) fall back to the old no-symbol
+        # bare sum for mixed folders; single-currency folders never convert.
+        self._repo = repo
+        self._display_currency = self._resolve_display_currency()
         self.setMinimumWidth(240)
         # No max width — the splitter handle is the constraint. The
         # earlier 540px cap left long account names ("Smile Current
@@ -156,15 +165,8 @@ class Sidebar(QTreeWidget):
 
         for f in folders:
             members = accounts_by_folder.get(f.id, [])
-            folder_sum = sum(
-                (balances.get(a.id, Decimal("0.00")) for a in members),
-                start=Decimal("0.00"),
-            )
-            currencies = {a.currency for a in members}
-            folder_currency = next(iter(currencies)) if len(currencies) == 1 else None
-            folder_item = QTreeWidgetItem(
-                [f.name, self._format(folder_sum, folder_currency)]
-            )
+            balance_text, balance_tip = self._folder_balance_cell(members, balances)
+            folder_item = QTreeWidgetItem([f.name, balance_text])
             folder_item.setData(0, Qt.UserRole, f.id)
             folder_item.setData(0, KIND_ROLE, "folder")
             folder_item.setFlags(Qt.ItemIsEnabled)
@@ -172,6 +174,9 @@ class Sidebar(QTreeWidget):
             font.setBold(True)
             folder_item.setFont(0, font)
             folder_item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            if balance_tip:
+                folder_item.setToolTip(0, balance_tip)
+                folder_item.setToolTip(1, balance_tip)
             accounts_header.addChild(folder_item)
             for a in members:
                 folder_item.addChild(self._make_account_item(a, balances))
@@ -286,6 +291,75 @@ class Sidebar(QTreeWidget):
             f"{report.iri}\nType: {report.type}",
         )
         return item
+
+    def _resolve_display_currency(self) -> str:
+        """The currency a mixed-currency folder rolls up into: the configured
+        base currency, else the first currency in use, else GBP."""
+        if self._repo is None:
+            return "GBP"
+        base = self._repo.get_setting("base_currency")
+        if base and base.strip():
+            return base.strip().upper()
+        in_use = self._repo.list_distinct_currencies()
+        return in_use[0] if in_use else "GBP"
+
+    def _folder_balance_cell(
+        self, members: list[AccountSummary], balances: dict[int, Decimal],
+    ) -> tuple[str, Optional[str]]:
+        """Render a folder's roll-up balance + an optional tooltip.
+
+        A single-currency folder shows its native sum (unchanged). A
+        *mixed*-currency folder converts every member into the display
+        currency via the ADR-035 FX layer and shows the converted sum — a
+        bare cross-currency sum (the old behaviour) silently added, say, USD
+        to GBP at par, which is the same class of bug ADR-055 fixed in Net
+        Worth. Per that policy we never par-add: a non-zero member with no
+        rate to the display currency is *excluded* and noted in the tooltip
+        (marked with a trailing ``*``), not folded in at 1:1.
+        """
+        currencies = {a.currency for a in members}
+        if len(currencies) <= 1:
+            folder_currency = next(iter(currencies)) if currencies else None
+            folder_sum = sum(
+                (balances.get(a.id, Decimal("0.00")) for a in members),
+                start=Decimal("0.00"),
+            )
+            return self._format(folder_sum, folder_currency), None
+
+        if self._repo is None:
+            # No FX access (repo-less caller / test) — preserve the old
+            # no-symbol bare sum rather than invent a wrong symbol.
+            folder_sum = sum(
+                (balances.get(a.id, Decimal("0.00")) for a in members),
+                start=Decimal("0.00"),
+            )
+            return self._format(folder_sum, None), None
+
+        display = self._display_currency
+        today = date.today().isoformat()
+        total = Decimal("0.00")
+        excluded: list[AccountSummary] = []
+        for a in members:
+            bal = balances.get(a.id, Decimal("0.00"))
+            conv, _fb = self._repo.convert_amount(
+                bal, from_ccy=a.currency, to_ccy=display, on_date=today,
+            )
+            if conv is None:
+                if bal != 0:
+                    excluded.append(a)
+                continue
+            total += conv
+
+        text = self._format(total, display)
+        tooltip: Optional[str] = None
+        if excluded:
+            text += " *"
+            lines = "\n".join(f"  {a.name} ({a.currency})" for a in excluded)
+            tooltip = (
+                f"{len(excluded)} account(s) excluded — no exchange rate to "
+                f"{display}. Set one in Manage ▸ Currencies.\n{lines}"
+            )
+        return text, tooltip
 
     @staticmethod
     def _format(amount: Decimal, currency: Optional[str]) -> str:
