@@ -174,6 +174,12 @@ class SankeyFilters:
     side's total into a single "Other" node (0 = show everything). ``value_mode``
     toggles labels between absolute amounts and a % of total. Income vs expense
     is read from ``category.kind`` (transfers are excluded).
+
+    ``account_ids`` / ``category_ids`` narrow which transactions feed the
+    diagram. Empty tuples mean "all" (the same convention as the other report
+    filters) — no narrowing, and the saved blob stays terse. ``category_ids``
+    holds the leaf/own categories whose transactions count; the report's roll-up
+    naturally excludes any descendant left out of the set.
     """
 
     period_key: str = "ytd"
@@ -182,6 +188,8 @@ class SankeyFilters:
     depth: int = 2
     threshold_pct: float = 0.0
     value_mode: str = "amount"
+    account_ids: tuple[int, ...] = field(default_factory=tuple)
+    category_ids: tuple[int, ...] = field(default_factory=tuple)
 
     # ── round-trip helpers ──
 

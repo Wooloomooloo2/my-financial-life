@@ -40,6 +40,7 @@ from mfl_desktop.reports.filters import (
 from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency
 from mfl_desktop.ui.custom_period_dialog import CustomPeriodDialog
 from mfl_desktop.ui.sankey_chart import SankeyChart, SankeyNode
+from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 
 _PERIOD_LABELS = [
@@ -81,6 +82,7 @@ class SankeyReportWindow(QMainWindow):
 
         # Category tree (id → node) + parent→children, loaded once.
         nodes = self._repo.list_category_tree()
+        self._cat_nodes = nodes
         self._cat = {n.id: n for n in nodes}
         self._children: dict[int, list[int]] = {}
         for n in nodes:
@@ -187,6 +189,13 @@ class SankeyReportWindow(QMainWindow):
         row.addWidget(QLabel("Show:"))
         row.addWidget(self._value_combo)
 
+        self._filter_button = QPushButton("Filter…")
+        self._filter_button.clicked.connect(self._on_filter)
+        row.addWidget(self._filter_button)
+        self._filter_note = QLabel("")
+        self._filter_note.setStyleSheet("color: #2563eb;")
+        row.addWidget(self._filter_note)
+
         row.addStretch(1)
         self._period_note = QLabel("")
         self._period_note.setStyleSheet("color: #64748b;")
@@ -272,6 +281,8 @@ class SankeyReportWindow(QMainWindow):
             depth=changes.get("depth", f.depth),
             threshold_pct=changes.get("threshold_pct", f.threshold_pct),
             value_mode=changes.get("value_mode", f.value_mode),
+            account_ids=changes.get("account_ids", f.account_ids),
+            category_ids=changes.get("category_ids", f.category_ids),
         )
 
     def _on_control_changed(self, *_a) -> None:
@@ -299,6 +310,28 @@ class SankeyReportWindow(QMainWindow):
             )
         else:
             self._current_filters = self._with(period_key=key)
+        self._mark_dirty()
+        self._refresh()
+
+    def _on_filter(self, *_a) -> None:
+        f = self._current_filters
+        dlg = SankeyFilterDialog(
+            self._repo,
+            accounts=self._repo.list_accounts(),
+            categories=self._cat_nodes,
+            current_account_ids=f.account_ids,
+            current_category_ids=f.category_ids,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        chosen = dlg.values()
+        if chosen is None:
+            return
+        account_ids, category_ids = chosen
+        self._current_filters = self._with(
+            account_ids=account_ids, category_ids=category_ids,
+        )
         self._mark_dirty()
         self._refresh()
 
@@ -370,15 +403,17 @@ class SankeyReportWindow(QMainWindow):
         return make(roots, depth, lambda i: colour_for(i))
 
     def _refresh(self) -> None:
+        f = self._current_filters
         d_from, d_to = self._resolve_bounds()
         self._period_note.setText(f"{d_from.isoformat()} → {d_to.isoformat()}")
+        self._update_filter_note()
         totals = self._repo.sankey_category_totals(
             date_from=d_from.isoformat(), date_to=d_to.isoformat(),
+            account_ids=f.account_ids, category_ids=f.category_ids,
         )
         income_agg, expense_agg = totals["income"], totals["expense"]
         income_pence = sum(income_agg.values())
         expense_pence = sum(expense_agg.values())
-        f = self._current_filters
 
         income_nodes = self._build_side(
             "income", income_agg, income_pence, f.depth, f.threshold_pct,
@@ -440,6 +475,17 @@ class SankeyReportWindow(QMainWindow):
             "Categories so income appears on the left."
             if income_p <= 0 and expense_p > 0 else ""
         )
+
+    def _update_filter_note(self) -> None:
+        f = self._current_filters
+        parts: list[str] = []
+        if f.account_ids:
+            n = len(f.account_ids)
+            parts.append(f"{n} account{'s' if n != 1 else ''}")
+        if f.category_ids:
+            n = len(f.category_ids)
+            parts.append(f"{n} categor{'ies' if n != 1 else 'y'}")
+        self._filter_note.setText("Filtered: " + ", ".join(parts) if parts else "")
 
     # ── save / dirty ──
 

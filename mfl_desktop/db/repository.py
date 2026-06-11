@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 from mfl_desktop.account_types import AccountTypeSpec, by_key
 from mfl_desktop.db.money import decimal_to_pence, pence_to_decimal
@@ -3074,6 +3074,8 @@ class Repository:
 
     def sankey_category_totals(
         self, *, date_from: str, date_to: str,
+        account_ids: Optional[Iterable[int]] = None,
+        category_ids: Optional[Iterable[int]] = None,
     ) -> dict[str, dict[int, int]]:
         """Period-scoped income and expense totals per category for the Sankey
         report (ADR-056).
@@ -3086,23 +3088,40 @@ class Repository:
         split-unrolled ``txn_category_line`` view (ADR-051), so a split lands on
         each line's own category.
 
+        ``account_ids`` / ``category_ids``, when non-empty, restrict the lines to
+        those accounts / categories; ``None`` or empty means "all" (no
+        narrowing). The category filter matches the line's own category id, so
+        the caller's roll-up reflects only the selected leaves.
+
         Returns ``{'income': {category_id: pence}, 'expense': {category_id:
         pence}}`` with pence ≥ 0, keyed by the leaf category the txn/line
         carries. The caller rolls these up the category tree.
         """
         income: dict[int, int] = {}
         expense: dict[int, int] = {}
+        clauses = [
+            "t.posted_date BETWEEN ? AND ?",
+            "( (c.kind = 'income'  AND t.amount > 0) "
+            "  OR (c.kind = 'expense' AND t.amount < 0) )",
+        ]
+        params: list = [date_from, date_to]
+        acc = list(account_ids) if account_ids else []
+        if acc:
+            clauses.append(f"t.account_id IN ({','.join('?' * len(acc))})")
+            params.extend(acc)
+        cats = list(category_ids) if category_ids else []
+        if cats:
+            clauses.append(f"t.category_id IN ({','.join('?' * len(cats))})")
+            params.extend(cats)
         cur = self._conn.execute(
             "SELECT c.kind AS kind, t.category_id AS cid, "
             "  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
             "           ELSE -t.amount END) AS pence "
             "FROM txn_category_line t "
             "JOIN category c ON c.id = t.category_id "
-            "WHERE t.posted_date BETWEEN ? AND ? "
-            "  AND ( (c.kind = 'income'  AND t.amount > 0) "
-            "     OR (c.kind = 'expense' AND t.amount < 0) ) "
+            "WHERE " + " AND ".join(clauses) + " "
             "GROUP BY t.category_id, c.kind",
-            (date_from, date_to),
+            params,
         )
         for r in cur:
             cid = int(r["cid"])

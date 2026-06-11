@@ -43,7 +43,8 @@ class SankeyNode:
 
 
 _NODE_W = 16.0
-_LINK_W = 84.0          # horizontal span of a ribbon between columns
+_MIN_LINK_W = 70.0      # smallest horizontal span of a ribbon between columns
+_MAX_LINK_W = 340.0     # cap so a few-column diagram doesn't get absurdly long
 _PAD = 6.0              # vertical gap between sibling boxes
 _MARGIN_TOP = 28.0
 _MARGIN_BOTTOM = 16.0
@@ -168,13 +169,26 @@ class SankeyChart(QWidget):
         if scale <= 0:
             scale = draw_h / spine_value
 
-        # Horizontal placement, centred.
+        # Horizontal placement: spread the columns to fill the available width
+        # rather than centring a fixed-width band (which left wide empty margins
+        # when there were only a handful of columns). Reserve a label gutter on
+        # each outer side for the category labels that sit beyond the end
+        # columns, then divide the rest among the inter-column links.
         n_slots = max_out + max_in + 1
-        total_w = n_slots * _NODE_W + (n_slots - 1) * _LINK_W
+        gutter = min(max(w * 0.16, 140.0), 300.0)
+        band = max(w - 2.0 * gutter, n_slots * _NODE_W + (n_slots - 1) * _MIN_LINK_W)
+        if n_slots > 1:
+            link_w = (band - n_slots * _NODE_W) / (n_slots - 1)
+            link_w = max(_MIN_LINK_W, min(link_w, _MAX_LINK_W))
+        else:
+            link_w = 0.0
+        total_w = n_slots * _NODE_W + (n_slots - 1) * link_w
+        # Centre what we laid out — when the per-link cap bites on a wide window
+        # with few columns, total_w < band, so re-centre across the full width.
         start_x = max((w - total_w) / 2.0, 8.0)
 
         def x_of(col: int) -> float:
-            return start_x + (col + max_in) * (_NODE_W + _LINK_W)
+            return start_x + (col + max_in) * (_NODE_W + link_w)
 
         for col, nodes in cols.items():
             if not nodes:
