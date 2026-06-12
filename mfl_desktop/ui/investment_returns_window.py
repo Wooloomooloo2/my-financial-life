@@ -73,7 +73,7 @@ _LOSS = "#dc2626"
 
 _TABLE_HEADERS = (
     "Symbol", "Security", "Cost", "Market value",
-    "Unrealized", "Realized", "Dividends", "Total return", "Return %",
+    "Unrealized", "Realized", "Dividends", "Total return", "Return %", "IRR / yr",
 )
 
 
@@ -505,6 +505,20 @@ class InvestmentReturnsWindow(QMainWindow):
         sign = "+" if p >= 0 else "-"
         return f"{sign}{abs(p):.1f}% / yr"
 
+    @staticmethod
+    def _irr_cell(irr: Optional[float], priced: bool = True) -> str:
+        """Compact per-security IRR for the table (no '/ yr' suffix — the header
+        carries it). ``—`` when undefined; a trailing ``*`` when the figure used
+        a cost fallback for an unpriced bookend/transfer (approximate)."""
+        if irr is None:
+            return "—"
+        p = irr * 100
+        mark = "" if priced else "*"
+        if abs(p) >= 1000:
+            return (">+999%" if p > 0 else "<-999%") + mark
+        sign = "+" if p >= 0 else "-"
+        return f"{sign}{abs(p):.1f}%{mark}"
+
     # ── period resolution + conversion ──
 
     def _resolve_bounds(self, earliest: Optional[date]) -> tuple[date, date]:
@@ -646,6 +660,9 @@ class InvestmentReturnsWindow(QMainWindow):
                     "mv": Decimal("0"),
                     "unreal": Decimal("0"), "realized": Decimal("0"),
                     "div": Decimal("0"), "priced": False,
+                    # Per-security IRR inputs (converted to display ccy below).
+                    "irr_flows": [], "irr_open": Decimal("0"),
+                    "irr_term": Decimal("0"), "irr_priced": True,
                 })
                 m["shares"] += s.shares
                 m["cost"] += self._conv(s.cost_basis, ccy, end_iso)
@@ -657,6 +674,13 @@ class InvestmentReturnsWindow(QMainWindow):
                     m["priced"] = True
                 if s.unrealized is not None:
                     m["unreal"] += self._conv(s.unrealized, ccy, end_iso)
+                # Convert this security's flows at each flow's own date, and its
+                # opening/terminal at the window edges, then accumulate.
+                for d_iso, amt in s.cash_flows:
+                    m["irr_flows"].append((d_iso, float(self._conv(amt, ccy, d_iso))))
+                m["irr_open"] += self._conv(s.opening_market_value, ccy, window_start)
+                m["irr_term"] += self._conv(s.terminal_market_value, ccy, end_iso)
+                m["irr_priced"] = m["irr_priced"] and s.irr_fully_priced
 
         rows = list(merged.values())
         for m in rows:
@@ -666,6 +690,15 @@ class InvestmentReturnsWindow(QMainWindow):
             # the window — the capital that produced this row's return (ADR-046
             # amendment), so a fully-sold position shows its real cost, not £0.
             m["cost_total"] = m["cost"] + m["cost_sold"]
+            # Per-security money-weighted return (ADR-046 amendment 2): bracket
+            # the security's flows with its opening/terminal market value.
+            sec_flows: list[tuple[str, float]] = []
+            if m["irr_open"] != 0:
+                sec_flows.append((window_start, -float(m["irr_open"])))
+            sec_flows.extend(m["irr_flows"])
+            if m["irr_term"] != 0:
+                sec_flows.append((end_iso, float(m["irr_term"])))
+            m["irr"] = xirr(sec_flows)
         rows.sort(key=lambda m: (
             0 if m["shares"] > 1e-9 else 1, -float(m["total"]), m["name"].lower(),
         ))
@@ -767,6 +800,12 @@ class InvestmentReturnsWindow(QMainWindow):
                     Qt.AlignRight,
                     self._colour(m["total"]),
                     float(m["total"]) / cost_total if cost_total else _LOW,
+                ),
+                (
+                    self._irr_cell(m["irr"], m["irr_priced"]),
+                    Qt.AlignRight,
+                    self._colour(m["irr"] * 100) if m["irr"] is not None else None,
+                    m["irr"] if m["irr"] is not None else _LOW,
                 ),
             ]
             for c, (text, align, colour, sortkey) in enumerate(cells):

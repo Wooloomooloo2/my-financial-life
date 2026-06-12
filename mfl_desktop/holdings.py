@@ -561,6 +561,14 @@ class SecurityReturn:
     dividends_window: Decimal
     total_return: Decimal
     priced: bool
+    # Per-security money-weighted-return (IRR) inputs, native currency (ADR-046
+    # companion). Same shape as the portfolio-level fields on ReturnsResult: the
+    # caller brackets ``cash_flows`` with −opening_market_value / +terminal_
+    # market_value (converted) and calls xirr() once per security.
+    cash_flows: list = field(default_factory=list)   # list[tuple[str, Decimal]]
+    opening_market_value: Decimal = Decimal("0.00")
+    terminal_market_value: Decimal = Decimal("0.00")
+    irr_fully_priced: bool = True
 
 
 @dataclass(frozen=True)
@@ -647,27 +655,41 @@ def compute_returns(
     meta: dict[int, tuple[str, str]] = {}
 
     # Money-weighted-return (IRR) state, native currency (ADR-046 companion).
+    # Tracked both combined (portfolio IRR) and per-security (per-row IRR).
     cash_flows: list[tuple[str, Decimal]] = []
+    cash_flows_by_sec: dict[int, list[tuple[str, Decimal]]] = {}
     opening_taken = False
     opening_mv = 0.0
+    opening_by_sec: dict[int, float] = {}
     irr_fully = True
+    irr_incomplete_sec: dict[int, bool] = {}   # transfer/bookend cost fallback per sid
 
-    def snapshot_mv(on_date: str) -> tuple[float, bool]:
+    def add_flow(sid_: int, dt: str, amt: Decimal) -> None:
+        cash_flows.append((dt, amt))
+        cash_flows_by_sec.setdefault(sid_, []).append((dt, amt))
+
+    def snapshot_mv(on_date: str) -> tuple[float, bool, dict[int, float]]:
         """Market value of all currently-held lots on ``on_date`` (nearest-prior
-        price, cost fallback when unpriced). Returns ``(mv, fully_priced)``."""
-        mv = 0.0
+        price, cost fallback when unpriced). Returns
+        ``(total_mv, fully_priced, mv_by_security)``; a per-security cost
+        fallback also flags that security's IRR incomplete."""
+        total = 0.0
         fully = True
+        by_sec: dict[int, float] = {}
         for sid_, queue_ in lots.items():
             shares_ = sum(lot.qty for lot in queue_)
             if shares_ <= _EPS:
                 continue
             price_ = nearest_price(sid_, on_date)
             if price_ is not None:
-                mv += shares_ * price_
+                mv_ = shares_ * price_
             else:
-                mv += sum(lot.qty * lot.unit_cost for lot in queue_)
+                mv_ = sum(lot.qty * lot.unit_cost for lot in queue_)
                 fully = False
-        return mv, fully
+                irr_incomplete_sec[sid_] = True
+            by_sec[sid_] = mv_
+            total += mv_
+        return total, fully, by_sec
 
     ordered = sorted(txns, key=lambda r: (r.posted_date, r.id))
     ti = 0
@@ -683,7 +705,7 @@ def compute_returns(
             # ``lots`` here reflects exactly the holdings carried INTO the window
             # (a buy ON the start date is an in-window flow, not opening capital).
             if not opening_taken and t.posted_date >= window_start:
-                opening_mv, of = snapshot_mv(window_start)
+                opening_mv, of, opening_by_sec = snapshot_mv(window_start)
                 irr_fully = irr_fully and of
                 opening_taken = True
             if t.security_id is None or t.action is None:
@@ -717,7 +739,8 @@ def compute_returns(
                                 mv = _to_money(_peek_fifo_cost(
                                     pending.setdefault(sid, deque()), qty))
                                 irr_fully = False
-                            cash_flows.append((t.posted_date, -mv))
+                                irr_incomplete_sec[sid] = True
+                            add_flow(sid, t.posted_date, -mv)
                         remaining_in = _transfer_in(
                             lots[sid], qty, pending.setdefault(sid, deque()),
                         )
@@ -738,7 +761,7 @@ def compute_returns(
                         else:
                             # Cash-funded buy: txn.amount is the signed cash
                             # impact (negative — money deployed). An IRR outflow.
-                            cash_flows.append((t.posted_date, t.amount))
+                            add_flow(sid, t.posted_date, t.amount)
             elif is_share_out(t.action):
                 if qty > _EPS:
                     if is_share_transfer(t.action):
@@ -754,7 +777,8 @@ def compute_returns(
                             else:
                                 mv = _to_money(_peek_fifo_cost(lots[sid], qty))
                                 irr_fully = False
-                            cash_flows.append((t.posted_date, mv))
+                                irr_incomplete_sec[sid] = True
+                            add_flow(sid, t.posted_date, mv)
                         _transfer_out(lots[sid], qty, pending.setdefault(sid, deque()))
                         continue
                     proceeds = float(abs(t.amount))
@@ -773,12 +797,12 @@ def compute_returns(
                         realized_win[sid] += proceeds - cost_removed
                         cost_sold_win[sid] += cost_removed
                         # Sale proceeds: txn.amount is positive — an IRR inflow.
-                        cash_flows.append((t.posted_date, t.amount))
+                        add_flow(sid, t.posted_date, t.amount)
             elif is_income(t.action):
                 if in_window:
                     dividends_win[sid] += float(t.amount)
                     # Cash distribution received: a positive IRR inflow.
-                    cash_flows.append((t.posted_date, t.amount))
+                    add_flow(sid, t.posted_date, t.amount)
             elif is_split(t.action):
                 _apply_split(lots[sid], float(t.quantity) if t.quantity else 0.0)
             # XIn/XOut: no lot move, no income (round-4 transfer-linking).
@@ -807,6 +831,14 @@ def compute_returns(
             dividends_cum=_to_money(sum(dividends_win.values())),
             fully_priced=fully,
         ))
+
+    # Opening bookend fallback (must precede the per-security breakdown, which
+    # reads opening_by_sec): if no transaction fell on/after the window start the
+    # snapshot trigger never fired; ``lots`` is then unchanged across the window,
+    # so valuing it at the window start gives the correct opening capital.
+    if not opening_taken:
+        opening_mv, of, opening_by_sec = snapshot_mv(window_start)
+        irr_fully = irr_fully and of
 
     # ── end-of-window per-security breakdown + portfolio totals ──
     last_sample = samples[-1]
@@ -837,6 +869,7 @@ def compute_returns(
         market_value: Optional[Decimal] = None
         unrealized: Optional[Decimal] = None
         priced = False
+        terminal_sec = Decimal("0.00")    # IRR terminal flow (cost fallback)
         if held:
             cost_basis = _to_money(sum(lot.qty * lot.unit_cost for lot in queue))
             tot_cost += cost_basis
@@ -847,9 +880,12 @@ def compute_returns(
                 priced = True
                 tot_mv += market_value
                 tot_unreal += unrealized
+                terminal_sec = market_value
             else:
                 unpriced += 1
                 end_fully = False
+                terminal_sec = cost_basis            # fallback → IRR approximate
+                irr_incomplete_sec[sid] = True
         else:
             cost_basis = Decimal("0.00")
 
@@ -865,6 +901,10 @@ def compute_returns(
             unrealized=unrealized, realized_window=realized_w,
             dividends_window=dividends_w, total_return=total_return,
             priced=priced,
+            cash_flows=cash_flows_by_sec.get(sid, []),
+            opening_market_value=_to_money(opening_by_sec.get(sid, 0.0)),
+            terminal_market_value=terminal_sec,
+            irr_fully_priced=not irr_incomplete_sec.get(sid, False),
         ))
 
     by_security.sort(key=lambda s: (
@@ -873,13 +913,7 @@ def compute_returns(
         s.name.lower(),
     ))
 
-    # ── IRR bookends ──
-    # If no transaction fell on/after the window start, the opening snapshot
-    # trigger never fired; ``lots`` is then unchanged across the window, so
-    # valuing it at the window start gives the correct opening capital.
-    if not opening_taken:
-        opening_mv, of = snapshot_mv(window_start)
-        irr_fully = irr_fully and of
+    # ── portfolio IRR bookends ──
     # Terminal value at the window end (cost fallback already applied by the
     # last sample's point) — the final positive flow for the IRR.
     terminal_mv = points[-1].market_value if points else Decimal("0.00")
