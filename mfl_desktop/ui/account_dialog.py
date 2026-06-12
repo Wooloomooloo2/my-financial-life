@@ -23,12 +23,13 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QVBoxLayout,
 )
 
-from mfl_desktop.account_types import ACCOUNT_TYPES, by_storage
+from mfl_desktop.account_types import ACCOUNT_TYPES, by_key, by_storage
 from mfl_desktop.currencies import (
     ISO_4217_CODES,
     ISO_4217_CURRENCIES,
@@ -43,6 +44,7 @@ class AccountDialogValues:
     type_key: Optional[str]   # short key ('cash' etc.); None when editing
     currency: str             # uppercased ISO 4217 code
     opening_balance: Decimal
+    credit_limit: Optional[Decimal] = None   # credit cards only (ADR-058 R4a)
 
 
 class AccountDialog(QDialog):
@@ -121,11 +123,27 @@ class AccountDialog(QDialog):
         validator.setNotation(QDoubleValidator.StandardNotation)
         self._opening_edit.setValidator(validator)
 
+        # Credit limit — credit cards only (ADR-058 R4a). Lets a budget count
+        # the card's available credit (limit − debt) in its pool.
+        self._credit_limit_label = QLabel("Credit limit:")
+        self._credit_limit_edit = QLineEdit()
+        self._credit_limit_edit.setAlignment(Qt.AlignRight)
+        self._credit_limit_edit.setPlaceholderText("e.g. 5000.00")
+        cl_validator = QDoubleValidator(0.0, 1_000_000_000.0, 2, self)
+        cl_validator.setNotation(QDoubleValidator.StandardNotation)
+        self._credit_limit_edit.setValidator(cl_validator)
+        self._credit_limit_edit.setToolTip(
+            "The card's credit limit. A budget can count this card's available "
+            "credit (limit − what you owe) towards its pool."
+        )
+
         # Prefill in edit mode.
         if is_edit:
             self._name_edit.setText(existing.name)
             self._set_currency(existing.currency)
             self._opening_edit.setText(f"{existing.opening_balance:.2f}")
+            if existing.credit_limit is not None:
+                self._credit_limit_edit.setText(f"{existing.credit_limit:.2f}")
         else:
             self._set_currency("GBP")
             self._opening_edit.setText("0.00")
@@ -137,6 +155,15 @@ class AccountDialog(QDialog):
         form.addRow("Type:", self._type_combo)
         form.addRow("Currency:", self._currency_combo)
         form.addRow("Opening balance:", self._opening_edit)
+        form.addRow(self._credit_limit_label, self._credit_limit_edit)
+
+        # The credit-limit row only applies to credit cards. In edit mode type
+        # is locked, so it's a one-shot; in create mode it follows the picker.
+        if not is_edit:
+            self._type_combo.currentIndexChanged.connect(
+                self._sync_credit_limit_visibility
+            )
+        self._sync_credit_limit_visibility()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
@@ -150,6 +177,16 @@ class AccountDialog(QDialog):
 
         self.resize(400, self.sizeHint().height())
         self._values: Optional[AccountDialogValues] = None
+
+    def _sync_credit_limit_visibility(self) -> None:
+        """Show the credit-limit row only for credit-card accounts."""
+        if self._existing is not None:
+            is_credit = self._existing.family == "credit"
+        else:
+            key = self._type_combo.currentData()
+            is_credit = bool(key) and by_key(key).family == "credit"
+        self._credit_limit_label.setVisible(is_credit)
+        self._credit_limit_edit.setVisible(is_credit)
 
     # ── helpers ──
 
@@ -233,6 +270,25 @@ class AccountDialog(QDialog):
                 )
                 return
 
+        credit_limit: Optional[Decimal] = None
+        if self._credit_limit_edit.isVisibleTo(self):
+            raw_cl = self._credit_limit_edit.text().strip().replace(",", "")
+            if raw_cl:
+                try:
+                    credit_limit = Decimal(raw_cl)
+                except InvalidOperation:
+                    QMessageBox.warning(
+                        self, "Invalid credit limit",
+                        f"Could not parse {raw_cl!r} as a number.",
+                    )
+                    return
+                if credit_limit < 0:
+                    QMessageBox.warning(
+                        self, "Invalid credit limit",
+                        "Credit limit can't be negative.",
+                    )
+                    return
+
         type_key = (
             None if self._existing is not None
             else self._type_combo.currentData()
@@ -240,6 +296,7 @@ class AccountDialog(QDialog):
         self._values = AccountDialogValues(
             name=name, type_key=type_key,
             currency=currency, opening_balance=opening,
+            credit_limit=credit_limit,
         )
         self.accept()
 

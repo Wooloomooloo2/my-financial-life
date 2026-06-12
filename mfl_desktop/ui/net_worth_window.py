@@ -608,6 +608,7 @@ class NetWorthWindow(QMainWindow):
                 type_key=values.type_key,
                 currency=values.currency,
                 opening_balance=values.opening_balance,
+                credit_limit=values.credit_limit,
             )
         except Exception as e:
             QMessageBox.critical(

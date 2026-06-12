@@ -109,29 +109,64 @@ class BudgetSetupDialog(QDialog):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.addWidget(QLabel(
-            "Pick the accounts in this budget. Their combined balance is the "
-            "available pool, and only their transactions count as actuals. "
-            "Transfers between two in-budget accounts cancel out."
+            "Pick the accounts in this budget. Only their transactions count "
+            "as actuals (transfers between two in-budget accounts cancel out), "
+            "and each one feeds the available pool by its chosen contribution:"
+            "\n  • Balance — the account's balance (the usual choice);"
+            "\n  • Available credit — a card's limit minus what you owe;"
+            "\n  • Excluded — counted for actuals, but not in the pool."
         ))
-        self._accounts_list = QListWidget()
-        in_perimeter = set(self._repo.list_budget_account_ids(self._budget.id))
+        contributions = self._repo.list_budget_account_contributions(
+            self._budget.id
+        )
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(["Account", "Pool contribution"])
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 240)
+        # (account_id, check_item, combo, family) — row-aligned with the table.
+        self._acct_rows: list[tuple] = []
         for acc in self._repo.list_accounts():
-            item = QListWidgetItem(f"{acc.name}  ·  {acc.currency}")
-            item.setData(Qt.UserRole, acc.id)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(
-                Qt.Checked if acc.id in in_perimeter else Qt.Unchecked
+            row = table.rowCount()
+            table.insertRow(row)
+            in_per = acc.id in contributions
+            chk = QTableWidgetItem(f"{acc.name}  ·  {acc.currency}")
+            chk.setFlags(
+                Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable
             )
-            self._accounts_list.addItem(item)
-        lay.addWidget(self._accounts_list)
+            chk.setData(Qt.UserRole, acc.id)
+            chk.setCheckState(Qt.Checked if in_per else Qt.Unchecked)
+            table.setItem(row, 0, chk)
+            combo = QComboBox()
+            combo.addItem("Balance", "balance")
+            if acc.family == "credit":
+                combo.addItem("Available credit", "available_credit")
+            combo.addItem("Excluded", "excluded")
+            mode = contributions.get(acc.id, "balance")
+            mi = combo.findData(mode)
+            combo.setCurrentIndex(mi if mi >= 0 else 0)
+            combo.setEnabled(in_per)
+            table.setCellWidget(row, 1, combo)
+            self._acct_rows.append((acc.id, chk, combo, acc.family))
+        table.itemChanged.connect(self._on_acct_item_changed)
+        self._accounts_table = table
+        lay.addWidget(table)
         return w
 
-    def _checked_account_ids(self) -> list[int]:
-        out: list[int] = []
-        for i in range(self._accounts_list.count()):
-            it = self._accounts_list.item(i)
-            if it.checkState() == Qt.Checked:
-                out.append(int(it.data(Qt.UserRole)))
+    def _on_acct_item_changed(self, item) -> None:
+        """Enable a row's contribution combo only while its account is ticked."""
+        if item.column() != 0:
+            return
+        for aid, chk, combo, _fam in self._acct_rows:
+            if chk is item:
+                combo.setEnabled(item.checkState() == Qt.Checked)
+                break
+
+    def _checked_accounts(self) -> list[tuple[int, str]]:
+        out: list[tuple[int, str]] = []
+        for aid, chk, combo, _fam in self._acct_rows:
+            if chk.checkState() == Qt.Checked:
+                out.append((aid, combo.currentData()))
         return out
 
     # ── Categories tab ──
@@ -217,7 +252,7 @@ class BudgetSetupDialog(QDialog):
         """Open the chooser with the top-level categories you've actually used
         (in the currently-ticked accounts, last 12 months) pre-ticked (ADR-058
         prepopulation). Children roll up into these, so this is a clean start."""
-        account_ids = self._checked_account_ids()
+        account_ids = [aid for aid, _mode in self._checked_accounts()]
         if not account_ids:
             QMessageBox.information(
                 self, "Pick accounts first",
@@ -265,7 +300,7 @@ class BudgetSetupDialog(QDialog):
         try:
             # 1. Perimeter first — the history seed reads over these accounts.
             self._repo.set_budget_accounts(
-                self._budget.id, self._checked_account_ids(),
+                self._budget.id, self._checked_accounts(),
             )
             # 2. Removed lines.
             for line_id in self._removed_line_ids:

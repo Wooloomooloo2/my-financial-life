@@ -41,6 +41,7 @@ class AccountSummary:
     is_liability: bool
     opening_balance: Decimal = Decimal("0.00")
     folder_id: Optional[int] = None
+    credit_limit: Optional[Decimal] = None   # credit cards only (ADR-058 R4a)
 
 
 @dataclass(frozen=True)
@@ -619,6 +620,11 @@ def new_security_iri() -> str:
 
 
 class Repository:
+    # Sentinel for "argument not supplied" on partial-update methods, where
+    # None is itself a meaningful value (e.g. clearing a credit limit). Defined
+    # at the top of the class so it is in scope for every method's default args.
+    _UNSET = object()
+
     def __init__(self, db_path: Path | str) -> None:
         db_path = Path(db_path)
         bootstrap(db_path)
@@ -698,7 +704,7 @@ class Repository:
 
     _ACCOUNT_COLS = (
         "id, iri, name, type, family, currency, is_liability, "
-        "opening_balance, folder_id"
+        "opening_balance, folder_id, credit_limit"
     )
 
     def _row_to_account(self, row) -> AccountSummary:
@@ -708,6 +714,10 @@ class Repository:
             currency=row["currency"], is_liability=bool(row["is_liability"]),
             opening_balance=pence_to_decimal(row["opening_balance"] or 0),
             folder_id=row["folder_id"],
+            credit_limit=(
+                pence_to_decimal(row["credit_limit"])
+                if row["credit_limit"] is not None else None
+            ),
         )
 
     def get_account_by_iri(self, iri: str) -> Optional[AccountSummary]:
@@ -774,10 +784,12 @@ class Repository:
         type_key: str,
         currency: str,
         opening_balance: Decimal = Decimal("0.00"),
+        credit_limit: Optional[Decimal] = None,
     ) -> AccountSummary:
         """Create a new account. `type_key` is the short key from
         account_types.ACCOUNT_TYPES (e.g. 'cash'). Family, is_liability,
-        and the IRI class name are derived from the type. Commits on success."""
+        and the IRI class name are derived from the type. ``credit_limit``
+        (credit cards only, ADR-058 R4a) is optional. Commits on success."""
         spec: AccountTypeSpec = by_key(type_key)
         clean_name = (name or "").strip()
         if not clean_name:
@@ -789,12 +801,15 @@ class Repository:
         try:
             cur = self._conn.execute(
                 "INSERT INTO account "
-                "(iri, name, type, family, currency, is_liability, opening_balance) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(iri, name, type, family, currency, is_liability, "
+                " opening_balance, credit_limit) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     iri, clean_name, spec.storage, spec.family, clean_currency,
                     1 if spec.is_liability else 0,
                     decimal_to_pence(opening_balance),
+                    decimal_to_pence(credit_limit)
+                    if credit_limit is not None else None,
                 ),
             )
             self.commit()
@@ -815,24 +830,35 @@ class Repository:
         name: str,
         currency: str,
         opening_balance: Decimal,
+        credit_limit=_UNSET,
     ) -> AccountSummary:
         """Edit an existing account's name, currency, and opening balance.
         Type / family / is_liability are intentionally not editable here —
-        those change the meaning of stored amounts. Commits on success."""
+        those change the meaning of stored amounts. ``credit_limit`` follows
+        the _UNSET sentinel — pass a Decimal to set it, ``None`` to clear it,
+        or omit it to leave the stored value untouched (ADR-058 R4a). Commits
+        on success."""
         clean_name = (name or "").strip()
         if not clean_name:
             raise ValueError("Account name cannot be empty.")
         clean_currency = (currency or "").strip().upper()
         if not clean_currency:
             raise ValueError("Currency cannot be empty.")
+        sets = ["name = ?", "currency = ?", "opening_balance = ?"]
+        params: list = [
+            clean_name, clean_currency, decimal_to_pence(opening_balance),
+        ]
+        if credit_limit is not self._UNSET:
+            sets.append("credit_limit = ?")
+            params.append(
+                decimal_to_pence(credit_limit)
+                if credit_limit is not None else None
+            )
+        params.append(account_id)
         try:
             self._conn.execute(
-                "UPDATE account SET name = ?, currency = ?, opening_balance = ? "
-                "WHERE id = ?",
-                (
-                    clean_name, clean_currency,
-                    decimal_to_pence(opening_balance), account_id,
-                ),
+                f"UPDATE account SET {', '.join(sets)} WHERE id = ?",
+                params,
             )
             self.commit()
         except Exception:
@@ -3537,11 +3563,8 @@ class Repository:
             self.rollback()
             raise
 
-    # Sentinel used by bulk_update_transactions to distinguish "don't change
-    # this field" from "set this field to None/empty" — passing None for a
-    # nullable column like memo means "clear it", so we can't use None as
-    # the "leave alone" marker.
-    _UNSET = object()
+    # (``_UNSET`` is defined once at the top of the class — bulk_update_*
+    # and update_account share it.)
 
     def bulk_update_transactions(
         self,
@@ -5579,8 +5602,10 @@ class Repository:
             )
             new_id = int(cur.lastrowid)
             self._conn.execute(
-                "INSERT INTO budget_account (budget_id, account_id) "
-                "SELECT ?, account_id FROM budget_account WHERE budget_id = ?",
+                "INSERT INTO budget_account "
+                "(budget_id, account_id, contribution) "
+                "SELECT ?, account_id, contribution "
+                "FROM budget_account WHERE budget_id = ?",
                 (new_id, budget_id),
             )
             # Lines + allocations: copy each line, then its allocations onto the
@@ -5679,23 +5704,42 @@ class Repository:
         )
         return [int(r["id"]) for r in cur]
 
+    def list_budget_account_contributions(
+        self, budget_id: int,
+    ) -> dict[int, str]:
+        """``{account_id: contribution}`` for the budget's perimeter (ADR-058
+        R4a). Contribution is one of ``balance`` / ``available_credit`` /
+        ``excluded``."""
+        cur = self._conn.execute(
+            "SELECT account_id, contribution FROM budget_account "
+            "WHERE budget_id = ?",
+            (budget_id,),
+        )
+        return {int(r["account_id"]): r["contribution"] for r in cur}
+
     def set_budget_accounts(
-        self, budget_id: int, account_ids: list[int],
+        self, budget_id: int, accounts: list[tuple[int, str]],
     ) -> None:
-        """Replace the budget's perimeter with the given set of account ids.
-        Atomic — the old perimeter is dropped and the new one inserted in
-        one SQL transaction; failure leaves the previous perimeter intact."""
-        unique_ids = list(dict.fromkeys(account_ids))  # preserve order, dedupe
+        """Replace the budget's perimeter with ``(account_id, contribution)``
+        pairs (ADR-058 R4a — the pool-contribution mode rides with membership).
+        Atomic — the old perimeter is dropped and the new one inserted in one
+        SQL transaction; failure leaves the previous perimeter intact."""
+        seen: dict[int, str] = {}
+        for aid, mode in accounts:               # preserve order, dedupe
+            if aid not in seen:
+                if mode not in ("balance", "available_credit", "excluded"):
+                    raise ValueError(f"Invalid contribution {mode!r}.")
+                seen[aid] = mode
         try:
             self._conn.execute(
                 "DELETE FROM budget_account WHERE budget_id = ?",
                 (budget_id,),
             )
-            if unique_ids:
+            if seen:
                 self._conn.executemany(
-                    "INSERT INTO budget_account (budget_id, account_id) "
-                    "VALUES (?, ?)",
-                    [(budget_id, aid) for aid in unique_ids],
+                    "INSERT INTO budget_account "
+                    "(budget_id, account_id, contribution) VALUES (?, ?, ?)",
+                    [(budget_id, aid, mode) for aid, mode in seen.items()],
                 )
             self.commit()
         except Exception:
@@ -5975,13 +6019,24 @@ class Repository:
         display_ccy: str,
         on_date: str,
     ) -> tuple[Decimal, list[str]]:
-        """The budget's available pool (ADR-058 D2) = the summed balance of
-        the perimeter accounts, each converted to ``display_ccy`` via the FX
-        layer (ADR-055 — no naive par-add). Returns ``(pool, excluded_names)``
-        where excluded accounts are those with no convertible rate (surfaced in
-        a banner, never silently folded at 1:1)."""
+        """The budget's available pool (ADR-058 D2 / R4a) = the sum of each
+        perimeter account's **contribution**, converted to ``display_ccy`` via
+        the FX layer (ADR-055 — no naive par-add). Each account's
+        ``budget_account.contribution`` decides what it contributes:
+
+        - ``'balance'``          — its balance (default; the pre-R4a behaviour);
+        - ``'available_credit'`` — ``credit_limit + balance`` (a card's headroom;
+          balance is signed, so a £5,000 card you owe £1,800 on contributes
+          £3,200);
+        - ``'excluded'``         — nothing (still in the perimeter for actuals).
+
+        Returns ``(pool, excluded_names)`` where ``excluded_names`` lists, with
+        a reason, accounts that *couldn't* be counted — a missing FX rate, or an
+        ``available_credit`` account with no limit set — for a banner. A
+        deliberately ``'excluded'`` account is silent (it's an intentional
+        choice, not a problem)."""
         cur = self._conn.execute(
-            "SELECT a.id, a.name, a.currency, "
+            "SELECT a.id, a.name, a.currency, a.credit_limit, ba.contribution, "
             "  a.opening_balance + COALESCE("
             "    (SELECT SUM(t.amount) FROM txn t WHERE t.account_id = a.id), 0"
             "  ) AS bal_pence "
@@ -5994,13 +6049,23 @@ class Repository:
         pool = Decimal("0.00")
         excluded: list[str] = []
         for r in cur:
-            native = pence_to_decimal(int(r["bal_pence"]))
+            contribution = r["contribution"] or "balance"
+            if contribution == "excluded":
+                continue
+            bal_pence = int(r["bal_pence"])
+            if contribution == "available_credit":
+                if r["credit_limit"] is None:
+                    excluded.append(f"{r['name']} (no credit limit set)")
+                    continue
+                native = pence_to_decimal(int(r["credit_limit"]) + bal_pence)
+            else:  # 'balance'
+                native = pence_to_decimal(bal_pence)
             converted, _fallback = self.convert_amount(
                 native, from_ccy=r["currency"], to_ccy=display_ccy,
                 on_date=on_date,
             )
             if converted is None:
-                excluded.append(r["name"])
+                excluded.append(f"{r['name']} (no rate to {display_ccy})")
             else:
                 pool += converted
         return pool, excluded
