@@ -74,12 +74,17 @@ _ROLLOVER_GLYPH = "↻"   # marks a line whose unspent budget carries forward
 _SECTION = "section"
 _METRIC = "metric"        # one of budget / actual / diff for a line
 _SUBTOTAL = "subtotal"
+_NET = "net"              # bottom-line Net (Income − Expenses) metric row
+_NET_HEADER = "net_header"
+
+_NET_TITLE = "Net (Income − Expenses)"
 
 _OVER = QColor("#b91c1c")     # red-700 — over budget / deficit
 _UNDER = QColor("#15803d")    # green-700 — under budget / surplus
 _SECTION_BG = QColor("#e2e8f0")   # slate-200
 _SUBTOTAL_BG = QColor("#f1f5f9")  # slate-100
 _TODAY_BG = QColor("#eff6ff")     # blue-50 — today's month column
+_TOTAL_BG = QColor("#f8fafc")     # slate-50 — far-right Total column
 _ROLLOVER_BG = QColor("#fef9c3")  # amber-100 — a Budget cell with carried-in rollover
 _MUTED = QColor("#64748b")        # slate-500
 _ZERO_D = Decimal("0.00")
@@ -123,6 +128,9 @@ class BudgetMatrixModel(QAbstractTableModel):
         self._edit_cb = edit_cb
         self._rows: list[_Row] = []
         self._today_col: Optional[int] = None
+        self._collapsed: set[int] = set()      # collapsed section indices
+        self._net_budget: list[Decimal] = []
+        self._net_actual: list[Decimal] = []
         self._rebuild_rows()
 
     def set_matrix(self, matrix: bc.BudgetMatrix) -> None:
@@ -130,16 +138,47 @@ class BudgetMatrixModel(QAbstractTableModel):
         around the swap). Reusing the model rather than ``setModel`` with a
         fresh one avoids orphaning an open inline editor — which Qt flags as
         'commitData called with an editor that does not belong to this view'
-        and which, mid-event-handler on macOS, can tear the window down."""
+        and which, mid-event-handler on macOS, can tear the window down.
+        Collapse state is preserved across the refresh."""
         self.beginResetModel()
         self._m = matrix
         self._rebuild_rows()
         self.endResetModel()
 
+    def toggle_section(self, section_idx: int) -> None:
+        """Expand/collapse a section (Income / Expenses / Transfers)."""
+        self.beginResetModel()
+        if section_idx in self._collapsed:
+            self._collapsed.discard(section_idx)
+        else:
+            self._collapsed.add(section_idx)
+        self._rebuild_rows()
+        self.endResetModel()
+
+    def _compute_net(self) -> None:
+        """Per-month Net = Income − Expenses − Transfers, for the bottom line.
+        Summing a Budget column across sections raw would be nonsense (income
+        and expense have opposite intent), so the bottom row is the *net*."""
+        n = len(self._m.months)
+        nb = [_ZERO_D] * n
+        na = [_ZERO_D] * n
+        for s in self._m.sections:
+            sign = Decimal(1) if s.kind == "income" else Decimal(-1)
+            for mi in range(n):
+                nb[mi] += sign * s.subtotal[mi].allocation
+                na[mi] += sign * s.subtotal[mi].actual
+        self._net_budget, self._net_actual = nb, na
+
     def _rebuild_rows(self) -> None:
+        self._collapsed = {
+            si for si in self._collapsed if si < len(self._m.sections)
+        }
+        self._compute_net()
         self._rows = []
         for si, section in enumerate(self._m.sections):
             self._rows.append(_Row(_SECTION, si, section))
+            if si in self._collapsed:
+                continue
             for mr in section.rows:
                 for metric in ("budget", "actual", "diff"):
                     self._rows.append(_Row(_METRIC, si, mr, metric))
@@ -150,8 +189,17 @@ class BudgetMatrixModel(QAbstractTableModel):
             if len(section.rows) >= 2:
                 for metric in ("budget", "actual", "diff"):
                     self._rows.append(_Row(_SUBTOTAL, si, section, metric))
+        # Bottom line: Net across all sections, per month + the Total column.
+        if self._m.sections:
+            self._rows.append(_Row(_NET_HEADER, -1))
+            for metric in ("budget", "actual", "diff"):
+                self._rows.append(_Row(_NET, -1, None, metric))
         if self._m.today_month in self._m.months:
             self._today_col = self._m.months.index(self._m.today_month) + 1
+
+    # The far-right column index (after the label + N month columns).
+    def _total_col(self) -> int:
+        return 1 + len(self._m.months)
 
     # ── shape ──
 
@@ -159,13 +207,16 @@ class BudgetMatrixModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent=QModelIndex()) -> int:
-        return 0 if parent.isValid() else 1 + len(self._m.months)
+        # label + N months + Total
+        return 0 if parent.isValid() else 2 + len(self._m.months)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if orientation != Qt.Horizontal or role != Qt.DisplayRole:
             return None
         if section == 0:
             return "Category"
+        if section == self._total_col():
+            return "Total"
         return _fmt_month(self._m.months[section - 1])
 
     # ── data ──
@@ -180,16 +231,44 @@ class BudgetMatrixModel(QAbstractTableModel):
             return c.actual
         return c.diff
 
+    def _total(self, mr, metric) -> Decimal:
+        """A row's year sum for the far-right Total column."""
+        cells = mr.subtotal if isinstance(mr, bc.MatrixSection) else mr.cells
+        if metric == "budget":
+            return sum((c.allocation for c in cells), _ZERO_D)
+        if metric == "actual":
+            return sum((c.actual for c in cells), _ZERO_D)
+        return sum((c.diff for c in cells), _ZERO_D)
+
+    def _net_value(self, metric, month_idx=None, total=False) -> Decimal:
+        if total:
+            nb = sum(self._net_budget, _ZERO_D)
+            na = sum(self._net_actual, _ZERO_D)
+        else:
+            nb = self._net_budget[month_idx]
+            na = self._net_actual[month_idx]
+        if metric == "budget":
+            return nb
+        if metric == "actual":
+            return na
+        return na - nb   # diff: actual net − budget net (positive = better)
+
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
         row = self._rows[index.row()]
         col = index.column()
+        total_col = self._total_col()
+        is_total = col == total_col
 
-        # Section header row.
-        if row.kind == _SECTION:
+        # Section / Net header rows.
+        if row.kind in (_SECTION, _NET_HEADER):
             if role == Qt.DisplayRole and col == 0:
-                return row.matrix_row.title
+                if row.kind == _NET_HEADER:
+                    return _NET_TITLE
+                # Chevron shows expand/collapse state (click toggles).
+                chevron = "▸  " if row.section_idx in self._collapsed else "▾  "
+                return chevron + row.matrix_row.title
             if role == Qt.BackgroundRole:
                 return _SECTION_BG
             if role == Qt.FontRole and col == 0:
@@ -199,12 +278,17 @@ class BudgetMatrixModel(QAbstractTableModel):
             return None
 
         is_sub = row.kind == _SUBTOTAL
+        is_net = row.kind == _NET
+        is_summary = is_sub or is_net
         mr = row.matrix_row
         metric = row.metric
 
         # Label column.
         if col == 0:
             if role == Qt.DisplayRole:
+                if is_net:
+                    return {"budget": "  Budget", "actual": "  Actual",
+                            "diff": "  Diff"}[metric]
                 if is_sub:
                     return {"budget": f"{mr.title} — Budget",
                             "actual": "  Actual",
@@ -219,7 +303,7 @@ class BudgetMatrixModel(QAbstractTableModel):
             if (
                 role == Qt.ToolTipRole
                 and metric == "budget"
-                and not is_sub
+                and not is_summary
                 and not mr.is_unbudgeted
             ):
                 if mr.rollover == "accumulate":
@@ -231,38 +315,45 @@ class BudgetMatrixModel(QAbstractTableModel):
                     "Resets each month — unspent budget does not carry "
                     "forward.\nRight-click to enable rollover or change role."
                 )
-            if role == Qt.ForegroundRole and metric != "budget":
+            if role == Qt.ForegroundRole and metric != "budget" and not is_net:
                 return _MUTED
-            if role == Qt.BackgroundRole and is_sub:
+            if role == Qt.BackgroundRole and is_summary:
                 return _SUBTOTAL_BG
-            if role == Qt.FontRole and (is_sub or metric == "budget"):
+            if role == Qt.FontRole and (is_summary or metric == "budget"):
                 f = QFont()
                 f.setBold(metric == "budget" and not mr.is_unbudgeted
-                          if not is_sub else True)
+                          if not is_summary else True)
                 return f
             return None
 
-        month_idx = col - 1
-        value = self._cell(mr, metric, month_idx)
+        month_idx = None if is_total else col - 1
+
+        # Value for this cell — net rows, the Total column, or a normal cell.
+        if is_net:
+            value = self._net_value(metric, month_idx, total=is_total)
+        elif is_total:
+            value = self._total(mr, metric)
+        else:
+            value = self._cell(mr, metric, month_idx)
 
         # The Unbudgeted row has no budget — show a dash, not an editable 0.
-        if (
-            not is_sub and metric == "budget" and mr.is_unbudgeted
-        ):
+        if not is_summary and metric == "budget" and mr.is_unbudgeted:
             if role == Qt.DisplayRole:
                 return "—"
             if role == Qt.TextAlignmentRole:
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             if role == Qt.ForegroundRole:
                 return _MUTED
+            if role == Qt.BackgroundRole and is_total:
+                return _TOTAL_BG
             return None
 
-        # Rolled-over carry on a Budget cell: annotate it so Budget / Actual /
-        # Diff visibly reconcile (Diff uses available = allocation + carry).
-        # Without this a positive carry makes the Diff look wrong-by-a-bug.
+        # Rolled-over carry on a (month) Budget cell: annotate it so Budget /
+        # Actual / Diff visibly reconcile (Diff uses available = alloc + carry).
         carry = (
             mr.cells[month_idx].carry_in
-            if metric == "budget" and not is_sub else _ZERO_D
+            if (row.kind == _METRIC and metric == "budget" and not is_total)
+            else _ZERO_D
         )
 
         if role == Qt.DisplayRole:
@@ -294,11 +385,13 @@ class BudgetMatrixModel(QAbstractTableModel):
         if role == Qt.BackgroundRole:
             if carry != 0:
                 return _ROLLOVER_BG
-            if is_sub:
+            if is_summary:
                 return _SUBTOTAL_BG
+            if is_total:
+                return _TOTAL_BG
             if col == self._today_col:
                 return _TODAY_BG
-        if role == Qt.FontRole and is_sub:
+        if role == Qt.FontRole and (is_summary or is_total):
             f = QFont()
             f.setBold(True)
             return f
@@ -311,7 +404,7 @@ class BudgetMatrixModel(QAbstractTableModel):
             row.kind == _METRIC
             and row.metric == "budget"
             and not row.matrix_row.is_unbudgeted
-            and col >= 1
+            and 1 <= col <= len(self._m.months)   # months only — not Total
         )
 
     def flags(self, index):
@@ -398,6 +491,8 @@ class BudgetWindow(QMainWindow):
         self._table.verticalHeader().setVisible(False)
         # Double-click an Actual cell to drill into its transactions (ADR-058).
         self._table.doubleClicked.connect(self._on_cell_double_clicked)
+        # Single-click a section header to expand/collapse it.
+        self._table.clicked.connect(self._on_cell_clicked)
         # Right-click a budget line to toggle rollover / role / remove (R2).
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_context_menu)
@@ -534,6 +629,8 @@ class BudgetWindow(QMainWindow):
         self._table.setColumnWidth(0, 240)
         for c in range(1, model.columnCount()):
             self._table.setColumnWidth(c, 86)
+        # The Total column holds year-sized sums — give it a little more room.
+        self._table.setColumnWidth(model.columnCount() - 1, 104)
 
         # Feed the same matrix to the monthly view (R3) so both pages stay in
         # lock-step off one computation — the single source of budget truth.
@@ -581,6 +678,18 @@ class BudgetWindow(QMainWindow):
 
     # ── drill-down (double-click an Actual) ──
 
+    def _on_cell_clicked(self, index) -> None:
+        """Single-click a section header → expand/collapse that section."""
+        model = self._table.model()
+        if not isinstance(model, BudgetMatrixModel) or not index.isValid():
+            return
+        row = model._rows[index.row()]
+        if (
+            row.kind == _SECTION
+            and 0 <= row.section_idx < len(model._m.sections)
+        ):
+            model.toggle_section(row.section_idx)
+
     def _on_cell_double_clicked(self, index) -> None:
         """Double-click an Actual cell → the transactions behind it (ADR-058).
         Budget cells edit; Actual/Diff are non-editable, so a double-click
@@ -591,8 +700,12 @@ class BudgetWindow(QMainWindow):
         model = self._table.model()
         if model is None or not index.isValid() or index.column() < 1:
             return
+        # The far-right Total column is a year sum — nothing to drill into.
+        if index.column() > len(self._matrix.months):
+            return
         row = model._rows[index.row()]
-        if row.metric != "actual":
+        # Net is a derived bottom line (no single bucket of txns) — skip it.
+        if row.metric != "actual" or row.kind == _NET:
             return
         month = self._matrix.months[index.column() - 1]
         if row.kind == _SUBTOTAL:
