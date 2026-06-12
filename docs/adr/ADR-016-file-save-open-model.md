@@ -55,6 +55,12 @@ Rejected. Requires holding edits in memory and re-architecting the Repository (e
 
 **File extension**: `.mfl` preferred; `.db` accepted in the Open dialog; Save Copy As defaults to `.mfl`.
 
+## Amendment (2026-06-12) — default DB location + auto-create on first run
+
+ADR-050 Tier-2 moved the **default** database off the current working directory onto the OS-standard per-user location (`QStandardPaths.AppDataLocation` → `~/Library/Application Support/MFL/MyFinancialLife.mfl` etc.). That surfaced a gap in the original "if the database doesn't exist, point the user at the CLI" consequence below: a packaged, double-click user has no CLI, so a missing default file would strand them.
+
+The auto-commit model resolves this cleanly. Because every write is already persisted and there is no separate "Save", a freshly-created file is valid the moment it is written — so **first launch against the default location auto-creates the database and seeds a starter person + cash account** (`__main__._seed_starter_db`, mirroring `cli.cmd_init`), opening straight into an empty register. The "run the CLI to create one" error is now reserved for an **explicit `--db PATH`** that points at a missing file (the caller named a specific file; we don't silently create it). The legacy `./mfl_dev.db` dev file, when present in cwd, is still preferred over the default with no flag. See ADR-050 Tier-2 for the full resolution order. Nothing about Open / Save Copy As / the no-Save model changes.
+
 ## Consequences
 
 ### Positive

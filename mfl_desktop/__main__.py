@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from PySide6.QtCore import QThreadPool, QRunnable
+from PySide6.QtCore import QThreadPool, QRunnable, QStandardPaths
 
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.fx import refresh_latest_into
@@ -82,34 +82,94 @@ class _PriceRefreshRunnable(QRunnable):
             pass
 
 
-DEFAULT_DB = Path("mfl_dev.db")
+APP_NAME = "MFL"
+LEGACY_DB = Path("mfl_dev.db")          # historical cwd dev database
+DEFAULT_DB_FILENAME = "MyFinancialLife.mfl"
+
+
+def _appdata_db_path() -> Path:
+    """The OS-standard default database location (ADR-050 rule 2).
+
+    Resolves to ``~/Library/Application Support/MFL`` on macOS,
+    ``%APPDATA%\\MFL`` on Windows, ``~/.local/share/MFL`` on Linux — one
+    ``QStandardPaths`` call, no platform branch (rule 9). Requires a
+    QApplication whose applicationName is set (``APP_NAME`` drives the
+    trailing ``MFL`` folder)."""
+    base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+    return Path(base) / DEFAULT_DB_FILENAME
+
+
+def _seed_starter_db(repo: Repository) -> None:
+    """Seed the first person + cash account into a freshly-bootstrapped DB.
+
+    Mirrors ``mfl_desktop.cli.cmd_init`` so a packaged user with no CLI gets a
+    working, empty register on first launch instead of the "run the CLI" error.
+    Consistent with ADR-016's auto-commit model: the new file is valid the
+    moment it is written — there is no separate "Save"."""
+    repo.connection.execute(
+        "INSERT INTO person (iri, name, base_currency) VALUES (?, ?, ?)",
+        ("mrl:Person_1", "Me", "GBP"),
+    )
+    repo.connection.execute(
+        "INSERT INTO account (iri, name, type, family, currency) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("mrl:CashAccount_1", "Current account", "cash_std", "cash", "GBP"),
+    )
+    repo.commit()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mfl_desktop")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB,
-                        help=f"SQLite database path (default: {DEFAULT_DB})")
+    parser.add_argument("--db", type=Path, default=None,
+                        help="SQLite database path (default: the per-user "
+                             "application-data location, or ./mfl_dev.db when "
+                             "that legacy dev file is present)")
     parser.add_argument("--account-iri",
                         help="Open this account (default: first in DB)")
     args = parser.parse_args(argv)
 
-    if not args.db.exists():
-        print(
-            f"Database not found at {args.db}.\n"
-            "Create one with: python -m mfl_desktop.cli init",
-            file=sys.stderr,
-        )
-        return 1
-
     app = QApplication(sys.argv)
+    # Set before any QStandardPaths lookup — it is what makes AppDataLocation
+    # resolve to the trailing "MFL" folder (ADR-050 rule 2).
+    app.setApplicationName(APP_NAME)
     apply_theme(app)
-    repo = Repository(args.db)
+
+    # Resolve which database to open (ADR-050 rule 2 + ADR-016).
+    seed_if_empty = False
+    if args.db is not None:
+        # Explicit path: the caller asked for a specific file — don't silently
+        # create it; point at the CLI if it's missing (unchanged behaviour).
+        db_path = args.db
+        if not db_path.exists():
+            print(
+                f"Database not found at {db_path}.\n"
+                "Create one with: python -m mfl_desktop.cli init",
+                file=sys.stderr,
+            )
+            return 1
+    elif LEGACY_DB.exists():
+        # Dev convenience: a checked-out repo with the historical working DB in
+        # cwd keeps launching against it with no --db flag.
+        db_path = LEGACY_DB
+    else:
+        # Default: the OS-standard per-user location. Repository() bootstraps
+        # the schema and mkdirs the parent on first run; we own this file, so
+        # an empty one gets seeded with a starter account below.
+        db_path = _appdata_db_path()
+        seed_if_empty = True
+
+    repo = Repository(db_path)
 
     account_iri = args.account_iri
     if account_iri is None:
         row = repo.connection.execute(
             "SELECT iri FROM account ORDER BY id LIMIT 1"
         ).fetchone()
+        if row is None and seed_if_empty:
+            _seed_starter_db(repo)
+            row = repo.connection.execute(
+                "SELECT iri FROM account ORDER BY id LIMIT 1"
+            ).fetchone()
         if row is None:
             print(
                 "No accounts in database.\n"
@@ -125,12 +185,12 @@ def main(argv: list[str] | None = None) -> int:
     # Background launch refresh of FX rates (ADR-035). No-op when no API
     # key is set, when the last refresh was less than 24h ago, or when
     # there are no non-USD accounts to fetch rates for.
-    QThreadPool.globalInstance().start(_FxRefreshRunnable(args.db))
+    QThreadPool.globalInstance().start(_FxRefreshRunnable(db_path))
 
     # Background launch refresh of security prices (ADR-044). No-op when no
     # Tiingo key is set, when the last refresh was < 24h ago, or when no
     # securities carry a ticker symbol.
-    QThreadPool.globalInstance().start(_PriceRefreshRunnable(args.db))
+    QThreadPool.globalInstance().start(_PriceRefreshRunnable(db_path))
 
     return app.exec()
 

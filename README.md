@@ -110,20 +110,26 @@ source .venv/bin/activate
 > loaded."* If activation is blocked by execution policy, run
 > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry.
 
-Install dependencies, create the database, and launch:
+Install dependencies and launch:
 
 ```bash
 pip install -r mfl_desktop/requirements.txt
-
-# Create the SQLite database (mfl_dev.db) and seed a Person + first account
-python -m mfl_desktop.cli init
 
 # Launch the desktop app
 python -m mfl_desktop
 ```
 
-By default the app uses `mfl_dev.db` in the current directory. Pass
-`--db PATH` to either command to use a different file.
+On first launch the app creates its database in the OS-standard per-user
+location (`~/Library/Application Support/MFL/MyFinancialLife.mfl` on macOS,
+`%APPDATA%\MFL\…` on Windows, `~/.local/share/MFL/…` on Linux) and seeds a
+Person + first account, so no separate setup step is needed (ADR-050 Tier-2 /
+ADR-016).
+
+For development, a `mfl_dev.db` in the current directory is preferred when
+present — so a checked-out repo launches against its working database with no
+flag. Pass `--db PATH` to use a specific file (an explicit path that doesn't
+exist is *not* auto-created — seed it with `python -m mfl_desktop.cli init
+--db PATH`).
 
 ### First run
 1. Add your accounts (sidebar context menu → New Account, or the Account menu)
