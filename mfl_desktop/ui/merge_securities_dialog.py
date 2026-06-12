@@ -155,9 +155,16 @@ class MergeSecuritiesDialog(QDialog):
 
     # ── construction helpers ──
 
+    @staticmethod
+    def _label_for(s: SecurityRow) -> str:
+        """Combo label: ``TICKER — Name`` when tickered, else just the name."""
+        return f"{s.symbol} — {s.name}" if (s.symbol or "").strip() else s.name
+
     def _populate_others(self) -> None:
         """List every other security, with any record that shares this one's
-        ticker surfaced to the top (the likely duplicates)."""
+        ticker surfaced to the top (the likely duplicates). Within each group the
+        order follows the *displayed* label (ticker-first), so the dropdown reads
+        in alphabetical order as the user scans it — not by name behind a ticker."""
         cur_symbol = (self._current.symbol or "").strip().casefold()
         others = [s for s in self._repo.list_securities() if s.id != self._current.id]
 
@@ -166,12 +173,11 @@ class MergeSecuritiesDialog(QDialog):
                 bool(cur_symbol)
                 and (s.symbol or "").strip().casefold() == cur_symbol
             )
-            return (0 if same_ticker else 1, s.name.casefold())
+            return (0 if same_ticker else 1, self._label_for(s).casefold())
 
         others.sort(key=sort_key)
         for s in others:
-            label = f"{s.symbol} — {s.name}" if (s.symbol or "").strip() else s.name
-            self._other_combo.addItem(label, s.id)
+            self._other_combo.addItem(self._label_for(s), s.id)
         # Pre-select the first same-ticker match when there is one.
         if others and cur_symbol and (others[0].symbol or "").strip().casefold() == cur_symbol:
             self._other_combo.setCurrentIndex(0)
