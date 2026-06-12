@@ -79,7 +79,7 @@ def _build_palette() -> QPalette:
 # their own setStyleSheet on top.
 _BASE_QSS = f"""
 * {{
-    font-family: "Segoe UI", "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif;
+    font-family: -apple-system, "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
     font-size: 10pt;
 }}
 

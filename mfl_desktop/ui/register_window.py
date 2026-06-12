@@ -509,12 +509,12 @@ class RegisterWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
 
         open_action = QAction("&Open…", self)
-        open_action.setShortcut(QKeySequence("Ctrl+O"))
+        open_action.setShortcut(QKeySequence.Open)
         open_action.triggered.connect(self._on_open)
         file_menu.addAction(open_action)
 
         save_copy_action = QAction("&Save Copy As…", self)
-        save_copy_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        save_copy_action.setShortcut(QKeySequence.SaveAs)
         save_copy_action.triggered.connect(self._on_save_copy_as)
         file_menu.addAction(save_copy_action)
 
@@ -535,7 +535,7 @@ class RegisterWindow(QMainWindow):
         txn_menu = self.menuBar().addMenu("&Transaction")
 
         self._new_txn_action = QAction("&New Transaction…", self)
-        self._new_txn_action.setShortcut(QKeySequence("Ctrl+N"))
+        self._new_txn_action.setShortcut(QKeySequence.New)
         self._new_txn_action.triggered.connect(self._on_new_transaction)
         txn_menu.addAction(self._new_txn_action)
 
@@ -559,8 +559,10 @@ class RegisterWindow(QMainWindow):
 
         account_menu = self.menuBar().addMenu("&Account")
 
+        # Ctrl+Shift+I (not Ctrl+I — that's File ▸ Import). No StandardKey
+        # exists for an account-summary action.
         self._account_summary_action = QAction("Account &Summary…", self)
-        self._account_summary_action.setShortcut(QKeySequence("Ctrl+I"))
+        self._account_summary_action.setShortcut(QKeySequence("Ctrl+Shift+I"))
         self._account_summary_action.triggered.connect(
             self._on_open_account_summary_for_selection
         )
@@ -2600,7 +2602,7 @@ class RegisterWindow(QMainWindow):
         self._open_account_summary(acct.id)
 
     def _on_open_account_summary_for_selection(self) -> None:
-        """Account → Summary…/Ctrl+I handler. Opens the summary for the
+        """Account → Summary…/Ctrl+Shift+I handler. Opens the summary for the
         currently-selected account; no-op when the All-transactions view
         is showing (the action is disabled in that state but the shortcut
         could still fire via window focus)."""
