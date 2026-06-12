@@ -263,18 +263,42 @@ class BudgetMatrixModel(QAbstractTableModel):
 
         # Section / Net header rows.
         if row.kind in (_SECTION, _NET_HEADER):
-            if role == Qt.DisplayRole and col == 0:
-                if row.kind == _NET_HEADER:
-                    return _NET_TITLE
-                # Chevron shows expand/collapse state (click toggles).
-                chevron = "▸  " if row.section_idx in self._collapsed else "▾  "
-                return chevron + row.matrix_row.title
+            if col == 0:
+                if role == Qt.DisplayRole:
+                    if row.kind == _NET_HEADER:
+                        return _NET_TITLE
+                    # Chevron shows expand/collapse state (click toggles).
+                    chevron = (
+                        "▸  " if row.section_idx in self._collapsed else "▾  "
+                    )
+                    return chevron + row.matrix_row.title
+                if role == Qt.BackgroundRole:
+                    return _SECTION_BG
+                if role == Qt.FontRole:
+                    f = QFont()
+                    f.setBold(True)
+                    return f
+                return None
+            # Month / Total cells: a section header carries its **Budget total**
+            # — the section's headline plan, and the only totals still visible
+            # once the section is collapsed. (The Net header's own Budget /
+            # Actual / Diff rows sit directly below it, so leave it blank.)
+            if row.kind == _SECTION:
+                section = row.matrix_row
+                val = (
+                    sum((c.allocation for c in section.subtotal), _ZERO_D)
+                    if is_total else section.subtotal[col - 1].allocation
+                )
+                if role == Qt.DisplayRole:
+                    return _fmt(val)
+                if role == Qt.TextAlignmentRole:
+                    return int(Qt.AlignRight | Qt.AlignVCenter)
+                if role == Qt.FontRole:
+                    f = QFont()
+                    f.setBold(True)
+                    return f
             if role == Qt.BackgroundRole:
                 return _SECTION_BG
-            if role == Qt.FontRole and col == 0:
-                f = QFont()
-                f.setBold(True)
-                return f
             return None
 
         is_sub = row.kind == _SUBTOTAL
