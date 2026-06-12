@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import Repository, ReportRow
-from mfl_desktop.holdings import ReturnPoint, compute_returns
+from mfl_desktop.holdings import ReturnPoint, compute_returns, xirr
 from mfl_desktop.reports.filters import (
     InvestmentReturnsFilters, TYPE_INVESTMENT_RETURNS,
 )
@@ -285,6 +285,14 @@ class InvestmentReturnsWindow(QMainWindow):
         )
         self._roi_value = QLabel()
         self._roi_value.setStyleSheet("color: #475569;")
+        self._irr_value = QLabel()
+        self._irr_value.setStyleSheet("color: #475569;")
+        self._irr_caption = QLabel(
+            "Money-weighted, annualized — accounts for the timing & size of "
+            "buys, sells and distributions."
+        )
+        self._irr_caption.setWordWrap(True)
+        self._irr_caption.setStyleSheet("color: #94a3b8; font-size: 10px;")
         self._note_value = QLabel()
         self._note_value.setWordWrap(True)
         self._note_value.setStyleSheet("color: #b45309; font-style: italic;")
@@ -309,6 +317,8 @@ class InvestmentReturnsWindow(QMainWindow):
         layout.addWidget(self._mini_section_title("Total return"))
         layout.addWidget(self._total_value)
         layout.addWidget(self._roi_value)
+        layout.addWidget(self._irr_value)
+        layout.addWidget(self._irr_caption)
         layout.addSpacing(6)
         layout.addWidget(self._note_value)
         layout.addSpacing(10)
@@ -481,6 +491,19 @@ class InvestmentReturnsWindow(QMainWindow):
         p = numer / denom * 100
         sign = "+" if p >= 0 else "-"
         return f"{sign}{abs(p):.1f}%"
+
+    @staticmethod
+    def _irr_text(irr: Optional[float]) -> str:
+        """Annualized money-weighted return as a signed percent, ``—`` when
+        undefined (no sign change / too few flows). Very short windows annualize
+        to extreme rates; cap the display at ±999.9%/yr so the layout holds."""
+        if irr is None:
+            return "—"
+        p = irr * 100
+        if abs(p) >= 1000:
+            return (">+999.9%" if p > 0 else "<-999.9%") + " / yr"
+        sign = "+" if p >= 0 else "-"
+        return f"{sign}{abs(p):.1f}% / yr"
 
     # ── period resolution + conversion ──
 
@@ -665,6 +688,30 @@ class InvestmentReturnsWindow(QMainWindow):
         tot_total = tot_unreal + tot_realized + tot_div
         unpriced = sum(1 for m in rows if m["shares"] > 1e-9 and not m["priced"])
 
+        # ── money-weighted return (IRR / XIRR), ADR-046 companion ──
+        # Pool each currency group's native dated flows (converted to the display
+        # currency at the flow's own date), then bracket with the opening market
+        # value (a contribution at the window start) and the terminal market
+        # value (a return at the window end). A single sign change → a unique
+        # annualized rate; xirr returns None when the return is undefined.
+        irr_flows: list[tuple[str, float]] = []
+        opening_total = Decimal("0")
+        terminal_total = Decimal("0")
+        irr_priced = True
+        for ccy, res in results:
+            for d_iso, amt in res.cash_flows:
+                irr_flows.append((d_iso, float(self._conv(amt, ccy, d_iso))))
+            opening_total += self._conv(res.opening_market_value, ccy, window_start)
+            terminal_total += self._conv(res.terminal_market_value, ccy, end_iso)
+            irr_priced = irr_priced and res.irr_fully_priced
+        flows: list[tuple[str, float]] = []
+        if opening_total != 0:
+            flows.append((window_start, -float(opening_total)))
+        flows.extend(irr_flows)
+        if terminal_total != 0:
+            flows.append((end_iso, float(terminal_total)))
+        irr = xirr(flows)
+
         if len(agg_points) < 2:
             self._chart.show_empty("Not enough history to chart yet.")
         else:
@@ -677,6 +724,7 @@ class InvestmentReturnsWindow(QMainWindow):
             cost=tot_cost, cost_deployed=tot_cost_deployed, mv=tot_mv,
             unreal=tot_unreal, realized=tot_realized, div=tot_div,
             total=tot_total, unpriced=unpriced,
+            irr=irr, irr_priced=irr_priced,
         )
         self._update_performance()
 
@@ -745,6 +793,7 @@ class InvestmentReturnsWindow(QMainWindow):
     def _update_summary(
         self, *, d_from, d_to, accounts, security_ids,
         cost, cost_deployed, mv, unreal, realized, div, total, unpriced,
+        irr=None, irr_priced=True,
     ) -> None:
         key = self._current_filters.period_key
         period_label = _PERIOD_LABELS.get(key, key)
@@ -788,12 +837,20 @@ class InvestmentReturnsWindow(QMainWindow):
         self._roi_value.setText(
             f"Return on cost: {self._roi(float(total), float(cost_deployed))}"
         )
+        self._irr_value.setText(f"Money-weighted (IRR): {self._irr_text(irr)}")
+        irr_colour = self._colour(irr * 100) if irr is not None else None
+        self._irr_value.setStyleSheet(f"color: {irr_colour or '#475569'};")
 
         notes: list[str] = []
         if unpriced:
             notes.append(
                 f"{unpriced} held position(s) unpriced — excluded from market "
                 "value & unrealized."
+            )
+        if irr is not None and not irr_priced:
+            notes.append(
+                "IRR used a cost fallback for some opening/closing/transfer "
+                "values that lacked a price — treat it as approximate."
             )
         if self._convert_missing:
             notes.append("Some amounts lacked an FX rate and were not converted.")
@@ -807,7 +864,7 @@ class InvestmentReturnsWindow(QMainWindow):
         self._period_value.setText(message)
         for lab in (self._cost_value, self._market_value, self._unrealized_value,
                     self._realized_value, self._dividends_value, self._filters_value,
-                    self._roi_value, self._note_value):
+                    self._roi_value, self._irr_value, self._note_value):
             lab.setText("")
         self._total_value.setText("—")
         self._perf_candidates = []

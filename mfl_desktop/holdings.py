@@ -61,6 +61,55 @@ def _to_money(x: float) -> Decimal:
     return Decimal(str(round(x, 2)))
 
 
+def xirr(flows: list[tuple[str, float]]) -> Optional[float]:
+    """Money-weighted annualized return (XIRR) for irregular dated cash flows —
+    the ADR-046 IRR companion. ``flows`` is ``(iso_date, amount)`` where amount
+    is signed from the investor's perspective: contributions / buys / the
+    opening market value are **negative** (money put to work), and returns /
+    sells / dividends / the terminal market value are **positive** (money the
+    portfolio gave back).
+
+    Returns the annual rate ``r`` solving ``Σ aᵢ / (1+r)^((dᵢ−d₀)/365) = 0``, or
+    ``None`` when the return is undefined — fewer than two flows, or no sign
+    change (e.g. only contributions, or only one dated point). Solved by
+    bisection over a wide bracket, which is robust where Newton can diverge on
+    the steep NPV curve near ``r = −1``; a single sign change (the normal
+    invest-then-realize shape) guarantees a unique interior root.
+    """
+    if len(flows) < 2:
+        return None
+    amounts = [a for _, a in flows]
+    if not (any(a > _EPS for a in amounts) and any(a < -_EPS for a in amounts)):
+        return None  # need both an outflow and an inflow, else no root
+    d0 = min(date.fromisoformat(d) for d, _ in flows)
+    times = [(date.fromisoformat(d) - d0).days / 365.0 for d, _ in flows]
+    if all(t == times[0] for t in times):
+        return None  # every flow on one date → no time spread to solve over
+
+    def npv(rate: float) -> float:
+        base = 1.0 + rate
+        return sum(a / base ** t for a, t in zip(amounts, times))
+
+    lo, hi = -0.999999, 1000.0
+    f_lo, f_hi = npv(lo), npv(hi)
+    if f_lo == 0.0:
+        return lo
+    if f_hi == 0.0:
+        return hi
+    if (f_lo > 0.0) == (f_hi > 0.0):
+        return None  # no sign change in the bracket → no trustworthy real root
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        f_mid = npv(mid)
+        if abs(f_mid) < 1e-7 or (hi - lo) < 1e-12:
+            return mid
+        if (f_mid > 0.0) == (f_lo > 0.0):
+            lo, f_lo = mid, f_mid
+        else:
+            hi, f_hi = mid, f_mid
+    return (lo + hi) / 2.0
+
+
 @dataclass
 class _Lot:
     qty: float
@@ -83,6 +132,21 @@ def _transfer_out(queue: "deque[_Lot]", qty: float, pen: "deque[_Lot]") -> float
         if lot.qty <= _EPS:
             queue.popleft()
     return remaining
+
+
+def _peek_fifo_cost(queue: "deque[_Lot]", qty: float) -> float:
+    """Cost basis of the first ``qty`` shares of a FIFO queue WITHOUT mutating
+    it. Used to value an in-kind transfer leg for the money-weighted return
+    (ADR-046 IRR) when no market price is on file for the transfer date."""
+    remaining = qty
+    cost = 0.0
+    for lot in queue:
+        if remaining <= _EPS:
+            break
+        take = min(remaining, lot.qty)
+        cost += take * lot.unit_cost
+        remaining -= take
+    return cost
 
 
 def _apply_split(queue: "deque[_Lot]", ratio: float) -> None:
@@ -517,6 +581,17 @@ class ReturnsResult:
     total_return: Decimal = Decimal("0.00")
     fully_priced: bool = True
     unpriced_count: int = 0
+    # Money-weighted-return (IRR) inputs, native currency (ADR-046 companion).
+    # ``cash_flows`` are the dated external flows WITHIN the window (buys/sells/
+    # distributions, signed from the investor's view: outflows negative); the
+    # caller brackets them with −opening_market_value at the window start and
+    # +terminal_market_value at the window end (converting per currency) before
+    # calling xirr(). ``irr_fully_priced`` is False when any bookend or transfer
+    # leg fell back to cost for lack of a price.
+    cash_flows: list = field(default_factory=list)   # list[tuple[str, Decimal]]
+    opening_market_value: Decimal = Decimal("0.00")
+    terminal_market_value: Decimal = Decimal("0.00")
+    irr_fully_priced: bool = True
 
 
 def compute_returns(
@@ -571,6 +646,29 @@ def compute_returns(
     cost_sold_win: dict[int, float] = {}   # cost basis removed by in-window sells
     meta: dict[int, tuple[str, str]] = {}
 
+    # Money-weighted-return (IRR) state, native currency (ADR-046 companion).
+    cash_flows: list[tuple[str, Decimal]] = []
+    opening_taken = False
+    opening_mv = 0.0
+    irr_fully = True
+
+    def snapshot_mv(on_date: str) -> tuple[float, bool]:
+        """Market value of all currently-held lots on ``on_date`` (nearest-prior
+        price, cost fallback when unpriced). Returns ``(mv, fully_priced)``."""
+        mv = 0.0
+        fully = True
+        for sid_, queue_ in lots.items():
+            shares_ = sum(lot.qty for lot in queue_)
+            if shares_ <= _EPS:
+                continue
+            price_ = nearest_price(sid_, on_date)
+            if price_ is not None:
+                mv += shares_ * price_
+            else:
+                mv += sum(lot.qty * lot.unit_cost for lot in queue_)
+                fully = False
+        return mv, fully
+
     ordered = sorted(txns, key=lambda r: (r.posted_date, r.id))
     ti = 0
     points: list[ReturnPoint] = []
@@ -579,6 +677,15 @@ def compute_returns(
         while ti < len(ordered) and ordered[ti].posted_date <= sample:
             t = ordered[ti]
             ti += 1
+            # Opening market value = the portfolio value just before the first
+            # transaction dated on/after the window start. The (posted_date, id)
+            # sort means every pre-window txn precedes every in-window one, so
+            # ``lots`` here reflects exactly the holdings carried INTO the window
+            # (a buy ON the start date is an in-window flow, not opening capital).
+            if not opening_taken and t.posted_date >= window_start:
+                opening_mv, of = snapshot_mv(window_start)
+                irr_fully = irr_fully and of
+                opening_taken = True
             if t.security_id is None or t.action is None:
                 continue
             sid = t.security_id
@@ -598,7 +705,19 @@ def compute_returns(
                     if is_share_transfer(t.action):
                         # Transfer in: carry FIFO cost basis from a matching
                         # ShrsOut so the round-trip preserves basis and books no
-                        # phantom gain/loss (ADR-053).
+                        # phantom gain/loss (ADR-053). For the money-weighted
+                        # return it's a contribution of value AT MARKET on the
+                        # transfer date — a negative flow for the whole leg (the
+                        # matched basis source is irrelevant to the IRR).
+                        if in_window:
+                            price = nearest_price(sid, t.posted_date)
+                            if price is not None:
+                                mv = _to_money(qty * price)
+                            else:
+                                mv = _to_money(_peek_fifo_cost(
+                                    pending.setdefault(sid, deque()), qty))
+                                irr_fully = False
+                            cash_flows.append((t.posted_date, -mv))
                         remaining_in = _transfer_in(
                             lots[sid], qty, pending.setdefault(sid, deque()),
                         )
@@ -608,16 +727,34 @@ def compute_returns(
                     lots[sid].append(
                         _Lot(qty=remaining_in, unit_cost=cost / remaining_in, known_basis=known)
                     )
-                    if in_window and is_reinvest(t.action):
-                        # Reinvested distribution: income = the reinvested value
-                        # (no separate cash leg, so use the lot cost / amount).
-                        reinv = float(abs(t.amount)) if t.amount != 0 else cost
-                        dividends_win[sid] += reinv
+                    if in_window and not is_share_transfer(t.action):
+                        if is_reinvest(t.action):
+                            # Reinvested distribution: income = the reinvested
+                            # value (no separate cash leg, so use the lot cost /
+                            # amount). It's internal cash, so it's NOT an
+                            # external flow for the IRR (it nets to zero).
+                            reinv = float(abs(t.amount)) if t.amount != 0 else cost
+                            dividends_win[sid] += reinv
+                        else:
+                            # Cash-funded buy: txn.amount is the signed cash
+                            # impact (negative — money deployed). An IRR outflow.
+                            cash_flows.append((t.posted_date, t.amount))
             elif is_share_out(t.action):
                 if qty > _EPS:
                     if is_share_transfer(t.action):
                         # Transfer out: remove shares, NO realized gain/loss —
-                        # park the lots for the matching ShrsIn (ADR-053).
+                        # park the lots for the matching ShrsIn (ADR-053). For
+                        # the IRR it's a withdrawal of value at market (a matching
+                        # in-portfolio ShrsIn cancels it for a whole-portfolio
+                        # view; for a single account it correctly leaves).
+                        if in_window:
+                            price = nearest_price(sid, t.posted_date)
+                            if price is not None:
+                                mv = _to_money(qty * price)
+                            else:
+                                mv = _to_money(_peek_fifo_cost(lots[sid], qty))
+                                irr_fully = False
+                            cash_flows.append((t.posted_date, mv))
                         _transfer_out(lots[sid], qty, pending.setdefault(sid, deque()))
                         continue
                     proceeds = float(abs(t.amount))
@@ -635,9 +772,13 @@ def compute_returns(
                     if in_window:
                         realized_win[sid] += proceeds - cost_removed
                         cost_sold_win[sid] += cost_removed
+                        # Sale proceeds: txn.amount is positive — an IRR inflow.
+                        cash_flows.append((t.posted_date, t.amount))
             elif is_income(t.action):
                 if in_window:
                     dividends_win[sid] += float(t.amount)
+                    # Cash distribution received: a positive IRR inflow.
+                    cash_flows.append((t.posted_date, t.amount))
             elif is_split(t.action):
                 _apply_split(lots[sid], float(t.quantity) if t.quantity else 0.0)
             # XIn/XOut: no lot move, no income (round-4 transfer-linking).
@@ -732,6 +873,18 @@ def compute_returns(
         s.name.lower(),
     ))
 
+    # ── IRR bookends ──
+    # If no transaction fell on/after the window start, the opening snapshot
+    # trigger never fired; ``lots`` is then unchanged across the window, so
+    # valuing it at the window start gives the correct opening capital.
+    if not opening_taken:
+        opening_mv, of = snapshot_mv(window_start)
+        irr_fully = irr_fully and of
+    # Terminal value at the window end (cost fallback already applied by the
+    # last sample's point) — the final positive flow for the IRR.
+    terminal_mv = points[-1].market_value if points else Decimal("0.00")
+    irr_fully = irr_fully and (points[-1].fully_priced if points else True)
+
     return ReturnsResult(
         points=points,
         by_security=by_security,
@@ -744,4 +897,8 @@ def compute_returns(
         total_return=tot_unreal + tot_realized + tot_div,
         fully_priced=end_fully,
         unpriced_count=unpriced,
+        cash_flows=cash_flows,
+        opening_market_value=_to_money(opening_mv),
+        terminal_market_value=terminal_mv,
+        irr_fully_priced=irr_fully,
     )
