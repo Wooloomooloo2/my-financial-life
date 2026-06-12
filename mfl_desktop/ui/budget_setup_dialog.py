@@ -1,26 +1,26 @@
-"""Modal dialog for setting up a budget — the perimeter and the per-category
-amounts in one place.
+"""Budget setup dialog (ADR-058) — perimeter accounts + envelope lines.
 
-Tab 1 picks which accounts count toward the budget. Tab 2 lists each
-budgeted category with its amount, cadence, and role (bills / saving /
-discretionary), backed by Add / Edit / Remove verbs. Saving commits the
-perimeter and category sets together; cancelling discards both.
+Two tabs in one atomic Save:
 
-The two halves intentionally share one Save: shipping them as separate
-dialogs would create a window where the perimeter is half-changed when
-the user backs out of the categories step, and the recovery story for
-that is just clicking Save anyway. One atomic save matches how the
-budget is used — set up once at the start, tweak as a whole when
-priorities shift.
+- **Accounts** — which accounts make up the budget's perimeter (its available
+  pool, and the txns that count as actuals). Picked first per principle 3.
+- **Categories** — the envelope lines: which categories are budgeted, each with
+  a *role* (bills / saving / discretionary) and a *rollover* policy (carry
+  unspent forward or reset monthly). Per-month amounts are NOT set here — they
+  live in the matrix (principle 10); but a newly-added line can be **seeded from
+  history** (the trailing-12-month average, principle 5), stamped across all
+  months on Save.
+
+Save order matters: the perimeter is written first so the history-seed query
+(which sums over the perimeter accounts) reflects the just-chosen accounts.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from datetime import date
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -39,145 +39,59 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from mfl_desktop.db.repository import (
     BUDGET_ROLES,
-    AccountSummary,
     Budget,
-    BudgetCategoryRow,
-    CategoryChoice,
     Repository,
-    SCHEDULE_CADENCES,
 )
 from mfl_desktop.ui.category_picker import (
     make_category_picker,
     selected_category_id,
 )
 
-
-_CADENCE_LABELS = {
-    "weekly":    "Weekly",
-    "biweekly":  "Bi-weekly",
-    "monthly":   "Monthly",
-    "quarterly": "Quarterly",
-    "annual":    "Annually",
-}
-
 _ROLE_LABELS = {
-    "bills":         "Bills",
-    "saving":        "Saving",
+    "bills": "Bills",
+    "saving": "Saving",
     "discretionary": "Discretionary",
 }
 
 
 @dataclass
-class _PendingRow:
-    """A row in the working set the dialog hands to the repository on Save.
-    `original_category_id` is None for newly-added rows."""
+class _PendingLine:
     category_id: int
-    amount: Decimal
-    cadence: str
+    label: str
+    kind: str                  # income / expense / transfer
     role: str
-    original_category_id: Optional[int]
+    rollover: str              # none / accumulate
+    seed_from_history: bool
+    existing: bool             # already saved (vs newly added this session)
+    line_id: Optional[int]     # set when existing
 
 
 class BudgetSetupDialog(QDialog):
-    def __init__(
-        self,
-        repo: Repository,
-        budget: Budget,
-        parent=None,
-    ) -> None:
+    """Edit a budget's perimeter + envelope lines. Amounts live in the matrix."""
+
+    def __init__(self, repo: Repository, budget: Budget, parent=None) -> None:
         super().__init__(parent)
         self._repo = repo
         self._budget = budget
-        self.setWindowTitle("Budget Setup")
-        self.setModal(True)
-        self.resize(720, 560)
+        self.setWindowTitle(f"Set up budget — {budget.name}")
+        self.resize(620, 520)
 
-        self._all_accounts: list[AccountSummary] = repo.list_accounts()
-        self._categories: list[CategoryChoice] = repo.list_categories_flat()
-        self._categories_by_id = {c.id: c for c in self._categories}
+        self._categories = repo.list_categories_flat()
+        # Rolled-up so a top-level group reflects its children's activity.
+        self._usage = repo.category_rollup_usage_counts()
+        self._parent_map = repo.category_parent_map()
 
-        # ── Tab 1: account perimeter ──
-        self._account_list = QListWidget()
-        self._account_list.setSelectionMode(QAbstractItemView.NoSelection)
-        current_perimeter = set(repo.list_budget_account_ids(budget.id))
-        for acct in self._all_accounts:
-            item = QListWidgetItem(f"{acct.name}  ·  {acct.currency}  ·  {acct.family}")
-            item.setData(Qt.UserRole, acct.id)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(
-                Qt.Checked if acct.id in current_perimeter else Qt.Unchecked
-            )
-            self._account_list.addItem(item)
-
-        account_help = QLabel(
-            "Pick the accounts that count toward this budget. Transfers "
-            "between two in-perimeter accounts cancel out; transfers to or "
-            "from an out-of-perimeter account count as a normal flow."
-        )
-        account_help.setWordWrap(True)
-        account_help.setStyleSheet("color: #666;")
-
-        account_tab = QWidget()
-        account_layout = QVBoxLayout(account_tab)
-        account_layout.addWidget(account_help)
-        account_layout.addWidget(self._account_list)
-
-        # ── Tab 2: per-category budgets ──
-        self._pending_rows: list[_PendingRow] = [
-            _PendingRow(
-                category_id=bc.category_id,
-                amount=bc.amount,
-                cadence=bc.cadence,
-                role=bc.role,
-                original_category_id=bc.category_id,
-            )
-            for bc in repo.list_budget_categories(budget.id)
-        ]
-
-        self._category_table = QTableWidget(0, 4)
-        self._category_table.setHorizontalHeaderLabels(
-            ["Category", "Cadence", "Amount", "Role"]
-        )
-        self._category_table.verticalHeader().setVisible(False)
-        self._category_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._category_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._category_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        header = self._category_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self._category_table.itemDoubleClicked.connect(lambda _: self._on_edit_row())
-        self._category_table.itemSelectionChanged.connect(self._update_row_buttons)
-
-        self._add_btn = QPushButton("&Add…")
-        self._edit_btn = QPushButton("&Edit…")
-        self._remove_btn = QPushButton("&Remove")
-        self._add_btn.clicked.connect(self._on_add_row)
-        self._edit_btn.clicked.connect(self._on_edit_row)
-        self._remove_btn.clicked.connect(self._on_remove_row)
-
-        category_action_row = QHBoxLayout()
-        category_action_row.addWidget(self._add_btn)
-        category_action_row.addStretch(1)
-        category_action_row.addWidget(self._edit_btn)
-        category_action_row.addWidget(self._remove_btn)
-
-        category_tab = QWidget()
-        category_layout = QVBoxLayout(category_tab)
-        category_layout.addWidget(self._category_table)
-        category_layout.addLayout(category_action_row)
-
-        # ── Tabs + buttons ──
-        self._tabs = QTabWidget()
-        self._tabs.addTab(account_tab, "Accounts")
-        self._tabs.addTab(category_tab, "Categories")
+        tabs = QTabWidget()
+        tabs.addTab(self._build_accounts_tab(), "Accounts")
+        tabs.addTab(self._build_categories_tab(), "Categories")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
@@ -185,278 +99,444 @@ class BudgetSetupDialog(QDialog):
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._tabs)
-        layout.addWidget(buttons)
+        root = QVBoxLayout(self)
+        root.addWidget(tabs)
+        root.addWidget(buttons)
 
-        self._reload_category_table()
-        self._update_row_buttons()
+    # ── Accounts tab ──
 
-    # ── category table population ──
-
-    def _reload_category_table(self) -> None:
-        self._category_table.setRowCount(len(self._pending_rows))
-        for i, row in enumerate(self._pending_rows):
-            cat = self._categories_by_id.get(row.category_id)
-            if cat is not None:
-                label = (
-                    f"{cat.name} ({cat.parent_name})"
-                    if cat.parent_name else cat.name
-                )
-            else:
-                label = f"(unknown id {row.category_id})"
-            cat_item = QTableWidgetItem(label)
-            cat_item.setData(Qt.UserRole, row.category_id)
-
-            cadence_item = QTableWidgetItem(
-                _CADENCE_LABELS.get(row.cadence, row.cadence)
-            )
-
-            amount_item = QTableWidgetItem()
-            amount_item.setData(Qt.DisplayRole, float(row.amount))
-            amount_item.setText(f"{row.amount:,.2f}")
-            amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-            role_item = QTableWidgetItem(
-                _ROLE_LABELS.get(row.role, row.role)
-            )
-
-            self._category_table.setItem(i, 0, cat_item)
-            self._category_table.setItem(i, 1, cadence_item)
-            self._category_table.setItem(i, 2, amount_item)
-            self._category_table.setItem(i, 3, role_item)
-
-    def _update_row_buttons(self) -> None:
-        has_selection = bool(self._category_table.selectionModel().selectedRows())
-        self._edit_btn.setEnabled(has_selection)
-        self._remove_btn.setEnabled(has_selection)
-
-    def _selected_row_index(self) -> Optional[int]:
-        sel = self._category_table.selectionModel().selectedRows()
-        if not sel:
-            return None
-        return sel[0].row()
-
-    # ── category row actions ──
-
-    def _on_add_row(self) -> None:
-        # Exclude categories that already have a row in the working set —
-        # the schema's UNIQUE(budget_id, category_id) would reject it on save,
-        # and double-entry isn't a meaningful user intent.
-        in_use = {row.category_id for row in self._pending_rows}
-        candidates = [c for c in self._categories if c.id not in in_use]
-        if not candidates:
-            QMessageBox.information(
-                self, "No categories to add",
-                "Every category is already in this budget. Remove one or "
-                "create a new category from Manage ▸ Categories first.",
-            )
-            return
-        sub = _CategoryRowDialog(candidates, existing=None, parent=self)
-        if sub.exec() != QDialog.Accepted:
-            return
-        values = sub.values()
-        if values is None:
-            return
-        self._pending_rows.append(_PendingRow(
-            category_id=values["category_id"],
-            amount=values["amount"],
-            cadence=values["cadence"],
-            role=values["role"],
-            original_category_id=None,
+    def _build_accounts_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.addWidget(QLabel(
+            "Pick the accounts in this budget. Their combined balance is the "
+            "available pool, and only their transactions count as actuals. "
+            "Transfers between two in-budget accounts cancel out."
         ))
-        self._reload_category_table()
+        self._accounts_list = QListWidget()
+        in_perimeter = set(self._repo.list_budget_account_ids(self._budget.id))
+        for acc in self._repo.list_accounts():
+            item = QListWidgetItem(f"{acc.name}  ·  {acc.currency}")
+            item.setData(Qt.UserRole, acc.id)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if acc.id in in_perimeter else Qt.Unchecked
+            )
+            self._accounts_list.addItem(item)
+        lay.addWidget(self._accounts_list)
+        return w
 
-    def _on_edit_row(self) -> None:
-        idx = self._selected_row_index()
-        if idx is None:
-            return
-        row = self._pending_rows[idx]
-        # When editing, the selected row's own category is allowed; any
-        # *other* in-use category isn't (same UNIQUE constraint logic).
-        in_use = {
-            r.category_id for r in self._pending_rows
-            if r.category_id != row.category_id
-        }
-        candidates = [c for c in self._categories if c.id not in in_use]
-        sub = _CategoryRowDialog(
-            candidates,
-            existing={
-                "category_id": row.category_id,
-                "amount": row.amount,
-                "cadence": row.cadence,
-                "role": row.role,
-            },
-            parent=self,
-        )
-        if sub.exec() != QDialog.Accepted:
-            return
-        values = sub.values()
-        if values is None:
-            return
-        self._pending_rows[idx] = _PendingRow(
-            category_id=values["category_id"],
-            amount=values["amount"],
-            cadence=values["cadence"],
-            role=values["role"],
-            original_category_id=row.original_category_id,
-        )
-        self._reload_category_table()
+    def _checked_account_ids(self) -> list[int]:
+        out: list[int] = []
+        for i in range(self._accounts_list.count()):
+            it = self._accounts_list.item(i)
+            if it.checkState() == Qt.Checked:
+                out.append(int(it.data(Qt.UserRole)))
+        return out
 
-    def _on_remove_row(self) -> None:
-        idx = self._selected_row_index()
-        if idx is None:
+    # ── Categories tab ──
+
+    def _build_categories_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.addWidget(QLabel(
+            "Budgeted categories. Set monthly amounts later in the matrix — "
+            "or seed a new one from its last 12 months of spending."
+        ))
+        self._pending: list[_PendingLine] = []
+        for ln in self._repo.list_budget_lines(self._budget.id):
+            label = (
+                f"{ln.category_name} ({ln.category_parent_name})"
+                if ln.category_parent_name else ln.category_name
+            )
+            self._pending.append(_PendingLine(
+                category_id=ln.category_id, label=label, kind=ln.category_kind,
+                role=ln.role, rollover=ln.rollover, seed_from_history=False,
+                existing=True, line_id=ln.id,
+            ))
+        self._removed_line_ids: list[int] = []
+
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Category", "Role", "Rollover"])
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._table.doubleClicked.connect(lambda *_: self._on_edit())
+        lay.addWidget(self._table)
+
+        btn_row = QHBoxLayout()
+        populate_btn = QPushButton("Populate from history…")
+        populate_btn.setToolTip(
+            "Pre-tick the top-level categories you've actually used in these "
+            "accounts over the last 12 months, seeded from their averages."
+        )
+        populate_btn.clicked.connect(self._on_populate)
+        add_btn = QPushButton("Add…")
+        add_btn.clicked.connect(self._on_add)
+        edit_btn = QPushButton("Edit…")
+        edit_btn.clicked.connect(self._on_edit)
+        rm_btn = QPushButton("Remove")
+        rm_btn.clicked.connect(self._on_remove)
+        btn_row.addWidget(populate_btn)
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(edit_btn)
+        btn_row.addWidget(rm_btn)
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
+
+        self._reload_table()
+        return w
+
+    def _reload_table(self) -> None:
+        self._table.setRowCount(0)
+        for pl in self._pending:
+            r = self._table.rowCount()
+            self._table.insertRow(r)
+            self._table.setItem(r, 0, QTableWidgetItem(pl.label))
+            role_text = "—" if pl.kind == "income" else _ROLE_LABELS[pl.role]
+            self._table.setItem(r, 1, QTableWidgetItem(role_text))
+            roll = "Rolls over" if pl.rollover == "accumulate" else "Resets"
+            self._table.setItem(r, 2, QTableWidgetItem(roll))
+
+    def _on_add(self) -> None:
+        existing_ids = {pl.category_id for pl in self._pending}
+        # parent=None: avoid the macOS child-modal→parent close cascade that
+        # vanishes the budget window (ADR-058 close-on-save bug).
+        dlg = _AddCategoriesDialog(
+            self._categories, self._usage, existing_ids, self._parent_map,
+            parent=None,
+        )
+        if dlg.exec() != QDialog.Accepted or not dlg.result_lines:
             return
-        del self._pending_rows[idx]
-        self._reload_category_table()
+        self._pending.extend(dlg.result_lines)
+        self._reload_table()
+
+    def _on_populate(self) -> None:
+        """Open the chooser with the top-level categories you've actually used
+        (in the currently-ticked accounts, last 12 months) pre-ticked (ADR-058
+        prepopulation). Children roll up into these, so this is a clean start."""
+        account_ids = self._checked_account_ids()
+        if not account_ids:
+            QMessageBox.information(
+                self, "Pick accounts first",
+                "Tick the budget's accounts on the Accounts tab — the "
+                "suggestion is based on what you've spent in them.",
+            )
+            return
+        preselect = self._repo.top_level_categories_with_activity(
+            account_ids, months=12, as_of=date.today().isoformat(),
+        )
+        existing_ids = {pl.category_id for pl in self._pending}
+        dlg = _AddCategoriesDialog(
+            self._categories, self._usage, existing_ids, self._parent_map,
+            preselect_ids=preselect, parent=None,
+        )
+        if dlg.exec() != QDialog.Accepted or not dlg.result_lines:
+            return
+        self._pending.extend(dlg.result_lines)
+        self._reload_table()
+
+    def _on_edit(self) -> None:
+        r = self._table.currentRow()
+        if r < 0 or r >= len(self._pending):
+            return
+        dlg = _LineDialog(
+            self._categories, set(), parent=None, edit=self._pending[r],
+        )
+        if dlg.exec() != QDialog.Accepted or dlg.result_line is None:
+            return
+        self._pending[r] = dlg.result_line
+        self._reload_table()
+
+    def _on_remove(self) -> None:
+        r = self._table.currentRow()
+        if r < 0 or r >= len(self._pending):
+            return
+        pl = self._pending.pop(r)
+        if pl.existing and pl.line_id is not None:
+            self._removed_line_ids.append(pl.line_id)
+        self._reload_table()
 
     # ── Save ──
 
     def _on_save(self) -> None:
-        # Read perimeter from checkboxes
-        perimeter_ids: list[int] = []
-        for i in range(self._account_list.count()):
-            item = self._account_list.item(i)
-            if item.checkState() == Qt.Checked:
-                perimeter_ids.append(int(item.data(Qt.UserRole)))
-
-        # Apply both halves under a try/except — each repo call commits
-        # atomically, but if the categories pass fails after perimeter
-        # succeeded the budget is in a half-applied state. The cost of
-        # an explicit BEGIN/COMMIT-spanning-two-methods refactor isn't
-        # worth it for a Save-button flow the user can simply re-do, so
-        # surface the partial state via the error dialog instead.
         try:
-            self._repo.set_budget_accounts(self._budget.id, perimeter_ids)
-
-            # Delete rows whose original category is no longer present.
-            current_ids = {row.category_id for row in self._pending_rows}
-            originals = {
-                row.original_category_id for row in self._pending_rows
-                if row.original_category_id is not None
-            }
-            existing_now = set(
-                bc.category_id for bc in
-                self._repo.list_budget_categories(self._budget.id)
+            # 1. Perimeter first — the history seed reads over these accounts.
+            self._repo.set_budget_accounts(
+                self._budget.id, self._checked_account_ids(),
             )
-            to_delete = existing_now - current_ids
-            for cid in to_delete:
-                self._repo.delete_budget_category(self._budget.id, cid)
-
-            for row in self._pending_rows:
-                self._repo.upsert_budget_category(
-                    budget_id=self._budget.id,
-                    category_id=row.category_id,
-                    amount=row.amount,
-                    cadence=row.cadence,
-                    role=row.role,
+            # 2. Removed lines.
+            for line_id in self._removed_line_ids:
+                self._repo.delete_budget_line(line_id)
+            # 3. Add/update lines; seed newly-added ones from history.
+            today = date.today().isoformat()
+            first_month = self._budget.months()[0]
+            for pl in self._pending:
+                line_id = self._repo.add_budget_line(
+                    budget_id=self._budget.id, category_id=pl.category_id,
+                    role=pl.role, rollover=pl.rollover,
                 )
-        except ValueError as e:
-            QMessageBox.warning(self, "Could not save budget", str(e))
-            return
-        except Exception as e:
-            QMessageBox.critical(self, "Could not save budget", str(e))
+                if not pl.existing and pl.seed_from_history:
+                    avg = self._repo.historical_monthly_average(
+                        budget_id=self._budget.id,
+                        category_id=pl.category_id, as_of=today,
+                    )
+                    if avg > 0:
+                        self._repo.set_line_allocation(
+                            line_id, first_month, avg, scope="all",
+                        )
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not save budget setup", str(e))
             return
         self.accept()
 
 
-class _CategoryRowDialog(QDialog):
-    """Tiny sub-dialog for adding or editing one budget_category row."""
+class _AddCategoriesDialog(QDialog):
+    """Pick categories to budget from a **nested tree** of all categories
+    (ADR-058) — same parent→child hierarchy as everywhere else, ordered
+    alphabetically within each parent, each node showing its rolled-up usage
+    count. Multi-select; each ticked node becomes a line with the chosen default
+    role (expenses) + rollover, seeded from history by default. Already-budgeted
+    categories appear greyed and un-tickable so the tree stays whole.
+    """
 
     def __init__(
-        self,
-        categories: list[CategoryChoice],
-        existing: Optional[dict] = None,
-        parent=None,
+        self, categories, usage: dict[int, int], existing_ids: set[int],
+        parent_map: dict, parent=None, preselect_ids: Optional[set[int]] = None,
     ) -> None:
         super().__init__(parent)
-        is_edit = existing is not None
-        self.setWindowTitle("Edit Budget Row" if is_edit else "Add Budget Row")
-        self.setModal(True)
+        self.setWindowTitle("Add categories to budget")
+        self.resize(540, 600)
+        self._cat_by_id = {c.id: c for c in categories}
+        self.result_lines: list[_PendingLine] = []
+        preselect = preselect_ids or set()
 
-        default_id = existing["category_id"] if is_edit else None
-        self._category_combo = make_category_picker(
-            categories, default_id=default_id,
-        )
+        root = QVBoxLayout(self)
+        root.addWidget(QLabel(
+            "Suggested categories are pre-ticked — review and adjust."
+            if preselect else
+            "Tick the categories to budget. Children roll up into a budgeted "
+            "parent, so ticking a top-level group is usually enough."
+        ))
 
-        self._amount_edit = QLineEdit()
-        self._amount_edit.setPlaceholderText("0.00")
-        self._amount_edit.setAlignment(Qt.AlignRight)
-        validator = QDoubleValidator(0.0, 1_000_000_000.0, 2, self)
-        validator.setNotation(QDoubleValidator.StandardNotation)
-        self._amount_edit.setValidator(validator)
-        if is_edit:
-            self._amount_edit.setText(f"{existing['amount']:.2f}")
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Filter categories…")
+        self._search.textChanged.connect(self._apply_filter)
+        root.addWidget(self._search)
 
-        self._cadence_combo = QComboBox()
-        for key in SCHEDULE_CADENCES:
-            self._cadence_combo.addItem(_CADENCE_LABELS[key], userData=key)
-        default_cadence = existing["cadence"] if is_edit else "monthly"
-        for i in range(self._cadence_combo.count()):
-            if self._cadence_combo.itemData(i) == default_cadence:
-                self._cadence_combo.setCurrentIndex(i)
-                break
-
-        self._role_combo = QComboBox()
-        for key in BUDGET_ROLES:
-            self._role_combo.addItem(_ROLE_LABELS[key], userData=key)
-        default_role = existing["role"] if is_edit else "discretionary"
-        for i in range(self._role_combo.count()):
-            if self._role_combo.itemData(i) == default_role:
-                self._role_combo.setCurrentIndex(i)
-                break
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._build_tree(categories, usage, existing_ids, parent_map, preselect)
+        self._tree.expandAll()
+        root.addWidget(self._tree, stretch=1)
 
         form = QFormLayout()
-        form.addRow("Category:", self._category_combo)
-        form.addRow("Amount:", self._amount_edit)
-        form.addRow("Cadence:", self._cadence_combo)
-        form.addRow("Role:", self._role_combo)
+        self._role_combo = QComboBox()
+        for role in BUDGET_ROLES:
+            self._role_combo.addItem(_ROLE_LABELS[role], role)
+        # Role only means something for expenses; income lines ignore it.
+        form.addRow("Default role (expenses):", self._role_combo)
+        self._rollover_cb = QCheckBox("Roll unspent forward")
+        self._rollover_cb.setChecked(True)
+        form.addRow("", self._rollover_cb)
+        self._seed_cb = QCheckBox("Seed amounts from last 12 months' average")
+        self._seed_cb.setChecked(True)
+        form.addRow("", self._seed_cb)
+        root.addLayout(form)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
-        buttons.accepted.connect(self._on_accept)
+        buttons.accepted.connect(self._on_ok)
         buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
 
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+    def _build_tree(
+        self, categories, usage, existing_ids, parent_map, preselect,
+    ) -> None:
+        present = self._cat_by_id
+        children: dict[Optional[int], list[int]] = {}
+        for cid in present:
+            pid = parent_map.get(cid)
+            if pid not in present:
+                pid = None  # parent missing/archived → treat as a root
+            children.setdefault(pid, []).append(cid)
 
-        self.resize(380, self.sizeHint().height())
-        self._values: Optional[dict] = None
+        def name_of(cid: int) -> str:
+            c = present[cid]
+            return (c.name or "").lower()
 
-    def _on_accept(self) -> None:
-        cid = selected_category_id(self._category_combo)
-        if cid is None:
-            QMessageBox.warning(
-                self, "Category required",
-                "Pick a category from the list.",
+        def add(cid: int, parent_item) -> QTreeWidgetItem:
+            c = present[cid]
+            count = usage.get(cid, 0)
+            text = f"{c.name}   ·   {count} txn" + ("s" if count != 1 else "")
+            item = (
+                QTreeWidgetItem(parent_item) if parent_item is not None
+                else QTreeWidgetItem(self._tree)
+            )
+            item.setData(0, Qt.UserRole, cid)
+            item.setData(0, Qt.UserRole + 1, (c.path or c.name or "").lower())
+            if cid in existing_ids:
+                item.setText(0, f"{c.name}   ·   already budgeted")
+                item.setForeground(0, Qt.gray)
+                item.setFlags(Qt.ItemIsEnabled)  # visible, not checkable
+            else:
+                item.setText(0, text)
+                item.setFlags(
+                    Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+                )
+                item.setCheckState(
+                    0, Qt.Checked if cid in preselect else Qt.Unchecked
+                )
+            for child_id in sorted(children.get(cid, []), key=name_of):
+                add(child_id, item)
+            return item
+
+        for root_id in sorted(children.get(None, []), key=name_of):
+            add(root_id, None)
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+
+        def visit(item) -> bool:
+            child_visible = False
+            for i in range(item.childCount()):
+                if visit(item.child(i)):
+                    child_visible = True
+            self_match = needle in (item.data(0, Qt.UserRole + 1) or "")
+            visible = (not needle) or self_match or child_visible
+            item.setHidden(not visible)
+            if needle and (self_match or child_visible):
+                item.setExpanded(True)
+            return visible
+
+        for i in range(self._tree.topLevelItemCount()):
+            visit(self._tree.topLevelItem(i))
+
+    def _on_ok(self) -> None:
+        role = self._role_combo.currentData()
+        rollover = "accumulate" if self._rollover_cb.isChecked() else "none"
+        seed = self._seed_cb.isChecked()
+
+        def collect(item) -> None:
+            cid = item.data(0, Qt.UserRole)
+            if (
+                cid is not None
+                and bool(item.flags() & Qt.ItemIsUserCheckable)
+                and item.checkState(0) == Qt.Checked
+            ):
+                cat = self._cat_by_id.get(int(cid))
+                if cat is not None:
+                    self.result_lines.append(_PendingLine(
+                        category_id=cat.id, label=cat.path or cat.name,
+                        kind=cat.kind,
+                        # Role/rollover are expense concepts; income ignores them.
+                        role="discretionary" if cat.kind == "income" else role,
+                        rollover="none" if cat.kind == "income" else rollover,
+                        seed_from_history=seed, existing=False, line_id=None,
+                    ))
+            for i in range(item.childCount()):
+                collect(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            collect(self._tree.topLevelItem(i))
+
+        if not self.result_lines:
+            QMessageBox.information(
+                self, "Nothing selected", "Tick at least one category.",
             )
             return
-        raw = self._amount_edit.text().strip().replace(",", "")
-        if not raw:
-            QMessageBox.warning(self, "Amount required", "Enter an amount.")
-            return
-        try:
-            amount = Decimal(raw)
-        except InvalidOperation:
-            QMessageBox.warning(
-                self, "Invalid amount", f"Could not parse {raw!r}.",
-            )
-            return
-        if amount < 0:
-            QMessageBox.warning(
-                self, "Invalid amount",
-                "Budget amount must be zero or more.",
-            )
-            return
-        self._values = {
-            "category_id": cid,
-            "amount": amount,
-            "cadence": self._cadence_combo.currentData(),
-            "role": self._role_combo.currentData(),
-        }
         self.accept()
 
-    def values(self) -> Optional[dict]:
-        return self._values
+
+class _LineDialog(QDialog):
+    """Add or edit one envelope line — category + role + rollover + seed."""
+
+    def __init__(
+        self,
+        categories,
+        existing_ids: set[int],
+        parent=None,
+        edit: Optional[_PendingLine] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._edit = edit
+        self._cat_by_id = {c.id: c for c in categories}
+        self._existing_ids = existing_ids
+        self.result_line: Optional[_PendingLine] = None
+        self.setWindowTitle("Edit category" if edit else "Add category")
+
+        form = QFormLayout(self)
+
+        self._picker = make_category_picker(
+            categories, default_id=edit.category_id if edit else None,
+        )
+        if edit is not None:
+            self._picker.setEnabled(False)  # category is fixed on edit
+        form.addRow("Category:", self._picker)
+
+        # Role is an expense concept (bills / saving / discretionary) — it has
+        # no meaning for income, so don't ask for it there.
+        edit_kind = edit.kind if edit else "expense"
+        if edit_kind == "income":
+            self._role_combo = None
+        else:
+            self._role_combo = QComboBox()
+            for role in BUDGET_ROLES:
+                self._role_combo.addItem(_ROLE_LABELS[role], role)
+            if edit is not None:
+                self._role_combo.setCurrentIndex(
+                    max(0, list(BUDGET_ROLES).index(edit.role))
+                )
+            form.addRow("Role:", self._role_combo)
+
+        self._rollover_cb = QCheckBox("Roll unspent forward")
+        self._rollover_cb.setChecked(
+            (edit.rollover == "accumulate") if edit else True
+        )
+        form.addRow("", self._rollover_cb)
+
+        self._seed_cb = QCheckBox("Seed amounts from last 12 months' average")
+        self._seed_cb.setChecked(edit is None)
+        if edit is not None:
+            self._seed_cb.setEnabled(False)  # only new lines seed
+        form.addRow("", self._seed_cb)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self._on_ok)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _on_ok(self) -> None:
+        if self._edit is not None:
+            cat_id = self._edit.category_id
+        else:
+            cat_id = selected_category_id(self._picker)
+            if cat_id is None:
+                QMessageBox.warning(self, "Pick a category", "Choose a category.")
+                return
+            if cat_id in self._existing_ids:
+                QMessageBox.warning(
+                    self, "Already budgeted",
+                    "That category is already a line in this budget.",
+                )
+                return
+        cat = self._cat_by_id.get(cat_id)
+        kind = cat.kind if cat else "expense"
+        label = (cat.path or cat.name) if cat else str(cat_id)
+        role = (
+            self._role_combo.currentData()
+            if self._role_combo is not None else "discretionary"
+        )
+        self.result_line = _PendingLine(
+            category_id=cat_id, label=label, kind=kind, role=role,
+            rollover="accumulate" if self._rollover_cb.isChecked() else "none",
+            seed_from_history=self._seed_cb.isChecked() and self._edit is None,
+            existing=self._edit.existing if self._edit else False,
+            line_id=self._edit.line_id if self._edit else None,
+        )
+        self.accept()

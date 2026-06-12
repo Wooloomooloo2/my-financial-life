@@ -235,31 +235,68 @@ SCHEDULE_CADENCES: tuple[str, ...] = (
 BUDGET_ROLES: tuple[str, ...] = ("bills", "saving", "discretionary")
 
 
+BUDGET_ROLLOVER: tuple[str, ...] = ("none", "accumulate")
+
+
+def budget_months(start_month: str, length: int) -> list[str]:
+    """The list of 'YYYY-MM' months a budget spans, from ``start_month`` for
+    ``length`` months (ADR-058). Pure helper — lives here (not budget_calc) so
+    the Repository can use it without importing budget_calc (which imports the
+    Repository)."""
+    year = int(start_month[:4])
+    month = int(start_month[5:7])
+    out: list[str] = []
+    for _ in range(max(0, length)):
+        out.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return out
+
+
 @dataclass(frozen=True)
 class Budget:
-    """A budget plan. v1 keeps one row per file (see ADR-024); the schema
-    supports more so multi-plan can land additively."""
+    """A budget plan (ADR-058). Multiple per file; each carries a period
+    (``start_month`` 'YYYY-MM' + ``length_months``, default 12 = Jan–Dec) and
+    an optional display ``currency`` (None = the file's base currency)."""
     id: int
     iri: str
     name: str
+    start_month: str
+    length_months: int
+    currency: Optional[str]
+
+    def months(self) -> list[str]:
+        return budget_months(self.start_month, self.length_months)
 
 
 @dataclass(frozen=True)
-class BudgetCategoryRow:
-    """One per-category line in a budget, joined with the category's name,
-    parent name, and kind so the screen + dialog can render without a
-    second pass through the category list. Amount is stored as a positive
-    magnitude in pence; signing comes from ``category_kind`` at display time.
+class BudgetLine:
+    """One envelope in a budget (ADR-058) — a budgeted category with its role
+    and auto-rollover policy. The per-month amounts live in
+    ``budget_allocation``; actuals + carry are computed, never stored. Joined
+    with the category's name / parent / kind so the matrix renders in one pass.
     """
     id: int
     budget_id: int
     category_id: int
     category_name: str
     category_parent_name: str   # '' if top-level
-    category_kind: str
+    category_kind: str          # income / expense / transfer
+    role: str                   # bills / saving / discretionary
+    rollover: str               # none / accumulate
+    sort_order: int
+
+
+@dataclass(frozen=True)
+class BudgetAllocation:
+    """One editable matrix cell — the budgeted amount for a line in a month
+    (ADR-058). Positive magnitude; sign at display time from ``category.kind``.
+    """
+    budget_line_id: int
+    month: str                  # 'YYYY-MM'
     amount: Decimal
-    cadence: str
-    role: str
 
 
 @dataclass(frozen=True)
@@ -609,6 +646,32 @@ class Repository:
             self._conn.backup(dest)
         finally:
             dest.close()
+
+    def checkpoint(self) -> None:
+        """Fold the WAL back into the main database file (TRUNCATE mode).
+
+        In WAL mode (see ``__init__``) committed writes accumulate in the
+        ``<db>-wal`` sidecar until a checkpoint. Running this on clean close
+        makes the single ``.mfl`` file self-contained, so copying or backing up
+        just that one file never loses recent edits (ADR-057). Best-effort: a
+        busy checkpoint is harmless — the frames stay in the WAL and are
+        recovered automatically on the next open."""
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
+
+    def is_open(self) -> bool:
+        """True if the underlying connection is still usable. Cheap probe used
+        by long-lived UI (e.g. the budget window's activate-refresh) to avoid
+        operating on a connection that has been closed — e.g. during app
+        shutdown, when the owning window's closeEvent has already run
+        ``close()`` but a queued event still fires a refresh."""
+        try:
+            self._conn.execute("SELECT 1")
+            return True
+        except sqlite3.Error:
+            return False
 
     def close(self) -> None:
         self._conn.close()
@@ -5435,36 +5498,125 @@ class Repository:
                     break
         return posted
 
-    # ── Budgets (ADR-024) ──
+    # ── Budgets (ADR-058) ──
 
-    def get_default_budget(self) -> Optional[Budget]:
-        """Return the single v1 budget if it exists, or None.
-        ``get_or_create_default_budget`` is the constructor side."""
+    _BUDGET_COLS = "id, iri, name, start_month, length_months, currency"
+
+    def _row_to_budget(self, row) -> Budget:
+        return Budget(
+            id=row["id"], iri=row["iri"], name=row["name"],
+            start_month=row["start_month"],
+            length_months=int(row["length_months"]),
+            currency=row["currency"],
+        )
+
+    def list_budgets(self) -> list[Budget]:
+        """All budgets in the file, newest first (ADR-058 — multi-budget)."""
+        cur = self._conn.execute(
+            f"SELECT {self._BUDGET_COLS} FROM budget ORDER BY id DESC"
+        )
+        return [self._row_to_budget(r) for r in cur]
+
+    def get_budget(self, budget_id: int) -> Optional[Budget]:
         row = self._conn.execute(
-            "SELECT id, iri, name FROM budget ORDER BY id LIMIT 1"
+            f"SELECT {self._BUDGET_COLS} FROM budget WHERE id = ?",
+            (budget_id,),
         ).fetchone()
-        if row is None:
-            return None
-        return Budget(id=row["id"], iri=row["iri"], name=row["name"])
+        return self._row_to_budget(row) if row is not None else None
 
-    def get_or_create_default_budget(self) -> Budget:
-        """Return the file's single budget, creating an empty one on first
-        access. Empty = no perimeter, no categories — the screen renders
-        an explicit "Set up your budget" state in that case."""
-        existing = self.get_default_budget()
-        if existing is not None:
-            return existing
+    def create_budget(
+        self,
+        *,
+        name: str,
+        start_month: str,
+        length_months: int = 12,
+        currency: Optional[str] = None,
+    ) -> Budget:
+        """Create a new, empty budget (no perimeter, no lines). ``start_month``
+        is 'YYYY-MM'."""
+        clean = (name or "").strip() or "Budget"
         iri = new_budget_iri()
         try:
             cur = self._conn.execute(
-                "INSERT INTO budget (iri, name) VALUES (?, 'My Budget')",
-                (iri,),
+                "INSERT INTO budget (iri, name, start_month, length_months, "
+                "currency) VALUES (?, ?, ?, ?, ?)",
+                (iri, clean, start_month, length_months, currency),
             )
             self.commit()
         except Exception:
             self.rollback()
             raise
-        return Budget(id=cur.lastrowid, iri=iri, name="My Budget")
+        return self.get_budget(int(cur.lastrowid))  # type: ignore[return-value]
+
+    def get_or_create_default_budget(self) -> Budget:
+        """Return the first budget, creating a default current-year (Jan–Dec)
+        one on first access so the screen is always openable (ADR-058)."""
+        existing = self._conn.execute(
+            f"SELECT {self._BUDGET_COLS} FROM budget ORDER BY id LIMIT 1"
+        ).fetchone()
+        if existing is not None:
+            return self._row_to_budget(existing)
+        # strftime gives the file's idea of 'this year'; matches migration 0019.
+        row = self._conn.execute(
+            "SELECT strftime('%Y-01', 'now') AS m"
+        ).fetchone()
+        return self.create_budget(name="My Budget", start_month=row["m"])
+
+    def duplicate_budget(self, budget_id: int, new_name: str) -> Budget:
+        """Copy a budget — perimeter, lines, and per-month allocations — into a
+        new budget (ADR-058 §scenarios). One transaction; the copy is fully
+        independent of the source."""
+        src = self.get_budget(budget_id)
+        if src is None:
+            raise ValueError(f"No budget with id {budget_id}.")
+        clean = (new_name or "").strip() or f"{src.name} (copy)"
+        iri = new_budget_iri()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO budget (iri, name, start_month, length_months, "
+                "currency) VALUES (?, ?, ?, ?, ?)",
+                (iri, clean, src.start_month, src.length_months, src.currency),
+            )
+            new_id = int(cur.lastrowid)
+            self._conn.execute(
+                "INSERT INTO budget_account (budget_id, account_id) "
+                "SELECT ?, account_id FROM budget_account WHERE budget_id = ?",
+                (new_id, budget_id),
+            )
+            # Lines + allocations: copy each line, then its allocations onto the
+            # freshly-minted line id (matched back via category_id, which is
+            # unique per budget).
+            self._conn.execute(
+                "INSERT INTO budget_line "
+                "(budget_id, category_id, role, rollover, sort_order) "
+                "SELECT ?, category_id, role, rollover, sort_order "
+                "FROM budget_line WHERE budget_id = ?",
+                (new_id, budget_id),
+            )
+            self._conn.execute(
+                "INSERT INTO budget_allocation (budget_line_id, month, amount) "
+                "SELECT nl.id, a.month, a.amount "
+                "FROM budget_allocation a "
+                "JOIN budget_line ol ON ol.id = a.budget_line_id "
+                "JOIN budget_line nl ON nl.budget_id = ? "
+                "                   AND nl.category_id = ol.category_id "
+                "WHERE ol.budget_id = ?",
+                (new_id, budget_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return self.get_budget(new_id)  # type: ignore[return-value]
+
+    def delete_budget(self, budget_id: int) -> None:
+        """Delete a budget; perimeter, lines, and allocations cascade."""
+        try:
+            self._conn.execute("DELETE FROM budget WHERE id = ?", (budget_id,))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
 
     def rename_budget(self, budget_id: int, new_name: str) -> None:
         clean = (new_name or "").strip()
@@ -5474,6 +5626,38 @@ class Repository:
             self._conn.execute(
                 "UPDATE budget SET name = ? WHERE id = ?",
                 (clean, budget_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def set_budget_period(
+        self, budget_id: int, *, start_month: str, length_months: int,
+    ) -> None:
+        """Set a budget's period (ADR-058). Existing allocations outside the
+        new window are left in place (harmless — the matrix only reads months
+        in range); months newly in range start empty (= 0)."""
+        if length_months < 1:
+            raise ValueError("A budget must span at least one month.")
+        try:
+            self._conn.execute(
+                "UPDATE budget SET start_month = ?, length_months = ? "
+                "WHERE id = ?",
+                (start_month, length_months, budget_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def set_budget_currency(
+        self, budget_id: int, currency: Optional[str],
+    ) -> None:
+        try:
+            self._conn.execute(
+                "UPDATE budget SET currency = ? WHERE id = ?",
+                (currency, budget_id),
             )
             self.commit()
         except Exception:
@@ -5518,105 +5702,246 @@ class Repository:
             self.rollback()
             raise
 
-    # ── Budget categories ──
+    # ── Budget lines (envelopes) + per-month allocations (ADR-058) ──
 
-    _BUDGET_CATEGORY_COLS = (
-        "bc.id, bc.budget_id, bc.category_id, "
+    _BUDGET_LINE_COLS = (
+        "bl.id, bl.budget_id, bl.category_id, "
         "c.name AS category_name, "
         "COALESCE(p.name, '') AS category_parent_name, "
         "c.kind AS category_kind, "
-        "bc.amount, bc.cadence, bc.role"
+        "bl.role, bl.rollover, bl.sort_order"
     )
 
-    def _row_to_budget_category(self, row) -> BudgetCategoryRow:
-        return BudgetCategoryRow(
+    def _row_to_budget_line(self, row) -> BudgetLine:
+        return BudgetLine(
             id=row["id"], budget_id=row["budget_id"],
             category_id=row["category_id"],
             category_name=row["category_name"],
             category_parent_name=row["category_parent_name"],
             category_kind=row["category_kind"],
-            amount=pence_to_decimal(row["amount"]),
-            cadence=row["cadence"], role=row["role"],
+            role=row["role"], rollover=row["rollover"],
+            sort_order=int(row["sort_order"]),
         )
 
-    def list_budget_categories(
-        self, budget_id: int,
-    ) -> list[BudgetCategoryRow]:
-        """All per-category budget rows for the given budget, sorted by
-        role then category name. Used by both the screen and the setup
-        dialog."""
+    def list_budget_lines(self, budget_id: int) -> list[BudgetLine]:
+        """All envelope lines in a budget, ordered for the matrix: by kind
+        (income → expense → transfer), then sort_order, then name."""
         cur = self._conn.execute(
-            f"SELECT {self._BUDGET_CATEGORY_COLS} "
-            f"FROM budget_category bc "
-            f"JOIN      category c ON c.id = bc.category_id "
+            f"SELECT {self._BUDGET_LINE_COLS} "
+            f"FROM budget_line bl "
+            f"JOIN      category c ON c.id = bl.category_id "
             f"LEFT JOIN category p ON p.id = c.parent_id "
-            f"WHERE bc.budget_id = ? "
-            f"ORDER BY bc.role, c.name",
+            f"WHERE bl.budget_id = ? "
+            f"ORDER BY CASE c.kind WHEN 'income' THEN 0 "
+            f"                     WHEN 'expense' THEN 1 ELSE 2 END, "
+            f"         bl.sort_order, c.name",
             (budget_id,),
         )
-        return [self._row_to_budget_category(r) for r in cur]
+        return [self._row_to_budget_line(r) for r in cur]
 
-    def upsert_budget_category(
+    def add_budget_line(
         self,
         *,
         budget_id: int,
         category_id: int,
-        amount: Decimal,
-        cadence: str,
-        role: str,
+        role: str = "discretionary",
+        rollover: Optional[str] = None,
     ) -> int:
-        """Insert or update one per-category budget row. ``UNIQUE(budget_id,
-        category_id)`` makes the ON CONFLICT path the natural shape.
-        Returns the row id (either freshly inserted or the existing one).
-        """
-        if cadence not in SCHEDULE_CADENCES:
-            raise ValueError(
-                f"Invalid cadence {cadence!r}; expected one of {SCHEDULE_CADENCES}."
-            )
+        """Add an envelope for ``category_id``. ``rollover`` defaults to
+        'accumulate' for expense categories, 'none' otherwise (ADR-058 D3).
+        Idempotent on UNIQUE(budget_id, category_id) — updates role/rollover
+        if the line already exists. Returns the line id."""
         if role not in BUDGET_ROLES:
-            raise ValueError(
-                f"Invalid role {role!r}; expected one of {BUDGET_ROLES}."
+            raise ValueError(f"Invalid role {role!r}; expected {BUDGET_ROLES}.")
+        if rollover is None:
+            kind_row = self._conn.execute(
+                "SELECT kind FROM category WHERE id = ?", (category_id,),
+            ).fetchone()
+            rollover = (
+                "accumulate"
+                if kind_row is not None and kind_row["kind"] == "expense"
+                else "none"
             )
-        if amount < 0:
-            raise ValueError("Budget amount cannot be negative.")
+        if rollover not in BUDGET_ROLLOVER:
+            raise ValueError(
+                f"Invalid rollover {rollover!r}; expected {BUDGET_ROLLOVER}."
+            )
         try:
             self._conn.execute(
-                "INSERT INTO budget_category "
-                "(budget_id, category_id, amount, cadence, role) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO budget_line "
+                "(budget_id, category_id, role, rollover) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(budget_id, category_id) DO UPDATE SET "
-                "  amount = excluded.amount, "
-                "  cadence = excluded.cadence, "
-                "  role = excluded.role",
-                (
-                    budget_id, category_id, decimal_to_pence(amount),
-                    cadence, role,
-                ),
+                "  role = excluded.role, rollover = excluded.rollover",
+                (budget_id, category_id, role, rollover),
             )
             self.commit()
         except Exception:
             self.rollback()
             raise
         row = self._conn.execute(
-            "SELECT id FROM budget_category "
-            "WHERE budget_id = ? AND category_id = ?",
+            "SELECT id FROM budget_line WHERE budget_id = ? AND category_id = ?",
             (budget_id, category_id),
         ).fetchone()
         return int(row["id"])
 
-    def delete_budget_category(
-        self, budget_id: int, category_id: int,
+    def update_budget_line(
+        self,
+        line_id: int,
+        *,
+        role: Optional[str] = None,
+        rollover: Optional[str] = None,
     ) -> None:
+        """Update an envelope's role and/or rollover policy."""
+        sets: list[str] = []
+        params: list = []
+        if role is not None:
+            if role not in BUDGET_ROLES:
+                raise ValueError(f"Invalid role {role!r}.")
+            sets.append("role = ?")
+            params.append(role)
+        if rollover is not None:
+            if rollover not in BUDGET_ROLLOVER:
+                raise ValueError(f"Invalid rollover {rollover!r}.")
+            sets.append("rollover = ?")
+            params.append(rollover)
+        if not sets:
+            return
+        params.append(line_id)
         try:
             self._conn.execute(
-                "DELETE FROM budget_category "
-                "WHERE budget_id = ? AND category_id = ?",
-                (budget_id, category_id),
+                f"UPDATE budget_line SET {', '.join(sets)} WHERE id = ?",
+                params,
             )
             self.commit()
         except Exception:
             self.rollback()
             raise
+
+    def delete_budget_line(self, line_id: int) -> None:
+        """Delete an envelope; its allocations cascade."""
+        try:
+            self._conn.execute(
+                "DELETE FROM budget_line WHERE id = ?", (line_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def list_budget_allocations(
+        self, budget_id: int,
+    ) -> dict[tuple[int, str], Decimal]:
+        """All allocations for a budget, keyed by ``(budget_line_id, month)``.
+        Absent cells (no row) are simply not present → the caller treats them
+        as 0; storage stays sparse."""
+        cur = self._conn.execute(
+            "SELECT a.budget_line_id, a.month, a.amount "
+            "FROM budget_allocation a "
+            "JOIN budget_line bl ON bl.id = a.budget_line_id "
+            "WHERE bl.budget_id = ?",
+            (budget_id,),
+        )
+        return {
+            (int(r["budget_line_id"]), r["month"]): pence_to_decimal(
+                int(r["amount"])
+            )
+            for r in cur
+        }
+
+    def set_line_allocation(
+        self,
+        line_id: int,
+        month: str,
+        amount: Decimal,
+        *,
+        scope: str = "one",
+    ) -> None:
+        """Set a line's budgeted amount for ``month``, with copy-forward
+        (ADR-058 D1). ``scope``:
+
+        - ``'one'``     — just this month;
+        - ``'forward'`` — this month and every later month in the budget;
+        - ``'all'``     — every month in the budget.
+
+        All target months are written in **one transaction** so a partial
+        stamp can't leave the matrix half-propagated."""
+        if amount < 0:
+            raise ValueError("Budget amount cannot be negative.")
+        line = self._conn.execute(
+            "SELECT budget_id FROM budget_line WHERE id = ?", (line_id,),
+        ).fetchone()
+        if line is None:
+            raise ValueError(f"No budget line with id {line_id}.")
+        budget = self.get_budget(int(line["budget_id"]))
+        assert budget is not None
+        months = budget.months()
+        if scope == "one":
+            targets = [month]
+        elif scope == "forward":
+            targets = [m for m in months if m >= month]
+        elif scope == "all":
+            targets = list(months)
+        else:
+            raise ValueError(f"Invalid scope {scope!r}.")
+        # A copy-forward from a month outside the budget window still writes at
+        # least the named month.
+        if month not in targets:
+            targets.append(month)
+        pence = decimal_to_pence(amount)
+        try:
+            self._conn.executemany(
+                "INSERT INTO budget_allocation (budget_line_id, month, amount) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(budget_line_id, month) DO UPDATE SET "
+                "  amount = excluded.amount",
+                [(line_id, m, pence) for m in targets],
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def historical_monthly_average(
+        self,
+        *,
+        budget_id: int,
+        category_id: int,
+        months: int = 12,
+        as_of: str,
+    ) -> Decimal:
+        """Suggested monthly allocation for a category (ADR-058 D6): the
+        average monthly magnitude of perimeter activity on the category and
+        its descendants over the trailing ``months`` ending at ``as_of``.
+
+        Reads the split-unrolled view so split lines count; uses the budget's
+        perimeter accounts so the suggestion reflects the accounts in scope.
+        Returns a positive Decimal (0 if no history)."""
+        if months < 1:
+            months = 1
+        sub_ids = self.category_descendants(category_id) | {category_id}
+        end = date.fromisoformat(as_of)
+        # Window start = first day of the month (months-1) before as_of's month.
+        y, m = end.year, end.month
+        back = months - 1
+        m -= back
+        while m < 1:
+            m += 12
+            y -= 1
+        start = date(y, m, 1).isoformat()
+        placeholders = ",".join("?" for _ in sub_ids)
+        row = self._conn.execute(
+            f"SELECT COALESCE(SUM(ABS(t.amount)), 0) AS total "
+            f"FROM txn_category_line t "
+            f"JOIN budget_account ba ON ba.account_id = t.account_id "
+            f"WHERE ba.budget_id = ? "
+            f"  AND t.category_id IN ({placeholders}) "
+            f"  AND t.posted_date BETWEEN ? AND ?",
+            (budget_id, *sub_ids, start, as_of),
+        ).fetchone()
+        total = pence_to_decimal(int(row["total"]))
+        return (total / Decimal(months)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP,
+        )
 
     # ── Budget computation source data ──
 
@@ -5642,6 +5967,43 @@ class Repository:
             (budget_id,),
         ).fetchone()
         return pence_to_decimal(int(row["total_pence"]))
+
+    def compute_perimeter_pool(
+        self,
+        budget_id: int,
+        *,
+        display_ccy: str,
+        on_date: str,
+    ) -> tuple[Decimal, list[str]]:
+        """The budget's available pool (ADR-058 D2) = the summed balance of
+        the perimeter accounts, each converted to ``display_ccy`` via the FX
+        layer (ADR-055 — no naive par-add). Returns ``(pool, excluded_names)``
+        where excluded accounts are those with no convertible rate (surfaced in
+        a banner, never silently folded at 1:1)."""
+        cur = self._conn.execute(
+            "SELECT a.id, a.name, a.currency, "
+            "  a.opening_balance + COALESCE("
+            "    (SELECT SUM(t.amount) FROM txn t WHERE t.account_id = a.id), 0"
+            "  ) AS bal_pence "
+            "FROM account a "
+            "JOIN budget_account ba ON ba.account_id = a.id "
+            "WHERE ba.budget_id = ? AND a.archived_at IS NULL "
+            "ORDER BY a.family, a.name",
+            (budget_id,),
+        )
+        pool = Decimal("0.00")
+        excluded: list[str] = []
+        for r in cur:
+            native = pence_to_decimal(int(r["bal_pence"]))
+            converted, _fallback = self.convert_amount(
+                native, from_ccy=r["currency"], to_ccy=display_ccy,
+                on_date=on_date,
+            )
+            if converted is None:
+                excluded.append(r["name"])
+            else:
+                pool += converted
+        return pool, excluded
 
     def list_perimeter_txns(
         self,
@@ -5742,6 +6104,90 @@ class Repository:
             "SELECT id, parent_id FROM category WHERE archived_at IS NULL"
         )
         return {int(r["id"]): r["parent_id"] for r in cur}
+
+    def category_kind_map(self) -> dict[int, str]:
+        """Mapping of category id → kind (income/expense/transfer) for the
+        whole tree. Used by the budget matrix (ADR-058) to file each
+        un-budgeted perimeter txn into the right section's Unbudgeted row."""
+        cur = self._conn.execute(
+            "SELECT id, kind FROM category WHERE archived_at IS NULL"
+        )
+        return {int(r["id"]): r["kind"] for r in cur}
+
+    def category_usage_counts(self) -> dict[int, int]:
+        """Mapping of category id → number of transactions using it (across the
+        whole ledger, reading the split-unrolled view so split lines count).
+        Used by the budget setup picker so the user can see, at a glance, which
+        categories actually carry activity (ADR-058)."""
+        cur = self._conn.execute(
+            "SELECT category_id, COUNT(*) AS n FROM txn_category_line "
+            "GROUP BY category_id"
+        )
+        return {int(r["category_id"]): int(r["n"]) for r in cur}
+
+    def category_rollup_usage_counts(self) -> dict[int, int]:
+        """Like ``category_usage_counts`` but each category's count includes its
+        whole subtree (direct + all descendants). Used by the budget setup
+        chooser (ADR-058) so a top-level group reflects its children's activity
+        — a parent with all its spend on leaves no longer reads '0 txns'."""
+        direct = self.category_usage_counts()
+        parent_map = self.category_parent_map()
+        out: dict[int, int] = {cid: 0 for cid in parent_map}
+        for cid, cnt in direct.items():
+            out[cid] = out.get(cid, 0) + cnt
+            parent = parent_map.get(cid)
+            seen: set[int] = set()
+            while parent is not None and parent not in seen:
+                out[parent] = out.get(parent, 0) + cnt
+                seen.add(parent)
+                parent = parent_map.get(parent)
+        return out
+
+    def top_level_categories_with_activity(
+        self,
+        account_ids: list[int],
+        *,
+        months: int = 12,
+        as_of: str,
+    ) -> set[int]:
+        """Top-level categories (``parent_id IS NULL``) whose subtree has any
+        activity in the given accounts over the trailing ``months`` (ADR-058
+        prepopulation). Returns the set of top-level ancestor ids — pre-ticked
+        in the setup chooser so a fresh budget starts from the user's real
+        spending shape. Accounts are passed directly (not via budget_id) so the
+        suggestion reflects the perimeter the user is *currently* choosing,
+        before Save."""
+        if not account_ids:
+            return set()
+        if months < 1:
+            months = 1
+        end = date.fromisoformat(as_of)
+        y, m = end.year, end.month - (months - 1)
+        while m < 1:
+            m += 12
+            y -= 1
+        start = date(y, m, 1).isoformat()
+        acc_ph = ",".join("?" for _ in account_ids)
+        cur = self._conn.execute(
+            f"SELECT DISTINCT category_id FROM txn_category_line "
+            f"WHERE account_id IN ({acc_ph}) "
+            f"  AND posted_date BETWEEN ? AND ?",
+            (*account_ids, start, as_of),
+        )
+        active = {int(r["category_id"]) for r in cur}
+        parent_map = self.category_parent_map()
+        tops: set[int] = set()
+        for cid in active:
+            cur_id: Optional[int] = cid
+            seen: set[int] = set()
+            while cur_id is not None and cur_id not in seen:
+                seen.add(cur_id)
+                parent = parent_map.get(cur_id)
+                if parent is None:
+                    tops.add(cur_id)
+                    break
+                cur_id = parent
+        return tops
 
     def list_perimeter_schedules_due_through(
         self,

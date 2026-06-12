@@ -61,6 +61,10 @@ ADR-050 Tier-2 moved the **default** database off the current working directory 
 
 The auto-commit model resolves this cleanly. Because every write is already persisted and there is no separate "Save", a freshly-created file is valid the moment it is written — so **first launch against the default location auto-creates the database and seeds a starter person + cash account** (`__main__._seed_starter_db`, mirroring `cli.cmd_init`), opening straight into an empty register. The "run the CLI to create one" error is now reserved for an **explicit `--db PATH`** that points at a missing file (the caller named a specific file; we don't silently create it). The legacy `./mfl_dev.db` dev file, when present in cwd, is still preferred over the default with no flag. See ADR-050 Tier-2 for the full resolution order. Nothing about Open / Save Copy As / the no-Save model changes.
 
+## Amendment (2026-06-12) — automatic snapshots + clean-close checkpoint (see ADR-057)
+
+The "future auto-snapshot scheduler" reserved below under *Ongoing responsibilities* is now built — see **ADR-057**. Two things this model left open are closed there: the WAL sidecar is **checkpointed and the connection closed on quit** (`RegisterWindow.closeEvent` → `Repository.checkpoint()`), so the single `.mfl` is self-contained after a clean exit; and **rotating timestamped snapshots** are taken automatically (launch / 30-min timer / clean close) into a `Snapshots/` folder beside the live database, restorable via the existing **File ▸ Open**. The no-Save model, `Save Copy As`, and `Open` are unchanged.
+
 ## Consequences
 
 ### Positive

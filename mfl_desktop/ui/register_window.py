@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mfl_desktop import snapshots
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui.account_dialog import AccountDialog
@@ -302,6 +303,39 @@ class RegisterWindow(QMainWindow):
         # variable-amount and manual schedules are left for them to action
         # via Manage ▸ Schedules.
         self._run_auto_post_sweep()
+
+        # Automatic rotating backups (ADR-057). Snapshot now — capturing the
+        # state we opened against, *before* this session's edits, so the user
+        # has a clean rollback point — then every SNAPSHOT_INTERVAL_MIN minutes
+        # while the app is open, plus a final one on clean close (closeEvent).
+        # Rotation keeps the most recent copies in a Snapshots/ folder beside
+        # the live database. All best-effort: a backup never blocks the UI.
+        snapshots.maybe_snapshot(self._repo)
+        self._snapshot_timer = QTimer(self)
+        self._snapshot_timer.setInterval(
+            snapshots.SNAPSHOT_INTERVAL_MIN * 60 * 1000
+        )
+        self._snapshot_timer.timeout.connect(self._take_snapshot)
+        self._snapshot_timer.start()
+
+    def _take_snapshot(self) -> None:
+        """Periodic in-session backup (ADR-057). Reads ``self._repo`` fresh so
+        it follows the live file across a File ▸ Open swap. Silent when nothing
+        has changed since the last snapshot."""
+        path = snapshots.maybe_snapshot(self._repo)
+        if path is not None:
+            self.statusBar().showMessage(f"Backed up to {path.name}", 3000)
+
+    def closeEvent(self, event) -> None:
+        """Clean shutdown (ADR-057): take a final backup, fold the WAL into the
+        main file so the single ``.mfl`` is self-contained, then close the
+        connection. Every step is best-effort — a backup or checkpoint failure
+        must never trap the user in the app."""
+        self._snapshot_timer.stop()
+        snapshots.maybe_snapshot(self._repo)
+        self._repo.checkpoint()
+        self._repo.close()
+        super().closeEvent(event)
 
     # ── sidebar plumbing ──
 
@@ -1699,6 +1733,10 @@ class RegisterWindow(QMainWindow):
         self._reload_sidebar(select_iri=None)
         self._populate_category_combo()
         self._update_window_title()
+        # Leave the file we're closing self-contained + backed up (ADR-057),
+        # the same way closeEvent treats the live file on quit.
+        snapshots.maybe_snapshot(old_repo)
+        old_repo.checkpoint()
         old_repo.close()
         # Re-run the auto-post sweep against the newly-opened DB. Schedules
         # are per-file, so swapping files means a different set of due
@@ -2576,7 +2614,13 @@ class RegisterWindow(QMainWindow):
             existing.raise_()
             existing.activateWindow()
             return
-        win = BudgetWindow(self._repo, parent=self)
+        # parent=None (NOT self): the budget window opens app-modal dialogs
+        # (Setup, chooser). On macOS a *child* window is hidden by the OS while
+        # its parent isn't the key window — so when one of those dialogs takes
+        # key, the register loses key and macOS hid the budget window (no Qt
+        # close/destroy — just a vanish). As an independent top-level window it
+        # stays visible behind an app-modal dialog. (ADR-058 close-on-save bug.)
+        win = BudgetWindow(self._repo)
         win.setAttribute(Qt.WA_DeleteOnClose)
         win.destroyed.connect(self._on_budget_closed)
         self._budget_win = win

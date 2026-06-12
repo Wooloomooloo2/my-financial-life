@@ -1,595 +1,754 @@
-"""The Budget screen — non-modal main window opened from Budget ▸ Open….
+"""The Budget screen (ADR-058) — the 12-month editable matrix.
 
-Layout (top-down):
+A non-modal main window opened from Budget ▸ Open…. Layout (top-down):
 
-- Header strip: budget name + period (prev/next) + Setup… button
-- Cash-on-hand reality-check badge (sum of in-perimeter account balances)
-- Four-tile Simplifi summary strip: Income after bills & saving / Planned
-  spending / Other spending / Available
-- Per-category cards grouped by role: Income / Bills & saving /
-  Discretionary; each card has a coloured progress bar plus left /
-  spent / txn-count line and a cadence subtitle when the budget is set
-  on a non-monthly cadence.
+- **Header strip:** budget picker (New / Duplicate / Rename / Delete), the
+  period, and Setup… / Period… verbs, plus the soft Unallocated indicator
+  (pool − assigned this month) per ADR-058 D2.
+- **Matrix:** a `QTableView` over `BudgetMatrixModel`. Rows are the budgeted
+  envelopes grouped into Income / Expenses / Transfers sections, each shown as
+  three lines — **Budget / Actual / Diff** (principle 8) — across 12 month
+  columns. Each section carries a synthetic **Unbudgeted** row (principle 9)
+  and a subtotal. **Budget cells are editable** (principle 10): committing a
+  value offers copy-forward (just this month / this + later / all months) per
+  ADR-058 D1, then writes atomically and reloads.
 
-Refreshes on `WindowActivate` so flipping back from the register after
-an edit reflects the new actuals. The owning RegisterWindow can also
-call ``reload()`` directly after a known-relevant mutation.
+Refreshes on `WindowActivate` so flipping back from the register reflects new
+actuals. Everything reads from `budget_calc.compute_matrix` — the single source
+of budget truth.
 """
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, QTimer
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QFrame,
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
-    QProgressBar,
+    QMessageBox,
     QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QStatusBar,
+    QSpinBox,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
 
-from mfl_desktop.budget_calc import (
-    BudgetCardData,
-    BudgetSummary,
-    cadence_period_containing,
-    calendar_month_period,
-    compute_budget_view,
-    compute_burn_down,
-    compute_summary_breakdown,
-    nearest_budgeted_ancestor,
-)
+from mfl_desktop import budget_calc as bc
 from mfl_desktop.db.repository import Budget, Repository
+from mfl_desktop.ui.budget_drilldown_window import BudgetDrillDownWindow
 from mfl_desktop.ui.budget_setup_dialog import BudgetSetupDialog
-from mfl_desktop.ui.burn_down_chart import BurnDownChart
-from mfl_desktop.ui.proportional_bar import BarSegment, ProportionalBar
 
-
-_MONTH_NAMES = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+_MONTH_ABBR = [
+    "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ]
 
-_ROLE_HEADERS = [
-    ("income",        "Income"),
-    ("bills",         "Bills"),
-    ("saving",        "Saving"),
-    ("discretionary", "Discretionary"),
-]
+# Row kinds in the flattened model.
+_SECTION = "section"
+_METRIC = "metric"        # one of budget / actual / diff for a line
+_SUBTOTAL = "subtotal"
 
-_CADENCE_LABELS = {
-    "weekly":    "weekly",
-    "biweekly":  "bi-weekly",
-    "monthly":   "monthly",
-    "quarterly": "quarterly",
-    "annual":    "annually",
-}
+_OVER = QColor("#b91c1c")     # red-700 — over budget / deficit
+_UNDER = QColor("#15803d")    # green-700 — under budget / surplus
+_SECTION_BG = QColor("#e2e8f0")   # slate-200
+_SUBTOTAL_BG = QColor("#f1f5f9")  # slate-100
+_TODAY_BG = QColor("#eff6ff")     # blue-50 — today's month column
+_ROLLOVER_BG = QColor("#fef9c3")  # amber-100 — a Budget cell with carried-in rollover
+_MUTED = QColor("#64748b")        # slate-500
+_ZERO_D = Decimal("0.00")
+
+
+def _fmt(value: Decimal) -> str:
+    """'1,234.56' / '-1,234.56'. Currency symbol lives in the header, not in
+    every cell, to keep the grid scannable."""
+    return f"{value:,.2f}"
+
+
+def _fmt_month(month: str) -> str:
+    y, m = int(month[:4]), int(month[5:7])
+    return f"{_MONTH_ABBR[m]} {y % 100:02d}"
+
+
+# ── flattened row spec ─────────────────────────────────────────────────────
+
+
+class _Row:
+    __slots__ = ("kind", "section_idx", "matrix_row", "metric")
+
+    def __init__(self, kind, section_idx, matrix_row=None, metric=None):
+        self.kind = kind
+        self.section_idx = section_idx
+        self.matrix_row = matrix_row   # bc.MatrixRow or bc.MatrixSection
+        self.metric = metric           # 'budget' | 'actual' | 'diff'
+
+
+class BudgetMatrixModel(QAbstractTableModel):
+    """Flattens a BudgetMatrix into a (Budget/Actual/Diff)-per-line table.
+
+    Column 0 is the row label; columns 1..N are the budget's months. Only
+    Budget metric cells on real (non-Unbudgeted) lines are editable; committing
+    one routes through ``edit_cb(line_id, month, amount) -> bool``.
+    """
+
+    def __init__(self, matrix: bc.BudgetMatrix, edit_cb) -> None:
+        super().__init__()
+        self._m = matrix
+        self._edit_cb = edit_cb
+        self._rows: list[_Row] = []
+        self._today_col: Optional[int] = None
+        self._rebuild_rows()
+
+    def set_matrix(self, matrix: bc.BudgetMatrix) -> None:
+        """Replace the model's data **in place** (one persistent model, reset
+        around the swap). Reusing the model rather than ``setModel`` with a
+        fresh one avoids orphaning an open inline editor — which Qt flags as
+        'commitData called with an editor that does not belong to this view'
+        and which, mid-event-handler on macOS, can tear the window down."""
+        self.beginResetModel()
+        self._m = matrix
+        self._rebuild_rows()
+        self.endResetModel()
+
+    def _rebuild_rows(self) -> None:
+        self._rows = []
+        for si, section in enumerate(self._m.sections):
+            self._rows.append(_Row(_SECTION, si, section))
+            for mr in section.rows:
+                for metric in ("budget", "actual", "diff"):
+                    self._rows.append(_Row(_METRIC, si, mr, metric))
+            # The subtotal is only meaningful when more than one row feeds it.
+            # A section with a single row (e.g. only an Unbudgeted row, or one
+            # budgeted line) would just duplicate that row and read as
+            # double-counting — so skip it.
+            if len(section.rows) >= 2:
+                for metric in ("budget", "actual", "diff"):
+                    self._rows.append(_Row(_SUBTOTAL, si, section, metric))
+        if self._m.today_month in self._m.months:
+            self._today_col = self._m.months.index(self._m.today_month) + 1
+
+    # ── shape ──
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else 1 + len(self._m.months)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation != Qt.Horizontal or role != Qt.DisplayRole:
+            return None
+        if section == 0:
+            return "Category"
+        return _fmt_month(self._m.months[section - 1])
+
+    # ── data ──
+
+    def _cell(self, mr, metric, month_idx) -> Decimal:
+        # A section's per-month cells live on .subtotal; a line's on .cells.
+        cells = mr.subtotal if isinstance(mr, bc.MatrixSection) else mr.cells
+        c = cells[month_idx]
+        if metric == "budget":
+            return c.allocation
+        if metric == "actual":
+            return c.actual
+        return c.diff
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        col = index.column()
+
+        # Section header row.
+        if row.kind == _SECTION:
+            if role == Qt.DisplayRole and col == 0:
+                return row.matrix_row.title
+            if role == Qt.BackgroundRole:
+                return _SECTION_BG
+            if role == Qt.FontRole and col == 0:
+                f = QFont()
+                f.setBold(True)
+                return f
+            return None
+
+        is_sub = row.kind == _SUBTOTAL
+        mr = row.matrix_row
+        metric = row.metric
+
+        # Label column.
+        if col == 0:
+            if role == Qt.DisplayRole:
+                if is_sub:
+                    return {"budget": f"{mr.title} — Budget",
+                            "actual": "  Actual",
+                            "diff": "  Diff"}[metric]
+                if metric == "budget":
+                    return mr.label
+                return "  Actual" if metric == "actual" else "  Diff"
+            if role == Qt.ForegroundRole and metric != "budget":
+                return _MUTED
+            if role == Qt.BackgroundRole and is_sub:
+                return _SUBTOTAL_BG
+            if role == Qt.FontRole and (is_sub or metric == "budget"):
+                f = QFont()
+                f.setBold(metric == "budget" and not mr.is_unbudgeted
+                          if not is_sub else True)
+                return f
+            return None
+
+        month_idx = col - 1
+        value = self._cell(mr, metric, month_idx)
+
+        # The Unbudgeted row has no budget — show a dash, not an editable 0.
+        if (
+            not is_sub and metric == "budget" and mr.is_unbudgeted
+        ):
+            if role == Qt.DisplayRole:
+                return "—"
+            if role == Qt.TextAlignmentRole:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            if role == Qt.ForegroundRole:
+                return _MUTED
+            return None
+
+        # Rolled-over carry on a Budget cell: annotate it so Budget / Actual /
+        # Diff visibly reconcile (Diff uses available = allocation + carry).
+        # Without this a positive carry makes the Diff look wrong-by-a-bug.
+        carry = (
+            mr.cells[month_idx].carry_in
+            if metric == "budget" and not is_sub else _ZERO_D
+        )
+
+        if role == Qt.DisplayRole:
+            if metric == "diff" and value > 0:
+                return f"+{_fmt(value)}"
+            if carry != 0:
+                return f"{_fmt(value)}  ({carry:+,.2f})"
+            return _fmt(value)
+        if role == Qt.EditRole and self._editable(row, col):
+            return _fmt(value)
+        if role == Qt.ToolTipRole and carry != 0:
+            avail = mr.cells[month_idx].available
+            if carry > 0:
+                return (
+                    f"Budgeted {_fmt(value)} + {_fmt(carry)} rolled over "
+                    f"= {_fmt(avail)} available this month"
+                )
+            return (
+                f"Budgeted {_fmt(value)} − {_fmt(abs(carry))} overspend "
+                f"carried in = {_fmt(avail)} available this month"
+            )
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role == Qt.ForegroundRole and metric == "diff":
+            if value < 0:
+                return _OVER
+            if value > 0:
+                return _UNDER
+        if role == Qt.BackgroundRole:
+            if carry != 0:
+                return _ROLLOVER_BG
+            if is_sub:
+                return _SUBTOTAL_BG
+            if col == self._today_col:
+                return _TODAY_BG
+        if role == Qt.FontRole and is_sub:
+            f = QFont()
+            f.setBold(True)
+            return f
+        return None
+
+    # ── editing ──
+
+    def _editable(self, row: _Row, col: int) -> bool:
+        return (
+            row.kind == _METRIC
+            and row.metric == "budget"
+            and not row.matrix_row.is_unbudgeted
+            and col >= 1
+        )
+
+    def flags(self, index):
+        base = super().flags(index)
+        if index.isValid() and self._editable(
+            self._rows[index.row()], index.column()
+        ):
+            return base | Qt.ItemIsEditable
+        return base
+
+    def setData(self, index, value, role=Qt.EditRole) -> bool:
+        if role != Qt.EditRole or not index.isValid():
+            return False
+        row = self._rows[index.row()]
+        if not self._editable(row, index.column()):
+            return False
+        try:
+            amount = Decimal(str(value).replace(",", "").strip() or "0")
+        except (InvalidOperation, ValueError):
+            return False
+        if amount < 0:
+            return False
+        month = self._m.months[index.column() - 1]
+        return bool(self._edit_cb(row.matrix_row.line_id, month, amount))
 
 
 class BudgetWindow(QMainWindow):
+    """The budget matrix window. Singleton per RegisterWindow."""
+
     def __init__(self, repo: Repository, parent=None) -> None:
         super().__init__(parent)
         self._repo = repo
-        self._budget: Budget = repo.get_or_create_default_budget()
-
-        today = date.today()
-        self._period_year = today.year
-        self._period_month = today.month
-
-        self.resize(1080, 760)
         self.setWindowTitle("Budget")
-        self.setStatusBar(QStatusBar(self))
+        self.resize(1180, 720)
 
-        # ── header strip ──
-        self._budget_name_label = QLabel()
-        self._budget_name_label.setStyleSheet("font-size: 16pt; font-weight: 600;")
-        self._period_label = QLabel()
-        self._period_label.setStyleSheet("font-size: 14pt; color: #444;")
+        self._budget: Optional[Budget] = None
+        self._matrix: Optional[bc.BudgetMatrix] = None
+        self._drill_wins: list = []
+        self._rendering = False
 
-        prev_btn = QPushButton("◀")
-        next_btn = QPushButton("▶")
-        prev_btn.setFixedWidth(36)
-        next_btn.setFixedWidth(36)
-        prev_btn.clicked.connect(lambda: self._shift_period(-1))
-        next_btn.clicked.connect(lambda: self._shift_period(+1))
-
-        setup_btn = QPushButton("Setup…")
-        setup_btn.clicked.connect(self._on_setup)
-
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(16, 12, 16, 4)
-        header_row.addWidget(self._budget_name_label)
-        header_row.addSpacing(20)
-        header_row.addWidget(prev_btn)
-        header_row.addWidget(self._period_label)
-        header_row.addWidget(next_btn)
-        header_row.addStretch(1)
-        header_row.addWidget(setup_btn)
-
-        # ── cash badge ──
-        self._cash_label = QLabel()
-        self._cash_label.setStyleSheet("color: #555; padding-left: 16px;")
-
-        # ── summary tiles ──
-        self._tile_income = _SummaryTile("Income after bills & saving", positive_is_good=True)
-        self._tile_planned = _SummaryTile("Planned spending", positive_is_good=False)
-        self._tile_other = _SummaryTile("Other spending", positive_is_good=False)
-        self._tile_available = _SummaryTile("Available", positive_is_good=True)
-
-        tile_row = QHBoxLayout()
-        tile_row.setContentsMargins(12, 4, 12, 4)
-        tile_row.setSpacing(8)
-        tile_row.addWidget(self._tile_income)
-        tile_row.addWidget(self._tile_planned)
-        tile_row.addWidget(self._tile_other)
-        tile_row.addWidget(self._tile_available)
-
-        # ── proportional summary bar ──
-        self._bar_label = QLabel("Spending plan")
-        self._bar_label.setStyleSheet("color: #555; padding-left: 16px;")
-        self._summary_bar = ProportionalBar()
-        bar_holder = QWidget()
-        bar_layout = QVBoxLayout(bar_holder)
-        bar_layout.setContentsMargins(12, 4, 12, 4)
-        bar_layout.setSpacing(2)
-        bar_layout.addWidget(self._bar_label)
-        bar_layout.addWidget(self._summary_bar)
-
-        # ── burn-down chart ──
-        self._burn_down = BurnDownChart()
-        burn_holder = QWidget()
-        burn_layout = QVBoxLayout(burn_holder)
-        burn_layout.setContentsMargins(12, 4, 12, 4)
-        burn_layout.addWidget(self._burn_down)
-
-        # ── cards area ──
-        self._cards_holder = QWidget()
-        self._cards_layout = QVBoxLayout(self._cards_holder)
-        self._cards_layout.setContentsMargins(16, 8, 16, 16)
-        self._cards_layout.setSpacing(12)
-        self._cards_layout.addStretch(1)  # pushes content up when sparse
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._cards_holder)
-        scroll.setFrameShape(QFrame.NoFrame)
-
-        # ── compose ──
         central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addLayout(header_row)
-        layout.addWidget(self._cash_label)
-        layout.addLayout(tile_row)
-        layout.addWidget(bar_holder)
-        layout.addWidget(burn_holder)
-        layout.addWidget(scroll, stretch=1)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(10, 8, 10, 10)
+
+        # Header: budget picker + verbs.
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Budget:"))
+        self._picker = QComboBox()
+        self._picker.setMinimumWidth(200)
+        self._picker.currentIndexChanged.connect(self._on_pick_budget)
+        header.addWidget(self._picker)
+        for label, slot in (
+            ("New…", self._on_new),
+            ("Duplicate…", self._on_duplicate),
+            ("Rename…", self._on_rename),
+            ("Delete", self._on_delete),
+            ("Period…", self._on_period),
+            ("Set up…", self._on_setup),
+        ):
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            header.addWidget(b)
+        header.addStretch(1)
+        root.addLayout(header)
+
+        # Soft Unallocated indicator + missing-rate banner.
+        self._info_label = QLabel("")
+        self._info_label.setTextFormat(Qt.RichText)
+        root.addWidget(self._info_label)
+
+        # The matrix.
+        self._table = QTableView()
+        self._table.setAlternatingRowColors(False)
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Interactive
+        )
+        self._table.verticalHeader().setVisible(False)
+        # Double-click an Actual cell to drill into its transactions (ADR-058).
+        self._table.doubleClicked.connect(self._on_cell_double_clicked)
+        root.addWidget(self._table, stretch=1)
+
+        self._empty_label = QLabel(
+            "No budget yet. Click New… to create one, then Set up… to choose "
+            "accounts and categories."
+        )
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._empty_label.setStyleSheet("color: #64748b;")
+        root.addWidget(self._empty_label)
+
         self.setCentralWidget(central)
+        self._reload_budget_list(select_id=None)
 
-        self.reload()
+    # ── budget list / picker ──
 
-    # ── period navigation ──
-
-    def _shift_period(self, direction: int) -> None:
-        m = self._period_month + direction
-        y = self._period_year
-        if m < 1:
-            m = 12
-            y -= 1
-        elif m > 12:
-            m = 1
-            y += 1
-        self._period_year = y
-        self._period_month = m
-        self.reload()
-
-    # ── refresh ──
-
-    def event(self, ev):
-        # Repaint with fresh data when the user clicks back from the
-        # register; cheap enough at MFL's scale that re-querying on every
-        # activation is fine.
-        if ev.type() == QEvent.WindowActivate:
-            self.reload()
-        return super().event(ev)
-
-    def reload(self) -> None:
-        self._budget = self._repo.get_or_create_default_budget()
-        period_start, period_end = calendar_month_period(
-            self._period_year, self._period_month,
-        )
-        budget_cats = self._repo.list_budget_categories(self._budget.id)
-        perimeter_txns = self._repo.list_perimeter_txns(
-            self._budget.id, period_start, period_end,
-        )
-        cash = self._repo.compute_perimeter_cash_on_hand(self._budget.id)
-        parent_map = self._repo.category_parent_map()
-
-        # Round-C additions: full-cadence-period actuals (so each non-monthly
-        # card can show "this year: £X of £Y" in its subtitle), and the sum
-        # of un-posted scheduled outflows due in the screen period, bucketed
-        # per card. Both are optional inputs to compute_budget_view; passing
-        # empty dicts is equivalent to round-B behaviour.
-        today_iso = date.today().isoformat()
-        cadence_actuals, cadence_labels = self._compute_cadence_period_actuals(
-            budget_cats, parent_map, today_iso,
-        )
-        scheduled_due = self._compute_scheduled_due_per_card(
-            budget_cats, parent_map, period_start, period_end,
-        )
-
-        summary, cards = compute_budget_view(
-            budget_categories=budget_cats,
-            perimeter_txns=perimeter_txns,
-            parent_map=parent_map,
-            cash_on_hand=cash,
-            period_start=period_start,
-            period_end=period_end,
-            cadence_period_actuals_by_category=cadence_actuals,
-            cadence_period_label_by_category=cadence_labels,
-            scheduled_due_by_category=scheduled_due,
-        )
-
-        # Header
-        self._budget_name_label.setText(self._budget.name)
-        self._period_label.setText(
-            f"{_MONTH_NAMES[self._period_month - 1]} {self._period_year}"
-        )
-        perimeter_count = len(self._repo.list_budget_account_ids(self._budget.id))
-        if perimeter_count == 0:
-            self._cash_label.setText(
-                "No accounts in this budget yet — click Setup… to choose."
-            )
-        else:
-            self._cash_label.setText(
-                f"Cash on hand: {summary.cash_on_hand:,.2f}  "
-                f"across {perimeter_count} "
-                f"account{'s' if perimeter_count != 1 else ''}"
-            )
-
-        # Tiles
-        self._tile_income.set_value(summary.income_after_bills_and_saving)
-        self._tile_planned.set_value(summary.planned_spending)
-        self._tile_other.set_value(summary.other_spending)
-        self._tile_available.set_value(summary.available)
-
-        # Proportional summary bar
-        breakdown = compute_summary_breakdown(summary)
-        self._summary_bar.set_segments([
-            BarSegment("Bills",            breakdown.bills,            QColor("#c2410c")),
-            BarSegment("Saving",           breakdown.saving,           QColor("#7c3aed")),
-            BarSegment("Planned spending", breakdown.planned_spending, QColor("#2563eb")),
-            BarSegment("Other spending",   breakdown.other_spending,   QColor("#6b7280")),
-            BarSegment("Available",        breakdown.available,        QColor("#16a34a")),
-        ])
-        self._update_bar_label(breakdown)
-
-        # Burn-down chart
-        burn = compute_burn_down(
-            perimeter_txns=perimeter_txns,
-            summary=summary,
-            period_start=period_start,
-            period_end=period_end,
-        )
-        self._burn_down.set_data(burn)
-
-        # Cards
-        self._rebuild_cards(cards, len(budget_cats) > 0)
-
-    def _update_bar_label(self, breakdown) -> None:
-        """Short legend line under the proportional bar — colour-keyed
-        chips so the user can read the segments without hovering."""
-        chip = lambda name, value, colour: (
-            f"<span style='color:{colour};'>■</span> "
-            f"{name} {value:,.2f}"
-        )
-        parts = [
-            chip("Bills",   breakdown.bills,            "#c2410c"),
-            chip("Saving",  breakdown.saving,           "#7c3aed"),
-            chip("Planned", breakdown.planned_spending, "#2563eb"),
-            chip("Other",   breakdown.other_spending,   "#6b7280"),
-            chip("Avail.",  breakdown.available,        "#16a34a"),
-        ]
-        self._bar_label.setText(
-            "Spending plan: " + "  ·  ".join(parts)
-        )
-
-    # ── round-C helpers ──
-
-    def _compute_cadence_period_actuals(
-        self,
-        budget_cats,
-        parent_map,
-        today_iso: str,
-    ) -> tuple[dict[int, Decimal], dict[int, str]]:
-        """For each unique non-monthly cadence among the budgeted categories,
-        run one perimeter-txn query over the cadence's calendar period
-        containing today, then bucket-by-nearest-budgeted-ancestor. Each
-        cadence's results contribute only to its own cards' subtitle —
-        a "Holidays £1,800/year" card shows the year-to-date actuals; a
-        "Pocket money £30/week" card shows this week's actuals.
-
-        Monthly cadence is skipped because the screen's period IS the
-        calendar month, so the per-card actuals are already correct."""
-        budgeted_ids = {bc.category_id for bc in budget_cats}
-        actuals: dict[int, Decimal] = {}
-        labels: dict[int, str] = {}
-
-        by_cadence: dict[str, list[int]] = {}
-        for bc in budget_cats:
-            if bc.cadence == "monthly":
-                continue
-            by_cadence.setdefault(bc.cadence, []).append(bc.category_id)
-
-        for cadence, cat_ids in by_cadence.items():
-            start, end, label = cadence_period_containing(cadence, today_iso)
-            cadence_txns = self._repo.list_perimeter_txns(
-                self._budget.id, start, end,
-            )
-            bucket_totals: dict[int, Decimal] = {}
-            for txn in cadence_txns:
-                if txn.amount >= 0:
-                    # Income / refund flows aren't surfaced in the
-                    # per-card spending subtitle — same magnitude
-                    # convention as the screen-period card.
-                    continue
-                bucket = nearest_budgeted_ancestor(
-                    txn.category_id, parent_map, budgeted_ids,
-                )
-                if bucket is None:
-                    continue
-                bucket_totals[bucket] = (
-                    bucket_totals.get(bucket, Decimal("0")) + (-txn.amount)
-                )
-            for cid in cat_ids:
-                actuals[cid] = bucket_totals.get(cid, Decimal("0"))
-                labels[cid] = label
-
-        return actuals, labels
-
-    def _compute_scheduled_due_per_card(
-        self,
-        budget_cats,
-        parent_map,
-        period_start: str,
-        period_end: str,
-    ) -> dict[int, Decimal]:
-        """Sum of estimated outflow magnitudes from un-posted schedules
-        due inside the screen period, bucketed against the nearest
-        budgeted ancestor. Overdue schedules from prior periods are
-        excluded — they belong to a different month's budget."""
-        budgeted_ids = {bc.category_id for bc in budget_cats}
-        # Query all active schedules due through the period end, then
-        # filter in Python to those with next_due_date >= period_start.
-        candidates = self._repo.list_perimeter_schedules_due_through(
-            self._budget.id, period_end,
-        )
-        out: dict[int, Decimal] = {}
-        for sched in candidates:
-            if sched.next_due_date < period_start:
-                continue
-            if sched.estimated_amount >= 0:
-                # Income schedules don't contribute to the "expected
-                # outflow" badge — keeping the card subtitle focused
-                # on the spending question.
-                continue
-            bucket = nearest_budgeted_ancestor(
-                sched.category_id, parent_map, budgeted_ids,
-            )
-            if bucket is None:
-                continue
-            out[bucket] = (
-                out.get(bucket, Decimal("0")) + abs(sched.estimated_amount)
-            )
-        return out
-
-    def _rebuild_cards(
-        self,
-        cards: list[BudgetCardData],
-        has_any_budget: bool,
-    ) -> None:
-        # Clear existing children (everything except the trailing stretch).
-        while self._cards_layout.count() > 1:
-            item = self._cards_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-
-        if not has_any_budget:
-            empty = QLabel(
-                "No budget categories yet.\n\nClick Setup… to add categories "
-                "and set monthly / weekly / annual targets."
-            )
-            empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet("color: #888; padding: 40px;")
-            self._cards_layout.insertWidget(self._cards_layout.count() - 1, empty)
+    def _reload_budget_list(self, select_id: Optional[int]) -> None:
+        budgets = self._repo.list_budgets()
+        self._picker.blockSignals(True)
+        self._picker.clear()
+        for b in budgets:
+            self._picker.addItem(b.name, b.id)
+        self._picker.blockSignals(False)
+        if not budgets:
+            self._budget = None
+            self._render()
             return
+        idx = 0
+        if select_id is not None:
+            for i, b in enumerate(budgets):
+                if b.id == select_id:
+                    idx = i
+                    break
+        self._picker.setCurrentIndex(idx)
+        self._on_pick_budget()
 
-        # Group cards: income kind first, then by role.
-        groups: dict[str, list[BudgetCardData]] = {
-            key: [] for key, _ in _ROLE_HEADERS
-        }
-        for c in cards:
-            if c.kind == "income":
-                groups["income"].append(c)
-            elif c.role == "bills":
-                groups["bills"].append(c)
-            elif c.role == "saving":
-                groups["saving"].append(c)
-            else:
-                groups["discretionary"].append(c)
+    def _on_pick_budget(self) -> None:
+        bid = self._picker.currentData()
+        self._budget = self._repo.get_budget(bid) if bid is not None else None
+        self._render()
 
-        insert_at = self._cards_layout.count() - 1
-        for key, header_text in _ROLE_HEADERS:
-            group_cards = groups[key]
-            if not group_cards:
-                continue
-            header = QLabel(header_text)
-            header.setStyleSheet(
-                "font-size: 12pt; font-weight: 600; color: #333; "
-                "padding-top: 8px; padding-bottom: 4px;"
+    # ── render ──
+
+    def _display_ccy(self) -> str:
+        if self._budget and self._budget.currency:
+            return self._budget.currency
+        return self._repo.get_setting("base_currency") or "GBP"
+
+    def _render(self) -> None:
+        # Re-entrancy guard: building the model swaps the table's model, and a
+        # second _render() interleaved with the first (e.g. a WindowActivate
+        # arriving mid-rebuild) would free the model under construction.
+        if self._rendering:
+            return
+        self._rendering = True
+        try:
+            self._render_inner()
+        except Exception:  # noqa: BLE001
+            # A refresh must NEVER crash — it's called from button slots, the
+            # activate path, drill-downs, etc. An exception escaping any of
+            # those tears the window down on macOS. Log it (so the real cause
+            # is visible) and keep the window alive with its last good view.
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._rendering = False
+
+    def _render_inner(self) -> None:
+        # The repo is shared with the register window; on app shutdown its
+        # closeEvent closes the connection (ADR-057) while a queued
+        # WindowActivate can still fire a refresh. Operating on a closed
+        # connection raises, and an exception escaping a Qt event override can
+        # tear the window down — so bail out cleanly if it's gone.
+        if not self._repo.is_open():
+            return
+        if self._budget is None:
+            self._table.setVisible(False)
+            self._empty_label.setVisible(True)
+            self._info_label.setText("")
+            return
+        self._table.setVisible(True)
+        self._empty_label.setVisible(False)
+
+        budget = self._budget
+        months = budget.months()
+        ccy = self._display_ccy()
+        today = date.today()
+        today_month = today.strftime("%Y-%m")
+        lines = self._repo.list_budget_lines(budget.id)
+        allocations = self._repo.list_budget_allocations(budget.id)
+        ptxns = self._repo.list_perimeter_txns(
+            budget.id, months[0] + "-01", months[-1] + "-31",
+        )
+        pool, excluded = self._repo.compute_perimeter_pool(
+            budget.id, display_ccy=ccy, on_date=today.isoformat(),
+        )
+        matrix = bc.compute_matrix(
+            budget=budget, lines=lines, allocations=allocations,
+            perimeter_txns=ptxns, parent_map=self._repo.category_parent_map(),
+            kind_map=self._repo.category_kind_map(), pool=pool,
+            excluded_accounts=excluded, display_ccy=ccy,
+            today_month=today_month,
+        )
+
+        self._matrix = matrix
+        model = self._table.model()
+        if isinstance(model, BudgetMatrixModel):
+            # Update the existing model in place — no model swap under any open
+            # editor (see BudgetMatrixModel.set_matrix).
+            model.set_matrix(matrix)
+        else:
+            model = BudgetMatrixModel(matrix, self._on_edit_allocation)
+            self._table.setModel(model)
+        self._table.setColumnWidth(0, 240)
+        for c in range(1, model.columnCount()):
+            self._table.setColumnWidth(c, 86)
+
+        # Soft Unallocated indicator for the focused (today's) month, else first.
+        focus_idx = months.index(today_month) if today_month in months else 0
+        assigned = matrix.assigned_by_month[focus_idx]
+        unalloc = pool - assigned
+        focus_label = _fmt_month(months[focus_idx])
+        colour = "#b91c1c" if unalloc < 0 else "#15803d"
+        info = (
+            f"Pool: <b>{ccy} {_fmt(pool)}</b> &nbsp;·&nbsp; "
+            f"Assigned ({focus_label}): <b>{_fmt(assigned)}</b> &nbsp;·&nbsp; "
+            f"Unallocated: <b style='color:{colour}'>{_fmt(unalloc)}</b>"
+        )
+        if excluded:
+            info += (
+                f" &nbsp;—&nbsp; <span style='color:#b45309'>"
+                f"{len(excluded)} account(s) excluded (no rate to {ccy}): "
+                f"{', '.join(excluded)}</span>"
             )
-            self._cards_layout.insertWidget(insert_at, header)
-            insert_at += 1
-            group_cards.sort(key=lambda c: c.label.lower())
-            for c in group_cards:
-                self._cards_layout.insertWidget(insert_at, _CategoryCard(c))
-                insert_at += 1
+        self._info_label.setText(info)
+        self.setWindowTitle(f"Budget — {budget.name}")
 
-    # ── setup ──
+    # ── edit (copy-forward) ──
+
+    def _on_edit_allocation(
+        self, line_id: int, month: str, amount: Decimal,
+    ) -> bool:
+        # parent=None on the prompt too — same cascade-close avoidance (ADR-058).
+        scope = _ask_copy_forward_scope(None, _fmt_month(month))
+        if scope is None:
+            return False
+        try:
+            self._repo.set_line_allocation(line_id, month, amount, scope=scope)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not set amount", str(e))
+            return False
+        self._render()
+        return True
+
+    # ── drill-down (double-click an Actual) ──
+
+    def _on_cell_double_clicked(self, index) -> None:
+        """Double-click an Actual cell → the transactions behind it (ADR-058).
+        Budget cells edit; Actual/Diff are non-editable, so a double-click
+        there is free to drill. Works on line Actuals, the Unbudgeted row, and
+        a section's subtotal Actual."""
+        if self._budget is None or self._matrix is None:
+            return
+        model = self._table.model()
+        if model is None or not index.isValid() or index.column() < 1:
+            return
+        row = model._rows[index.row()]
+        if row.metric != "actual":
+            return
+        month = self._matrix.months[index.column() - 1]
+        if row.kind == _SUBTOTAL:
+            section = row.matrix_row  # bc.MatrixSection
+            self._drill("section", None, section.kind, month,
+                        f"{section.title} — all")
+        else:
+            mr = row.matrix_row  # bc.MatrixRow
+            if mr.is_unbudgeted:
+                self._drill("unbudgeted", None, mr.kind, month,
+                            f"Unbudgeted {mr.kind}")
+            else:
+                self._drill("line", mr.category_id, mr.kind, month, mr.label)
+
+    def _drill(
+        self, mode: str, target_cat, section_kind: str, month: str, label: str,
+    ) -> None:
+        """Recompute the exact bucketed perimeter txns for one cell and open a
+        drill-down. Mirrors `compute_matrix`'s bucketing so the list reconciles
+        with the Actual."""
+        budget = self._budget
+        ptxns = self._repo.list_perimeter_txns(
+            budget.id, f"{month}-01", f"{month}-31",
+        )
+        parent_map = self._repo.category_parent_map()
+        kind_map = self._repo.category_kind_map()
+        budgeted_ids = {
+            ln.category_id for ln in self._repo.list_budget_lines(budget.id)
+        }
+        ids: set[int] = set()
+        net = Decimal("0.00")
+        for t in ptxns:
+            bucket = bc.nearest_budgeted_ancestor(
+                t.category_id, parent_map, budgeted_ids,
+            )
+            if mode == "line":
+                keep = bucket == target_cat
+            elif mode == "unbudgeted":
+                keep = bucket is None and kind_map.get(t.category_id) == section_kind
+            else:  # section — everything in this kind, this month
+                keep = kind_map.get(t.category_id) == section_kind
+            if keep:
+                ids.add(t.id)
+                net += t.amount
+        if not ids:
+            QMessageBox.information(
+                self, "No transactions",
+                f"No transactions for {label} in {_fmt_month(month)}.",
+            )
+            return
+        win = BudgetDrillDownWindow(
+            self._repo, txn_ids=ids,
+            title=f"{label} · {_fmt_month(month)}", net=net,
+            display_ccy=self._display_ccy(), parent=self,
+        )
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.destroyed.connect(
+            lambda *_: self._drill_wins.remove(win)
+            if win in self._drill_wins else None
+        )
+        self._drill_wins.append(win)
+        win.show()
+
+    # ── budget verbs ──
+
+    def _on_new(self) -> None:
+        # parent=None on all budget-window dialogs — see _on_setup (ADR-058
+        # macOS child-modal close-cascade).
+        name, ok = QInputDialog.getText(None, "New budget", "Name:")
+        if not ok or not name.strip():
+            return
+        year, ok = QInputDialog.getInt(
+            None, "New budget", "Start year (budget runs Jan–Dec):",
+            date.today().year, 2000, 2100,
+        )
+        if not ok:
+            return
+        b = self._repo.create_budget(
+            name=name.strip(), start_month=f"{year:04d}-01", length_months=12,
+        )
+        self._reload_budget_list(select_id=b.id)
+
+    def _on_duplicate(self) -> None:
+        if self._budget is None:
+            return
+        name, ok = QInputDialog.getText(
+            None, "Duplicate budget", "New name:",
+            text=f"{self._budget.name} (scenario)",
+        )
+        if not ok or not name.strip():
+            return
+        b = self._repo.duplicate_budget(self._budget.id, name.strip())
+        self._reload_budget_list(select_id=b.id)
+
+    def _on_rename(self) -> None:
+        if self._budget is None:
+            return
+        name, ok = QInputDialog.getText(
+            None, "Rename budget", "Name:", text=self._budget.name,
+        )
+        if not ok or not name.strip():
+            return
+        self._repo.rename_budget(self._budget.id, name.strip())
+        self._reload_budget_list(select_id=self._budget.id)
+
+    def _on_delete(self) -> None:
+        if self._budget is None:
+            return
+        if QMessageBox.question(
+            None, "Delete budget",
+            f"Delete budget ‘{self._budget.name}’? This removes its accounts, "
+            f"categories, and all monthly amounts.",
+        ) != QMessageBox.Yes:
+            return
+        self._repo.delete_budget(self._budget.id)
+        self._reload_budget_list(select_id=None)
+
+    def _on_period(self) -> None:
+        if self._budget is None:
+            return
+        dlg = _PeriodDialog(self._budget, parent=None)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._repo.set_budget_period(
+            self._budget.id, start_month=dlg.start_month(),
+            length_months=dlg.length(),
+        )
+        self._budget = self._repo.get_budget(self._budget.id)
+        self._render()
 
     def _on_setup(self) -> None:
-        dialog = BudgetSetupDialog(self._repo, self._budget, parent=self)
-        if dialog.exec() == BudgetSetupDialog.Accepted:
-            self.reload()
-            self.statusBar().showMessage("Budget updated.", 4000)
+        if self._budget is None:
+            return
+        # parent=None (not self): a modal dialog parented to this window makes
+        # macOS cascade a spurious Close to the parent when the dialog (or its
+        # nested chooser) closes — vanishing the budget window (ADR-058). A
+        # standalone app-modal dialog has no parent to cascade to.
+        dlg = BudgetSetupDialog(self._repo, self._budget, parent=None)
+        if dlg.exec() == QDialog.Accepted:
+            self._render()
+
+    # ── refresh on activation ──
+
+    def event(self, ev):  # noqa: N802 (Qt override)
+        if (
+            ev.type() == QEvent.WindowActivate
+            and self._budget is not None
+            and QApplication.activeModalWidget() is None
+        ):
+            # Defer the refresh to the next event-loop turn — never rebuild the
+            # model *inside* the activate event (swapping/resetting a model
+            # mid-event-handling, with an editor possibly open, is what tore the
+            # window down on macOS). singleShot(0) runs it cleanly afterwards.
+            QTimer.singleShot(0, self._refresh_on_activate)
+        return super().event(ev)
+
+    def _refresh_on_activate(self) -> None:
+        # Re-fetch in case the budget was edited elsewhere. Belt-and-braces: an
+        # exception must never escape (it's a queued callback now, not an event
+        # override, but a crash here is still bad). Skip if the window is gone.
+        try:
+            if self._budget is not None and self._repo.is_open():
+                self._render()
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
 
 
-class _SummaryTile(QFrame):
-    """One of the four top-strip tiles. Value colour flips depending on
-    sign + whether positive is good for this tile (Available wants to be
-    big and green; Planned/Other spending wants to be small)."""
+def _ask_copy_forward_scope(parent, month_label: str) -> Optional[str]:
+    """Ask how far to propagate a budget edit (ADR-058 D1). Returns
+    'one' / 'forward' / 'all', or None if cancelled."""
+    box = QMessageBox(parent)
+    box.setWindowTitle("Apply budget amount")
+    box.setText(f"Apply this amount to which months?")
+    box.setInformativeText(
+        f"You edited {month_label}. Copy it forward, or keep it to this month?"
+    )
+    just = box.addButton("Just this month", QMessageBox.AcceptRole)
+    fwd = box.addButton("This + later months", QMessageBox.AcceptRole)
+    all_btn = box.addButton("All months", QMessageBox.AcceptRole)
+    box.addButton(QMessageBox.Cancel)
+    box.setDefaultButton(just)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is just:
+        return "one"
+    if clicked is fwd:
+        return "forward"
+    if clicked is all_btn:
+        return "all"
+    return None
 
-    def __init__(self, title: str, *, positive_is_good: bool) -> None:
-        super().__init__()
-        self._positive_is_good = positive_is_good
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setStyleSheet(
-            "QFrame { background: #f6f7f9; border: 1px solid #e1e3e6;"
-            "         border-radius: 8px; }"
+
+class _PeriodDialog(QDialog):
+    """Edit a budget's period — start month + length in months."""
+
+    def __init__(self, budget: Budget, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Budget period")
+        from PySide6.QtWidgets import QFormLayout
+
+        form = QFormLayout(self)
+        self._year = QSpinBox()
+        self._year.setRange(2000, 2100)
+        self._year.setValue(int(budget.start_month[:4]))
+        form.addRow("Start year:", self._year)
+
+        self._month = QComboBox()
+        for i in range(1, 13):
+            self._month.addItem(_MONTH_ABBR[i], i)
+        self._month.setCurrentIndex(int(budget.start_month[5:7]) - 1)
+        form.addRow("Start month:", self._month)
+
+        self._length = QSpinBox()
+        self._length.setRange(1, 36)
+        self._length.setValue(budget.length_months)
+        form.addRow("Length (months):", self._length)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
 
-        self._title_label = QLabel(title)
-        self._title_label.setStyleSheet("color: #555; font-size: 10pt;")
-        self._value_label = QLabel("—")
-        value_font = QFont()
-        value_font.setPointSize(18)
-        value_font.setBold(True)
-        self._value_label.setFont(value_font)
+    def start_month(self) -> str:
+        return f"{self._year.value():04d}-{self._month.currentData():02d}"
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.addWidget(self._title_label)
-        layout.addWidget(self._value_label)
-
-    def set_value(self, amount: Decimal) -> None:
-        self._value_label.setText(f"{amount:,.2f}")
-        # Colour decision: amounts at zero stay neutral; positive = green
-        # if good, red if bad; negative is the inverse.
-        if amount == 0:
-            colour = "#333"
-        elif (amount > 0) == self._positive_is_good:
-            colour = "#1b8a3a"  # green
-        else:
-            colour = "#b3261e"  # red
-        self._value_label.setStyleSheet(
-            f"color: {colour};"
-        )
-
-
-class _CategoryCard(QFrame):
-    """One row card for a single budgeted category. Progress bar tints
-    red when over budget, green when under."""
-
-    def __init__(self, data: BudgetCardData) -> None:
-        super().__init__()
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "QFrame { background: white; border: 1px solid #e1e3e6;"
-            "         border-radius: 6px; padding: 4px; }"
-        )
-
-        # Headline row: name + status text on the right
-        name_label = QLabel(data.label)
-        name_label.setStyleSheet("font-size: 11pt; font-weight: 600;")
-
-        # Right-side status: "£X left" or "£X over"
-        if data.period_left >= 0:
-            status_text = f"{data.period_left:,.2f} left"
-            status_colour = "#1b8a3a"
-        else:
-            status_text = f"{-data.period_left:,.2f} over"
-            status_colour = "#b3261e"
-        status_label = QLabel(status_text)
-        status_label.setStyleSheet(
-            f"font-size: 11pt; font-weight: 600; color: {status_colour};"
-        )
-
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.addWidget(name_label)
-        top_row.addStretch(1)
-        top_row.addWidget(status_label)
-
-        # Progress bar
-        bar = QProgressBar()
-        bar.setTextVisible(False)
-        bar.setFixedHeight(8)
-        bar_pct = _progress_pct(data.period_actual, data.period_budget)
-        bar.setRange(0, 100)
-        bar.setValue(bar_pct)
-        over = data.period_left < 0
-        bar.setStyleSheet(
-            "QProgressBar { background: #eef0f3; border: 0; border-radius: 4px; } "
-            "QProgressBar::chunk { background: "
-            + ("#d23a2c" if over else "#3a9c54")
-            + "; border-radius: 4px; }"
-        )
-
-        # Subtitle (round-C): "£X spent of £Y · N txns" plus a second line
-        # for non-monthly cadences showing full-cadence-period progress,
-        # and an "+£X expected" badge when schedules are due in the
-        # screen period and haven't posted yet.
-        n = data.period_txn_count
-        expected_badge = (
-            f"  ·  +{data.scheduled_due_in_period:,.2f} expected"
-            if data.scheduled_due_in_period > 0 else ""
-        )
-        line1 = QLabel(
-            f"{data.period_actual:,.2f} spent of "
-            f"{data.period_budget:,.2f}  ·  "
-            f"{n} txn{'s' if n != 1 else ''}"
-            f"{expected_badge}"
-        )
-        line1.setStyleSheet("color: #666; font-size: 9pt;")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(4)
-        layout.addLayout(top_row)
-        layout.addWidget(bar)
-        layout.addWidget(line1)
-
-        if data.cadence != "monthly":
-            # Non-monthly cadence: show the user-entered figure at its
-            # native cadence + the full-period progress so the user has
-            # the long view without losing the monthly comparison.
-            label_text = data.cadence_period_label or "this period"
-            line2 = QLabel(
-                f"{data.cadence_amount:,.2f} {_CADENCE_LABELS[data.cadence]}  ·  "
-                f"{label_text}: "
-                f"{data.cadence_period_actual:,.2f} of "
-                f"{data.cadence_amount:,.2f}"
-            )
-            line2.setStyleSheet("color: #888; font-size: 8pt; font-style: italic;")
-            layout.addWidget(line2)
-
-
-def _progress_pct(actual: Decimal, budget: Decimal) -> int:
-    """Percentage for the progress bar. Capped at 100 so the chunk doesn't
-    overflow — the over-budget signal is the red tint + the status label,
-    not a bar that fills past its track."""
-    if budget <= 0:
-        return 100 if actual > 0 else 0
-    pct = int((actual / budget * 100).quantize(Decimal("1")))
-    return max(0, min(100, pct))
+    def length(self) -> int:
+        return self._length.value()
