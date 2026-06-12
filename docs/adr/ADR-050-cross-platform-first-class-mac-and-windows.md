@@ -38,7 +38,7 @@ These are the rules that keep the codebase portable. They are duplicated into th
 
 2. **User data lives in the OS-standard location, never the working directory.** Resolve the database / config directory via Qt's `QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)` (→ `~/Library/Application Support/MFL` on macOS, `%APPDATA%\MFL` on Windows, `~/.local/share/MFL` on Linux — one call, no `if`). `QStandardPaths` is chosen over the `platformdirs` ADR-004 named because Qt is already a dependency and it needs no extra package. The `--db` override stays for development.
 
-3. **Keyboard shortcuts: prefer `QKeySequence.StandardKey`; otherwise map the modifier per-OS.** Qt does **not** translate a literal `"Ctrl+N"` string to ⌘ on macOS — only `StandardKey` does. For actions with a standard key (Open, Save, New, Quit, Delete, Copy, Paste, Find…) use the `StandardKey` enum. For app-specific chords with no standard key, build the sequence through a single helper that emits the Command modifier on macOS and Control elsewhere, so menus read ⌘ natively on Mac and Ctrl on Windows.
+3. **Keyboard shortcuts: prefer `QKeySequence.StandardKey`; literal `"Ctrl+…"` chords are fine for the rest.** For actions with a standard key (Open, Save, New, Quit, Delete, Copy, Paste, Find…) use the `StandardKey` enum — it picks the platform-correct sequence (including the few that differ beyond a modifier swap). **Correction (2026-06-12, verified on PySide6 6.11.1):** Qt **does** translate a literal `"Ctrl+N"` string to ⌘N on macOS — it maps `Qt::CTRL` to the Command key by default (the original claim here that it does not was wrong). So app-specific chords with no standard key (Ctrl+B, Ctrl+E, Ctrl+I, Ctrl+Alt+R, Ctrl+Shift+R) can stay as portable `"Ctrl+…"` strings and still render ⌘ natively on Mac and Ctrl on Windows — **no per-OS modifier helper is needed.** (If a future Qt sets `AA_MacDontSwapCtrlAndMeta`, revisit.)
 
 4. **Menu roles for About / Preferences / Quit.** Any About, Preferences/Settings, or Quit action must set the appropriate `QAction.MenuRole` so Qt relocates it into the macOS application menu (where users expect it) while leaving it in the File/Help menus on Windows.
 
@@ -71,16 +71,17 @@ These are the rules that keep the codebase portable. They are duplicated into th
 ### Negative / accepted trade-offs
 - macOS code-signing/notarization carries an annual cost ($99 Apple Developer Program) and setup effort. Accepted: it is the only way to give friends a double-click-and-run experience on macOS.
 - Builds must run on each platform (or in CI), so a release is two build jobs, not one.
-- Hardcoded `Ctrl+` shortcuts and the Segoe-first font cascade are technically non-native on macOS *until* the Tier-1 work items below land; they are cosmetic (shortcuts still fire on the physical Control key), not blocking.
+- The Segoe-first font cascade was technically non-native on macOS *until* the Tier-1 work items below landed (now done). (Shortcuts, it turned out, already rendered ⌘ natively — see the rule 3 correction — so the only real shortcut gap was the `Ctrl+I` collision, also fixed.)
 
 ### Work items (close the current gaps)
 
 These are the concrete deltas the audit surfaced; none is a blocker for *running* on macOS.
 
-- **Tier 1 — native feel (small):**
-  - Convert the 9 hardcoded `"Ctrl+…"` shortcuts in `register_window.py` to `StandardKey` where one exists, and route the rest (Ctrl+B, Ctrl+E, Ctrl+Alt+R, Ctrl+Shift+R) through the per-OS modifier helper (rule 3).
-  - **Fix the `Ctrl+I` collision** — it is assigned to *both* Import (`register_window.py:521`) and Account Summary (`:560`). Platform-independent bug surfaced by the audit.
-  - Reorder the font cascade in `theme.py:82` so `-apple-system` precedes `"Segoe UI"` (rule 5).
+- **Tier 1 — native feel (small): ✅ DONE (2026-06-12, commit `3dcc8c4`).**
+  - ✅ Converted the standard-action shortcuts in `register_window.py` to `StandardKey` (Open → `Open`, Save Copy As → `SaveAs`, New Transaction → `New`; Quit/Delete already were). The app-specific chords (Ctrl+B, Ctrl+E, Ctrl+I Import, Ctrl+Alt+R, Ctrl+Shift+R) stay as portable `"Ctrl+…"` strings — they already render ⌘ natively (rule 3 correction), so no per-OS helper was built.
+  - ✅ **Fixed the `Ctrl+I` collision** — it was assigned to *both* Import and Account Summary. Import keeps Ctrl+I (⌘I); Account Summary moved to Ctrl+Shift+I (⌘⇧I).
+  - ✅ Reordered the font cascade in `theme.py` so `-apple-system` precedes `"Segoe UI"` (rule 5).
+  - Verified offscreen on PySide6 6.11.1: all 11 shortcuts render as distinct native sequences with no duplicates.
 - **Tier 2 — data location (small, needs the save/auto-save decision):**
   - Move the default DB off cwd (`__main__.py:85` `DEFAULT_DB = Path("mfl_dev.db")`) onto `QStandardPaths.AppDataLocation` (rule 2). Settle alongside the ADR-016 save/auto-save amendment.
 - **Tier 3 — packaging (its own round):**
