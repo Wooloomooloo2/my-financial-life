@@ -13,6 +13,12 @@ A non-modal main window opened from Budget ▸ Open…. Layout (top-down):
   value offers copy-forward (just this month / this + later / all months) per
   ADR-058 D1, then writes atomically and reloads.
 
+**Per-line controls (R2):** a ↻ glyph in the label marks a line whose unspent
+budget rolls forward, and right-clicking a line opens a menu to toggle that
+rollover policy, change its role (expenses only), or remove it from the budget
+— so the policy is both visible and editable without opening Setup. The
+per-child actual breakdown stays on the existing double-click-Actual drill.
+
 Refreshes on `WindowActivate` so flipping back from the register reflects new
 actuals. Everything reads from `budget_calc.compute_matrix` — the single source
 of budget truth.
@@ -24,7 +30,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -35,23 +41,34 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 from mfl_desktop import budget_calc as bc
-from mfl_desktop.db.repository import Budget, Repository
+from mfl_desktop.db.repository import BUDGET_ROLES, Budget, Repository
 from mfl_desktop.ui.budget_drilldown_window import BudgetDrillDownWindow
+from mfl_desktop.ui.budget_monthly_view import BudgetMonthlyView
 from mfl_desktop.ui.budget_setup_dialog import BudgetSetupDialog
 
 _MONTH_ABBR = [
     "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ]
+
+_ROLE_LABELS = {
+    "bills": "Bills",
+    "saving": "Saving",
+    "discretionary": "Discretionary",
+}
+
+_ROLLOVER_GLYPH = "↻"   # marks a line whose unspent budget carries forward
 
 # Row kinds in the flattened model.
 _SECTION = "section"
@@ -193,8 +210,27 @@ class BudgetMatrixModel(QAbstractTableModel):
                             "actual": "  Actual",
                             "diff": "  Diff"}[metric]
                 if metric == "budget":
+                    # A ↻ marks a line whose unspent budget rolls forward, so
+                    # the policy is readable at a glance (toggle via right-click).
+                    if not mr.is_unbudgeted and mr.rollover == "accumulate":
+                        return f"{mr.label}  {_ROLLOVER_GLYPH}"
                     return mr.label
                 return "  Actual" if metric == "actual" else "  Diff"
+            if (
+                role == Qt.ToolTipRole
+                and metric == "budget"
+                and not is_sub
+                and not mr.is_unbudgeted
+            ):
+                if mr.rollover == "accumulate":
+                    return (
+                        "Unspent budget rolls over to the next month (↻).\n"
+                        "Right-click to change the rollover or role."
+                    )
+                return (
+                    "Resets each month — unspent budget does not carry "
+                    "forward.\nRight-click to enable rollover or change role."
+                )
             if role == Qt.ForegroundRole and metric != "budget":
                 return _MUTED
             if role == Qt.BackgroundRole and is_sub:
@@ -339,6 +375,13 @@ class BudgetWindow(QMainWindow):
             b.clicked.connect(slot)
             header.addWidget(b)
         header.addStretch(1)
+        # Annual matrix ↔ monthly progress view toggle (R3).
+        header.addWidget(QLabel("View:"))
+        self._view = QComboBox()
+        self._view.addItem("Annual", 0)
+        self._view.addItem("Monthly", 1)
+        self._view.currentIndexChanged.connect(self._on_view_changed)
+        header.addWidget(self._view)
         root.addLayout(header)
 
         # Soft Unallocated indicator + missing-rate banner.
@@ -355,7 +398,22 @@ class BudgetWindow(QMainWindow):
         self._table.verticalHeader().setVisible(False)
         # Double-click an Actual cell to drill into its transactions (ADR-058).
         self._table.doubleClicked.connect(self._on_cell_double_clicked)
-        root.addWidget(self._table, stretch=1)
+        # Right-click a budget line to toggle rollover / role / remove (R2).
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_context_menu)
+
+        # Monthly view (R3) — same matrix, one month in focus. Edits + drills
+        # route back through this window so there's a single path for each.
+        self._monthly = BudgetMonthlyView(
+            self._repo, edit_cb=self._on_edit_allocation, drill_cb=self._drill,
+        )
+
+        # The annual matrix (page 0) and monthly view (page 1) share the
+        # central area; the View toggle flips between them.
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._table)
+        self._stack.addWidget(self._monthly)
+        root.addWidget(self._stack, stretch=1)
 
         self._empty_label = QLabel(
             "No budget yet. Click New… to create one, then Set up… to choose "
@@ -395,6 +453,10 @@ class BudgetWindow(QMainWindow):
         self._budget = self._repo.get_budget(bid) if bid is not None else None
         self._render()
 
+    def _on_view_changed(self) -> None:
+        """Flip between the annual matrix and the monthly progress view."""
+        self._stack.setCurrentIndex(self._view.currentData() or 0)
+
     # ── render ──
 
     def _display_ccy(self) -> str:
@@ -430,11 +492,13 @@ class BudgetWindow(QMainWindow):
         if not self._repo.is_open():
             return
         if self._budget is None:
-            self._table.setVisible(False)
+            self._stack.setVisible(False)
+            self._view.setEnabled(False)
             self._empty_label.setVisible(True)
             self._info_label.setText("")
             return
-        self._table.setVisible(True)
+        self._stack.setVisible(True)
+        self._view.setEnabled(True)
         self._empty_label.setVisible(False)
 
         budget = self._budget
@@ -471,6 +535,10 @@ class BudgetWindow(QMainWindow):
         for c in range(1, model.columnCount()):
             self._table.setColumnWidth(c, 86)
 
+        # Feed the same matrix to the monthly view (R3) so both pages stay in
+        # lock-step off one computation — the single source of budget truth.
+        self._monthly.set_data(budget, matrix)
+
         # Soft Unallocated indicator for the focused (today's) month, else first.
         focus_idx = months.index(today_month) if today_month in months else 0
         assigned = matrix.assigned_by_month[focus_idx]
@@ -483,9 +551,12 @@ class BudgetWindow(QMainWindow):
             f"Unallocated: <b style='color:{colour}'>{_fmt(unalloc)}</b>"
         )
         if excluded:
+            # Exclusions now carry their own reason (no FX rate, or an
+            # available-credit account with no limit set) — see
+            # Repository.compute_perimeter_pool (ADR-058 R4a).
             info += (
                 f" &nbsp;—&nbsp; <span style='color:#b45309'>"
-                f"{len(excluded)} account(s) excluded (no rate to {ccy}): "
+                f"{len(excluded)} account(s) excluded from the pool: "
                 f"{', '.join(excluded)}</span>"
             )
         self._info_label.setText(info)
@@ -584,6 +655,94 @@ class BudgetWindow(QMainWindow):
         )
         self._drill_wins.append(win)
         win.show()
+
+    # ── per-line context menu (R2: rollover / role / remove) ──
+
+    def _on_context_menu(self, pos) -> None:
+        """Right-click a budget line → toggle its rollover policy, change its
+        role, or remove it from the budget. Only real budgeted lines have a
+        menu — section headers, subtotals, and the synthetic Unbudgeted row
+        carry no ``line_id``."""
+        model = self._table.model()
+        if not isinstance(model, BudgetMatrixModel):
+            return
+        index = self._table.indexAt(pos)
+        if not index.isValid():
+            return
+        row = model._rows[index.row()]
+        if row.kind != _METRIC or row.matrix_row.is_unbudgeted:
+            return
+        mr = row.matrix_row  # bc.MatrixRow
+        line_id = mr.line_id
+        menu = QMenu(self)
+
+        roll = QAction("Rolls over unspent", menu)
+        roll.setCheckable(True)
+        roll.setChecked(mr.rollover == "accumulate")
+        roll.toggled.connect(lambda on, lid=line_id: self._set_rollover(lid, on))
+        menu.addAction(roll)
+
+        # Role (bills / saving / discretionary) is an expense-side concept; it
+        # has no meaning for income, so the submenu is hidden there (mirrors the
+        # Setup dialog, which omits role for income lines).
+        if mr.kind != "income":
+            role_menu = menu.addMenu("Role")
+            group = QActionGroup(role_menu)
+            group.setExclusive(True)
+            for r in BUDGET_ROLES:
+                act = QAction(_ROLE_LABELS[r], role_menu)
+                act.setCheckable(True)
+                act.setChecked(mr.role == r)
+                act.triggered.connect(
+                    lambda _checked=False, lid=line_id, rr=r:
+                    self._set_role(lid, rr)
+                )
+                group.addAction(act)
+                role_menu.addAction(act)
+
+        menu.addSeparator()
+        remove = QAction("Remove from budget", menu)
+        remove.triggered.connect(
+            lambda _checked=False, lid=line_id, lbl=mr.label:
+            self._remove_line(lid, lbl)
+        )
+        menu.addAction(remove)
+
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _set_rollover(self, line_id: int, on: bool) -> None:
+        try:
+            self._repo.update_budget_line(
+                line_id, rollover="accumulate" if on else "none",
+            )
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not change rollover", str(e))
+            return
+        self._render()
+
+    def _set_role(self, line_id: int, role: str) -> None:
+        try:
+            self._repo.update_budget_line(line_id, role=role)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not change role", str(e))
+            return
+        self._render()
+
+    def _remove_line(self, line_id: int, label: str) -> None:
+        # parent=None on the confirm — same macOS cascade-close avoidance as the
+        # other budget-window dialogs (ADR-058).
+        if QMessageBox.question(
+            None, "Remove from budget",
+            f"Remove ‘{label}’ from this budget? Its monthly amounts are "
+            f"deleted; the category and its transactions are untouched.",
+        ) != QMessageBox.Yes:
+            return
+        try:
+            self._repo.delete_budget_line(line_id)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not remove line", str(e))
+            return
+        self._render()
 
     # ── budget verbs ──
 

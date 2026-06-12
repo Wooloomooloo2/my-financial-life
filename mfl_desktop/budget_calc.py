@@ -31,6 +31,7 @@ matrix (positive = under budget / surplus, negative = over).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
@@ -298,4 +299,144 @@ def compute_matrix(
         excluded_accounts=excluded_accounts or [],
         assigned_by_month=[_round2(v) for v in assigned_by_month],
         today_month=today_month if today_month in month_index else None,
+    )
+
+
+# ── Burn-down (ADR-058 R3, principle 12) ───────────────────────────────────
+
+
+@dataclass(frozen=True)
+class BurnDownData:
+    """One month's spend depletion for the burn-down chart (ADR-058 R3).
+
+    Days are 1-indexed into the focused month. Three series share the same
+    day x-axis but cover different spans:
+
+    - **actual** — cumulative outflow magnitude through *today* (so an
+      in-progress month stops at today; a finished month runs the full span).
+    - **ideal** — the linear pacing line, spreading ``total_planned`` evenly
+      across every day of the month.
+    - **proj** — the *projection* that makes this better than Pocketsmith
+      (principle 12): from today to month-end it extends the observed average
+      daily rate, so an overspending line keeps climbing (and crosses the
+      budget early) instead of going flat at today.
+
+    ``total_planned`` is the scope's *available* for the month (allocation +
+    rolled-in carry); ``scope_label`` names the scope ("Whole budget" or a
+    category). All amounts are positive magnitudes (a depletion chart).
+    """
+    month: str                 # 'YYYY-MM'
+    scope_label: str
+    period_days: int
+    today_day: int             # 0 before the month, period_days after it
+    total_planned: Decimal
+    x_days: list[int]          # 1..period_days — the axis
+    actual_x: list[int]
+    actual: list[Decimal]
+    ideal_x: list[int]
+    ideal: list[Decimal]
+    proj_x: list[int]
+    proj: list[Decimal]
+    projected_end: Decimal     # where the projection lands at month-end
+
+
+def _month_bounds(month: str) -> tuple[date, date, int]:
+    """(first, last, day_count) for a 'YYYY-MM' month."""
+    y, m = int(month[:4]), int(month[5:7])
+    start = date(y, m, 1)
+    end = (date(y, 12, 31) if m == 12
+           else date(y, m + 1, 1) - timedelta(days=1))
+    return start, end, (end - start).days + 1
+
+
+def compute_burndown(
+    *,
+    perimeter_txns: list[PerimeterTxn],
+    month: str,
+    total_planned: Decimal,
+    today: Optional[date] = None,
+    scope_label: str = "Whole budget",
+    target_category_id: Optional[int] = None,
+    parent_map: Optional[dict[int, Optional[int]]] = None,
+    budgeted_ids: Optional[set[int]] = None,
+    kind_map: Optional[dict[int, str]] = None,
+) -> BurnDownData:
+    """Build the burn-down series for one month and one scope (pure).
+
+    ``perimeter_txns`` may span more than the month — they're filtered here.
+    With ``target_category_id`` the scope is a single envelope: outflows are
+    kept when their **nearest budgeted ancestor** is that category (so the
+    series reconciles with the matrix's Actual cell). Without it the scope is
+    the whole budget: every **expense-kind** outflow counts (income inflows
+    and transfers are excluded — this is a spending-depletion chart).
+    """
+    today = today or date.today()
+    parent_map = parent_map or {}
+    budgeted_ids = budgeted_ids or set()
+    kind_map = kind_map or {}
+    start, end, period_days = _month_bounds(month)
+
+    # Outflow magnitude by day-of-month for the chosen scope.
+    by_day: dict[int, Decimal] = {}
+    for txn in perimeter_txns:
+        if txn.amount >= 0:               # depletion = outflows only
+            continue
+        if txn.posted_date[:7] != month:
+            continue
+        if target_category_id is None:
+            if kind_map.get(txn.category_id, "expense") != "expense":
+                continue
+        else:
+            bucket = nearest_budgeted_ancestor(
+                txn.category_id, parent_map, budgeted_ids,
+            )
+            if bucket != target_category_id:
+                continue
+        day_idx = (date.fromisoformat(txn.posted_date) - start).days + 1
+        if day_idx < 1 or day_idx > period_days:
+            continue
+        by_day[day_idx] = by_day.get(day_idx, _ZERO) + (-txn.amount)
+
+    if today < start:
+        today_day = 0
+    elif today > end:
+        today_day = period_days
+    else:
+        today_day = (today - start).days + 1
+
+    x_days = list(range(1, period_days + 1))
+    ideal = [
+        _round2(total_planned * Decimal(d) / Decimal(period_days))
+        for d in x_days
+    ]
+
+    # Actual cumulative outflow, only through today (no future actuals exist).
+    actual_x: list[int] = []
+    actual: list[Decimal] = []
+    running = _ZERO
+    for d in range(1, today_day + 1):
+        running += by_day.get(d, _ZERO)
+        actual_x.append(d)
+        actual.append(_round2(running))
+
+    # Projection: extend the observed average daily rate to month-end.
+    proj_x: list[int] = []
+    proj: list[Decimal] = []
+    if 1 <= today_day < period_days and actual:
+        spent = actual[-1]
+        rate = spent / Decimal(today_day)
+        for d in range(today_day, period_days + 1):
+            proj_x.append(d)
+            proj.append(_round2(spent + rate * Decimal(d - today_day)))
+
+    projected_end = (
+        proj[-1] if proj else (actual[-1] if actual else _ZERO)
+    )
+
+    return BurnDownData(
+        month=month, scope_label=scope_label, period_days=period_days,
+        today_day=today_day, total_planned=_round2(total_planned),
+        x_days=x_days, actual_x=actual_x, actual=actual,
+        ideal_x=x_days, ideal=ideal, proj_x=proj_x, proj=proj,
+        projected_end=projected_end,
     )
