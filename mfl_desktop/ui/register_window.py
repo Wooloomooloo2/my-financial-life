@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop import snapshots
+from mfl_desktop import data_library, snapshots
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui.account_dialog import AccountDialog
@@ -46,6 +46,7 @@ from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
 from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
+from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.securities_dialog import SecuritiesDialog
 from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
@@ -142,6 +143,9 @@ class RegisterWindow(QMainWindow):
         self._service = ImportService(repo)
         self._categories = repo.list_categories_flat()
         self._account: Optional[AccountSummary] = None  # None == all-transactions mode
+        # Name of the library dataset loaded onto the working file, if any
+        # (ADR-059) — shown in the title in place of the bench filename.
+        self._loaded_dataset: Optional[str] = None
         # ADR-041: current register date-window key; resolved to a posted_date
         # lower bound by _current_since(). Set before the initial selection
         # builds a model so the first view is already windowed.
@@ -422,7 +426,10 @@ class RegisterWindow(QMainWindow):
         self._model.set_since(self._current_since())
 
     def _update_window_title(self) -> None:
-        filename = self._repo.db_path.name
+        # A dataset loaded from the library is a working *copy* on the bench file,
+        # so its name (not the bench filename) is what the user thinks they're in.
+        loaded = getattr(self, "_loaded_dataset", None)
+        filename = loaded if loaded else self._repo.db_path.name
         if self._account is None:
             suffix = "All transactions"
         else:
@@ -551,6 +558,11 @@ class RegisterWindow(QMainWindow):
         save_copy_action.setShortcut(QKeySequence.SaveAs)
         save_copy_action.triggered.connect(self._on_save_copy_as)
         file_menu.addAction(save_copy_action)
+
+        manage_data_action = QAction("Manage &Data…", self)
+        manage_data_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        manage_data_action.triggered.connect(self._on_manage_data)
+        file_menu.addAction(manage_data_action)
 
         file_menu.addSeparator()
 
@@ -1715,14 +1727,23 @@ class RegisterWindow(QMainWindow):
         )
 
     def _swap_repository(self, new_repo: Repository) -> None:
-        """Replace the working repository with a freshly opened one.
+        """Replace the working repository with a freshly opened one (File ▸ Open).
 
-        Rebuilds every UI surface that depends on the repo: sidebar (accounts,
-        folders, balances), the cached category list, the filter-bar combo,
-        and the register model. The old repo is closed *after* the new one
-        is fully wired in so a partial-failure path can still recover.
+        Brings the new repo's UI up first, then tears the old one down, so a
+        partial-failure path can still recover. The opened file *becomes* the
+        live file — edits flow straight into it. (Contrast ``_load_dataset``,
+        which clones onto the working file and leaves the source pristine.)
         """
         old_repo = self._repo
+        self._loaded_dataset = None
+        self._adopt_repository(new_repo)
+        self._teardown_repository(old_repo)
+
+    def _adopt_repository(self, new_repo: Repository) -> None:
+        """Make ``new_repo`` the live repo and rebuild every UI surface that
+        depends on it: sidebar (accounts, folders, balances), the cached
+        category list, the filter-bar combo, and the register model. Also
+        re-runs the per-file auto-post sweep against the freshly-opened DB."""
         self._repo = new_repo
         self._service = ImportService(new_repo)
         self._categories = new_repo.list_categories_flat()
@@ -1733,15 +1754,54 @@ class RegisterWindow(QMainWindow):
         self._reload_sidebar(select_iri=None)
         self._populate_category_combo()
         self._update_window_title()
-        # Leave the file we're closing self-contained + backed up (ADR-057),
-        # the same way closeEvent treats the live file on quit.
+        # Schedules are per-file, so a different file means a different set of
+        # due auto-posters to materialise (or none, for a fresh DB).
+        self._run_auto_post_sweep()
+
+    def _teardown_repository(self, old_repo: Repository) -> None:
+        """Leave the file we're done with self-contained + backed up (ADR-057),
+        the same way closeEvent treats the live file on quit, then close it."""
         snapshots.maybe_snapshot(old_repo)
         old_repo.checkpoint()
         old_repo.close()
-        # Re-run the auto-post sweep against the newly-opened DB. Schedules
-        # are per-file, so swapping files means a different set of due
-        # auto-posters to materialise (or none, for a fresh DB).
-        self._run_auto_post_sweep()
+
+    def _on_manage_data(self) -> None:
+        dialog = DataLibraryDialog(self._repo, parent=self)
+        # Loading replaces the live working file — only the window can drive
+        # that, so the dialog asks us to do it via load_requested.
+        dialog.load_requested.connect(self._load_dataset)
+        dialog.exec()
+
+    def _load_dataset(self, source: Path) -> None:
+        """Load a saved dataset / snapshot as a *fresh working copy* (ADR-059).
+
+        Unlike File ▸ Open (which makes the picked file the live file), this
+        clones ``source`` onto the current working file so the saved original
+        stays pristine — load a baseline, edit it, reload it clean. The current
+        working file is snapshotted, checkpointed, and closed first; then the
+        clone overwrites it (atomic temp-and-replace, so a clone failure leaves
+        the working file intact); then we reopen and rebuild the UI.
+        """
+        bench = self._repo.db_path
+        # Tear down the working file *before* overwriting it — its connection
+        # has to be closed before clone_database can replace the file on disk.
+        self._teardown_repository(self._repo)
+        try:
+            data_library.clone_database(source, bench)
+        except Exception as e:  # noqa: BLE001 — recover by reopening the bench
+            # The clone is atomic, so on failure the working file is untouched.
+            # Reopen it so the user isn't left with a dead window.
+            self._adopt_repository(Repository(bench))
+            QMessageBox.critical(
+                self, "Load failed",
+                f"Could not load “{source.stem}”:\n\n{e}",
+            )
+            return
+        self._loaded_dataset = source.stem
+        self._adopt_repository(Repository(bench))
+        self.statusBar().showMessage(
+            f"Loaded a working copy of {source.stem}", 5000,
+        )
 
     # ── import ──
 
