@@ -310,17 +310,21 @@ class RegisterWindow(QMainWindow):
 
         # Automatic rotating backups (ADR-057). Snapshot now — capturing the
         # state we opened against, *before* this session's edits, so the user
-        # has a clean rollback point — then every SNAPSHOT_INTERVAL_MIN minutes
-        # while the app is open, plus a final one on clean close (closeEvent).
-        # Rotation keeps the most recent copies in a Snapshots/ folder beside
-        # the live database. All best-effort: a backup never blocks the UI.
+        # has a clean rollback point — then every interval_min minutes while the
+        # app is open, plus a final one on clean close (closeEvent). Retention
+        # (the GFS policy, ADR-060) keeps a thinning set in a Snapshots/ folder
+        # beside the live database. All best-effort: a backup never blocks the UI.
         snapshots.maybe_snapshot(self._repo)
         self._snapshot_timer = QTimer(self)
-        self._snapshot_timer.setInterval(
-            snapshots.SNAPSHOT_INTERVAL_MIN * 60 * 1000
-        )
         self._snapshot_timer.timeout.connect(self._take_snapshot)
+        self._apply_snapshot_interval()
         self._snapshot_timer.start()
+
+    def _apply_snapshot_interval(self) -> None:
+        """Set the in-session capture cadence from the live file's stored policy
+        (ADR-060). Called on launch and after the user edits snapshot settings."""
+        policy = snapshots.load_policy(self._repo)
+        self._snapshot_timer.setInterval(policy.interval_min * 60 * 1000)
 
     def _take_snapshot(self) -> None:
         """Periodic in-session backup (ADR-057). Reads ``self._repo`` fresh so
@@ -1754,6 +1758,9 @@ class RegisterWindow(QMainWindow):
         self._reload_sidebar(select_iri=None)
         self._populate_category_combo()
         self._update_window_title()
+        # Retention policy is per-file (ADR-060), so re-arm the capture timer to
+        # the newly-adopted file's cadence.
+        self._apply_snapshot_interval()
         # Schedules are per-file, so a different file means a different set of
         # due auto-posters to materialise (or none, for a fresh DB).
         self._run_auto_post_sweep()
@@ -1770,6 +1777,8 @@ class RegisterWindow(QMainWindow):
         # Loading replaces the live working file — only the window can drive
         # that, so the dialog asks us to do it via load_requested.
         dialog.load_requested.connect(self._load_dataset)
+        # Re-arm the capture timer if the user changed the cadence (ADR-060).
+        dialog.settings_changed.connect(self._apply_snapshot_interval)
         dialog.exec()
 
     def _load_dataset(self, source: Path) -> None:

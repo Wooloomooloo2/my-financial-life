@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import data_library
 from mfl_desktop.data_library import DataFile
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.ui.snapshot_settings_dialog import SnapshotSettingsDialog
 
 _FILE_ROLE = Qt.UserRole
 
@@ -67,6 +68,9 @@ class DataLibraryDialog(QDialog):
     # snapshot; the owning window clones it onto the live working file. The
     # dialog closes immediately after — its repo reference is about to go stale.
     load_requested = Signal(Path)
+    # Emitted after the user changes snapshot retention settings, so the window
+    # can re-arm its capture timer at the new cadence (ADR-060).
+    settings_changed = Signal()
 
     def __init__(self, repo: Repository, parent=None) -> None:
         super().__init__(parent)
@@ -150,9 +154,12 @@ class DataLibraryDialog(QDialog):
         row = QHBoxLayout()
         self._snap_load_btn = QPushButton("Load a copy…")
         self._snap_load_btn.clicked.connect(self._on_load_snapshot)
+        self._snap_settings_btn = QPushButton("Settings…")
+        self._snap_settings_btn.clicked.connect(self._on_snapshot_settings)
         self._snap_delete_btn = QPushButton("Delete")
         self._snap_delete_btn.clicked.connect(self._on_delete_snapshot)
         row.addWidget(self._snap_load_btn)
+        row.addWidget(self._snap_settings_btn)
         row.addStretch(1)
         row.addWidget(self._snap_delete_btn)
         layout.addLayout(row)
@@ -211,6 +218,14 @@ class DataLibraryDialog(QDialog):
         chosen = self._selected(self._snap_table)
         if chosen is not None:
             self._load(chosen)
+
+    def _on_snapshot_settings(self) -> None:
+        dialog = SnapshotSettingsDialog(self._repo, parent=self)
+        # Saving applies the new policy (prunes the existing set), so refresh the
+        # snapshot list, and let the window re-arm its capture timer (ADR-060).
+        dialog.policy_saved.connect(self._refresh)
+        dialog.policy_saved.connect(self.settings_changed)
+        dialog.exec()
 
     def _load(self, file: DataFile) -> None:
         noun = "dataset" if file.kind == "saved" else "snapshot"
