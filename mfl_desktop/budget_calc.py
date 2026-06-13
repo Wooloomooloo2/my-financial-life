@@ -134,11 +134,23 @@ def _round2(value: Decimal) -> Decimal:
 
 
 def _favourable_diff(kind: str, available: Decimal, actual: Decimal) -> Decimal:
-    """Signed so positive is always 'good' (green): income is favourable when
-    actual ≥ budget, an expense/transfer when actual ≤ budget."""
-    if kind == "income":
+    """Signed so positive is always 'good' (green): income (and a goal, where
+    paying ≥ the required amount is good) is favourable when actual ≥ budget; an
+    expense/transfer when actual ≤ budget."""
+    if kind in ("income", "goals"):
         return _round2(actual - available)
     return _round2(available - actual)
+
+
+@dataclass(frozen=True)
+class GoalPlan:
+    """A goal's per-month planned + actual figures, prepared by the window from
+    ``goal_calc`` (required monthly, spread over the months to target) and the
+    account's payment inflows. Rendered into the matrix's Goals section (R4b)."""
+    goal_id: int
+    label: str
+    planned: dict        # 'YYYY-MM' -> Decimal required payment that month
+    actual: dict         # 'YYYY-MM' -> Decimal actually paid that month
 
 
 # ── Main entry point ───────────────────────────────────────────────────────
@@ -156,12 +168,15 @@ def compute_matrix(
     excluded_accounts: Optional[list[str]] = None,
     display_ccy: str = "",
     today_month: Optional[str] = None,
+    goal_plans: Optional[list["GoalPlan"]] = None,
 ) -> BudgetMatrix:
     """Assemble the budget matrix. Pure function — fixture-friendly.
 
     ``allocations`` is keyed ``(budget_line_id, 'YYYY-MM')``; absent cells are
     treated as 0. ``perimeter_txns`` should span the budget's full month range
     (the caller queries ``list_perimeter_txns`` over month[0]..month[-1]).
+    ``goal_plans`` (R4b) add a Goals section and count their planned amounts in
+    ``assigned`` (a pay-down/savings goal is money given a job — zero-sum).
     """
     months = budget.months()
     month_index = {m: i for i, m in enumerate(months)}
@@ -289,6 +304,51 @@ def compute_matrix(
             subtotal=subtotal,
             alloc_total=_round2(sec_alloc_total),
             actual_total=_round2(sec_actual_total),
+        ))
+
+    # ── 5. Goals section (R4b) — planned required payment vs actual paid. ──
+    # A goal's planned amount is money given a job, so it adds to `assigned`
+    # (the Unallocated indicator drops by it). The actual payment is a transfer
+    # that cancels in the perimeter, so it never double-counts as spending.
+    if goal_plans:
+        goal_rows: list[MatrixRow] = []
+        for gp in goal_plans:
+            cells = []
+            g_alloc_total = _ZERO
+            g_actual_total = _ZERO
+            for mi, m in enumerate(months):
+                alloc = _round2(gp.planned.get(m, _ZERO))
+                actual = _round2(gp.actual.get(m, _ZERO))
+                cells.append(MonthCell(
+                    month=m, allocation=alloc, actual=actual, carry_in=_ZERO,
+                    available=alloc,
+                    diff=_favourable_diff("goals", alloc, actual),
+                ))
+                g_alloc_total += alloc
+                g_actual_total += actual
+                assigned_by_month[mi] += alloc
+            goal_rows.append(MatrixRow(
+                line_id=gp.goal_id, category_id=None, label=gp.label,
+                kind="goals", role="", rollover="", is_unbudgeted=False,
+                cells=cells, alloc_total=_round2(g_alloc_total),
+                actual_total=_round2(g_actual_total),
+            ))
+        gsub: list[MonthCell] = []
+        gs_alloc = _ZERO
+        gs_actual = _ZERO
+        for mi, m in enumerate(months):
+            alloc = sum((r.cells[mi].allocation for r in goal_rows), _ZERO)
+            actual = sum((r.cells[mi].actual for r in goal_rows), _ZERO)
+            gsub.append(MonthCell(
+                month=m, allocation=_round2(alloc), actual=_round2(actual),
+                carry_in=_ZERO, available=_round2(alloc),
+                diff=_favourable_diff("goals", alloc, actual),
+            ))
+            gs_alloc += alloc
+            gs_actual += actual
+        sections.append(MatrixSection(
+            kind="goals", title="Goals", rows=goal_rows, subtotal=gsub,
+            alloc_total=_round2(gs_alloc), actual_total=_round2(gs_actual),
         ))
 
     return BudgetMatrix(

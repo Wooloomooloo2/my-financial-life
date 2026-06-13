@@ -30,12 +30,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -52,10 +53,17 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop import budget_calc as bc
-from mfl_desktop.db.repository import BUDGET_ROLES, Budget, Repository
+from mfl_desktop import goal_calc
+from mfl_desktop.db.repository import (
+    BUDGET_ROLES,
+    AccountSummary,
+    Budget,
+    Repository,
+)
 from mfl_desktop.ui.budget_drilldown_window import BudgetDrillDownWindow
 from mfl_desktop.ui.budget_monthly_view import BudgetMonthlyView
 from mfl_desktop.ui.budget_setup_dialog import BudgetSetupDialog
+from mfl_desktop.ui.goal_dialog import GoalDialog
 
 _MONTH_ABBR = [
     "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -163,6 +171,11 @@ class BudgetMatrixModel(QAbstractTableModel):
         nb = [_ZERO_D] * n
         na = [_ZERO_D] * n
         for s in self._m.sections:
+            # Goals are transfer-like movements (cash → debt), not income or
+            # expense — they integrate via `assigned`/Unallocated, not the Net
+            # line — so keep them out of Income − Expenses − Transfers.
+            if s.kind == "goals":
+                continue
             sign = Decimal(1) if s.kind == "income" else Decimal(-1)
             for mi in range(n):
                 nb[mi] += sign * s.subtotal[mi].allocation
@@ -428,6 +441,7 @@ class BudgetMatrixModel(QAbstractTableModel):
             row.kind == _METRIC
             and row.metric == "budget"
             and not row.matrix_row.is_unbudgeted
+            and row.matrix_row.kind != "goals"   # goal amounts are computed
             and 1 <= col <= len(self._m.months)   # months only — not Total
         )
 
@@ -453,6 +467,103 @@ class BudgetMatrixModel(QAbstractTableModel):
             return False
         month = self._m.months[index.column() - 1]
         return bool(self._edit_cb(row.matrix_row.line_id, month, amount))
+
+
+_GOAL_BLUE = QColor("#2563eb")     # in-progress fill (blue-600)
+_GOAL_GREEN = QColor("#15803d")    # met (green-700)
+_GOAL_RED = QColor("#b91c1c")      # overdue, not met (red-700)
+_GOAL_TRACK = QColor("#e2e8f0")    # slate-200 track
+
+
+class _GoalBar(QWidget):
+    """A thin flat progress bar for a goal card — paintEvent to match the app's
+    chart idiom (ADR-026). Fill colour reflects state: green met, red overdue,
+    blue in-progress."""
+
+    def __init__(self, pct: float, colour: QColor, parent=None) -> None:
+        super().__init__(parent)
+        self._pct = max(0.0, min(100.0, pct))
+        self._colour = colour
+        self.setFixedHeight(8)
+        self.setMinimumWidth(120)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        radius = h / 2
+        p.setPen(Qt.NoPen)
+        p.setBrush(_GOAL_TRACK)
+        p.drawRoundedRect(0, 0, w, h, radius, radius)
+        fill_w = int(round(w * self._pct / 100.0))
+        if fill_w > 0:
+            p.setBrush(self._colour)
+            p.drawRoundedRect(0, 0, max(fill_w, h), h, radius, radius)
+        p.end()
+
+
+class _GoalCard(QFrame):
+    """One goal as a compact clickable card: account, target line, required
+    monthly, and a progress bar. Clicking opens the edit dialog."""
+
+    def __init__(self, prog: "goal_calc.GoalProgress", on_edit, parent=None) -> None:
+        super().__init__(parent)
+        self._goal_id = prog.goal_id
+        self._on_edit = on_edit
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet(
+            "_GoalCard { border: 1px solid #e2e8f0; border-radius: 8px; "
+            "background: #ffffff; } "
+            "_GoalCard:hover { border-color: #94a3b8; }"
+        )
+        self.setFixedWidth(208)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 8)
+        lay.setSpacing(2)
+
+        title = QLabel(prog.account_name)
+        tf = title.font()
+        tf.setBold(True)
+        title.setFont(tf)
+        lay.addWidget(title)
+
+        if prog.is_met:
+            state = "Paid off ✓" if prog.kind == "paydown" else "Reached ✓"
+            colour = _GOAL_GREEN
+        elif prog.is_overdue:
+            state = "Overdue"
+            colour = _GOAL_RED
+        else:
+            colour = _GOAL_BLUE
+            target_mag = abs(prog.target_amount)
+            state = (
+                f"to {prog.currency} {_fmt(target_mag)} "
+                f"by {_fmt_month(prog.target_date[:7])}"
+            )
+        sub = QLabel(state)
+        sub.setStyleSheet(f"color: {colour.name()};")
+        lay.addWidget(sub)
+
+        if not prog.is_met:
+            need = QLabel(
+                f"Need {prog.currency} {_fmt(prog.required_monthly)}/mo"
+            )
+            need.setStyleSheet("color: #475569;")  # slate-600
+            lay.addWidget(need)
+
+        lay.addWidget(_GoalBar(prog.progress_pct, colour))
+        pct = QLabel(f"{prog.progress_pct:.0f}% paid"
+                     if prog.kind == "paydown"
+                     else f"{prog.progress_pct:.0f}% saved")
+        pct.setStyleSheet("color: #64748b; font-size: 11px;")  # slate-500
+        lay.addWidget(pct)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._on_edit(self._goal_id)
+        super().mouseReleaseEvent(event)
 
 
 class BudgetWindow(QMainWindow):
@@ -505,6 +616,14 @@ class BudgetWindow(QMainWindow):
         self._info_label = QLabel("")
         self._info_label.setTextFormat(Qt.RichText)
         root.addWidget(self._info_label)
+
+        # Goals strip (R4b) — sits above the view stack so it shows in both the
+        # Annual and Monthly views. Populated per-render from the budget's goals.
+        self._goals_bar = QWidget()
+        self._goals_layout = QHBoxLayout(self._goals_bar)
+        self._goals_layout.setContentsMargins(0, 2, 0, 4)
+        self._goals_layout.setSpacing(8)
+        root.addWidget(self._goals_bar)
 
         # The matrix.
         self._table = QTableView()
@@ -615,6 +734,7 @@ class BudgetWindow(QMainWindow):
             self._view.setEnabled(False)
             self._empty_label.setVisible(True)
             self._info_label.setText("")
+            self._goals_bar.setVisible(False)
             return
         self._stack.setVisible(True)
         self._view.setEnabled(True)
@@ -633,12 +753,13 @@ class BudgetWindow(QMainWindow):
         pool, excluded = self._repo.compute_perimeter_pool(
             budget.id, display_ccy=ccy, on_date=today.isoformat(),
         )
+        goal_plans = self._build_goal_plans(budget, months, today)
         matrix = bc.compute_matrix(
             budget=budget, lines=lines, allocations=allocations,
             perimeter_txns=ptxns, parent_map=self._repo.category_parent_map(),
             kind_map=self._repo.category_kind_map(), pool=pool,
             excluded_accounts=excluded, display_ccy=ccy,
-            today_month=today_month,
+            today_month=today_month, goal_plans=goal_plans,
         )
 
         self._matrix = matrix
@@ -659,6 +780,9 @@ class BudgetWindow(QMainWindow):
         # Feed the same matrix to the monthly view (R3) so both pages stay in
         # lock-step off one computation — the single source of budget truth.
         self._monthly.set_data(budget, matrix)
+
+        # Pay-down / savings goals strip (R4b).
+        self._render_goals(budget, today)
 
         # Soft Unallocated indicator for the focused (today's) month, else first.
         focus_idx = months.index(today_month) if today_month in months else 0
@@ -682,6 +806,148 @@ class BudgetWindow(QMainWindow):
             )
         self._info_label.setText(info)
         self.setWindowTitle(f"Budget — {budget.name}")
+
+    # ── goals (R4b) ──
+
+    def _build_goal_plans(
+        self, budget: Budget, months: list[str], today: date,
+    ) -> list[bc.GoalPlan]:
+        """Turn each goal into per-month planned (required payment spread from
+        this month to the target month) + actual (payments made), for the matrix
+        Goals section. The required figure comes from `goal_calc` so the strip
+        and the matrix agree."""
+        goals = self._repo.list_budget_goals(budget.id)
+        if not goals:
+            return []
+        accounts = {a.id: a for a in self._repo.list_accounts()}
+        balances = self._repo.compute_account_balances()
+        progs = {
+            p.goal_id: p for p in goal_calc.compute_goals(
+                goals, balances=balances,
+                account_info={
+                    a.id: (a.name, a.currency) for a in accounts.values()
+                },
+                today=today,
+            )
+        }
+        cur_month = today.strftime("%Y-%m")
+        plans: list[bc.GoalPlan] = []
+        for g in goals:
+            prog = progs[g.id]
+            tgt_month = g.target_date[:7]
+            planned: dict[str, Decimal] = {}
+            if not prog.is_met:
+                for m in months:
+                    if cur_month <= m <= tgt_month:
+                        planned[m] = prog.required_monthly
+                # Overdue (target already past): the whole remainder is due now.
+                if prog.is_overdue and cur_month in months:
+                    planned[cur_month] = prog.required_monthly
+            actual = self._repo.account_inflows_by_month(
+                g.account_id, months[0], months[-1],
+            )
+            acc = accounts.get(g.account_id)
+            name = acc.name if acc else "?"
+            word = "pay-down" if g.kind == "paydown" else "savings"
+            plans.append(bc.GoalPlan(
+                goal_id=g.id, label=f"{name} ({word})",
+                planned=planned, actual=actual,
+            ))
+        return plans
+
+    def _render_goals(self, budget: Budget, today: date) -> None:
+        """Rebuild the goals strip: one card per goal + an Add button. Cards are
+        computed off live balances (balance-based progress, ADR-058 R4b)."""
+        self._clear_goals_bar()
+        self._goals_bar.setVisible(True)
+
+        goals = self._repo.list_budget_goals(budget.id)
+        accounts = {a.id: a for a in self._repo.list_accounts()}
+        balances = self._repo.compute_account_balances()
+        progs = goal_calc.compute_goals(
+            goals,
+            balances=balances,
+            account_info={a.id: (a.name, a.currency) for a in accounts.values()},
+            today=today,
+        )
+
+        self._goals_layout.addWidget(QLabel("Goals:"))
+        for prog in progs:
+            self._goals_layout.addWidget(_GoalCard(prog, self._on_edit_goal))
+        add = QPushButton("＋ Goal…")
+        add.setToolTip("Set a pay-down goal for a card in this budget")
+        add.clicked.connect(self._on_add_goal)
+        self._goals_layout.addWidget(add)
+        self._goals_layout.addStretch(1)
+
+    def _clear_goals_bar(self) -> None:
+        while self._goals_layout.count():
+            item = self._goals_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _eligible_goal_accounts(self, budget: Budget) -> list[AccountSummary]:
+        """Perimeter accounts that can take a *new* goal: liabilities (a card /
+        debt) in this budget that don't already have one."""
+        perimeter = set(self._repo.list_budget_account_contributions(budget.id))
+        taken = {g.account_id for g in self._repo.list_budget_goals(budget.id)}
+        return [
+            a for a in self._repo.list_accounts()
+            if a.id in perimeter and a.is_liability and a.id not in taken
+        ]
+
+    def _on_add_goal(self) -> None:
+        if self._budget is None:
+            return
+        eligible = self._eligible_goal_accounts(self._budget)
+        if not eligible:
+            QMessageBox.information(
+                None, "No account to set a goal on",
+                "A pay-down goal needs a credit card or other debt account "
+                "that's in this budget's accounts and doesn't already have a "
+                "goal.\n\nAdd one via Set up… ▸ Accounts first.",
+            )
+            return
+        dlg = GoalDialog(accounts=eligible, parent=None)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._repo.add_budget_goal(
+            budget_id=self._budget.id,
+            account_id=dlg.result_account_id(),
+            target_amount=dlg.result_target_amount(),
+            target_date=dlg.result_target_date(),
+            today=date.today().isoformat(),
+            kind=dlg.result_kind(),
+        )
+        self._render()
+
+    def _on_edit_goal(self, goal_id: int) -> None:
+        if self._budget is None:
+            return
+        goal = next(
+            (g for g in self._repo.list_budget_goals(self._budget.id)
+             if g.id == goal_id),
+            None,
+        )
+        if goal is None:
+            return
+        account = next(
+            (a for a in self._repo.list_accounts() if a.id == goal.account_id),
+            None,
+        )
+        dlg = GoalDialog(accounts=[], goal=goal, account=account, parent=None)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        if dlg.was_deleted():
+            self._repo.delete_budget_goal(goal_id)
+        else:
+            self._repo.update_budget_goal(
+                goal_id,
+                target_amount=dlg.result_target_amount(),
+                target_date=dlg.result_target_date(),
+            )
+        self._render()
 
     # ── edit (copy-forward) ──
 

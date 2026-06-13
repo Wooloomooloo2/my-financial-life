@@ -301,6 +301,25 @@ class BudgetAllocation:
 
 
 @dataclass(frozen=True)
+class BudgetGoal:
+    """A pay-down (or, later, savings) goal on one account in a budget
+    (ADR-058 R4b). ``target_amount`` / ``start_amount`` are **signed** balances
+    in the account's own currency (a card you owe £1,800 on is -1800.00);
+    ``start_amount`` / ``start_date`` are the baseline captured at creation, so
+    progress is measured from there. The required-monthly and progress figures
+    are computed live in :mod:`mfl_desktop.goal_calc`, never stored."""
+    id: int
+    iri: str
+    budget_id: int
+    account_id: int
+    kind: str                   # 'paydown' | 'savings'
+    target_amount: Decimal      # signed target balance
+    target_date: str            # 'YYYY-MM-DD'
+    start_amount: Decimal       # signed balance at creation
+    start_date: str             # 'YYYY-MM-DD'
+
+
+@dataclass(frozen=True)
 class PerimeterTxn:
     """A transaction inside a budget's perimeter window, after the intra-
     perimeter-transfer cancellation rule (ADR-024 §transfers). Used by
@@ -598,6 +617,10 @@ def new_scheduled_txn_iri() -> str:
 
 def new_budget_iri() -> str:
     return f"mfl:Budget_{uuid.uuid4().hex[:8]}"
+
+
+def new_goal_iri() -> str:
+    return f"mfl:Goal_{uuid.uuid4().hex[:8]}"
 
 
 def new_report_iri() -> str:
@@ -5628,6 +5651,18 @@ class Repository:
                 "WHERE ol.budget_id = ?",
                 (new_id, budget_id),
             )
+            # Goals (R4b): copy each onto the new budget with a fresh IRI,
+            # keeping the same account + target + captured baseline so the
+            # scenario starts where the source did.
+            for g in self.list_budget_goals(budget_id):
+                self._conn.execute(
+                    "INSERT INTO budget_goal (iri, budget_id, account_id, "
+                    "kind, target_amount, target_date, start_amount, "
+                    "start_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_goal_iri(), new_id, g.account_id, g.kind,
+                     decimal_to_pence(g.target_amount), g.target_date,
+                     decimal_to_pence(g.start_amount), g.start_date),
+                )
             self.commit()
         except Exception:
             self.rollback()
@@ -5638,6 +5673,116 @@ class Repository:
         """Delete a budget; perimeter, lines, and allocations cascade."""
         try:
             self._conn.execute("DELETE FROM budget WHERE id = ?", (budget_id,))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── pay-down / savings goals (ADR-058 R4b) ──
+
+    def _goal_from_row(self, r) -> BudgetGoal:
+        return BudgetGoal(
+            id=int(r["id"]), iri=r["iri"], budget_id=int(r["budget_id"]),
+            account_id=int(r["account_id"]), kind=r["kind"],
+            target_amount=pence_to_decimal(r["target_amount"]),
+            target_date=r["target_date"],
+            start_amount=pence_to_decimal(r["start_amount"]),
+            start_date=r["start_date"],
+        )
+
+    def list_budget_goals(self, budget_id: int) -> list[BudgetGoal]:
+        """All goals in a budget, oldest first."""
+        cur = self._conn.execute(
+            "SELECT id, iri, budget_id, account_id, kind, target_amount, "
+            "target_date, start_amount, start_date FROM budget_goal "
+            "WHERE budget_id = ? ORDER BY id",
+            (budget_id,),
+        )
+        return [self._goal_from_row(r) for r in cur]
+
+    def add_budget_goal(
+        self,
+        *,
+        budget_id: int,
+        account_id: int,
+        target_amount: Decimal,
+        target_date: str,
+        today: str,
+        kind: str = "paydown",
+    ) -> int:
+        """Create a goal, capturing the account's *current* balance as the
+        baseline (ADR-058 R4b — progress is measured from creation, so later
+        charges reduce it). Raises on a duplicate ``(budget_id, account_id)``."""
+        start_amount = self.compute_account_balances().get(
+            account_id, Decimal("0.00"),
+        )
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO budget_goal (iri, budget_id, account_id, kind, "
+                "target_amount, target_date, start_amount, start_date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (new_goal_iri(), budget_id, account_id, kind,
+                 decimal_to_pence(target_amount), target_date,
+                 decimal_to_pence(start_amount), today),
+            )
+            self.commit()
+            return int(cur.lastrowid)
+        except Exception:
+            self.rollback()
+            raise
+
+    def update_budget_goal(
+        self,
+        goal_id: int,
+        *,
+        target_amount: Optional[Decimal] = None,
+        target_date: Optional[str] = None,
+    ) -> None:
+        """Edit a goal's target balance and/or target date. The baseline
+        (``start_amount`` / ``start_date``) is immutable — re-baselining means
+        deleting and re-creating the goal."""
+        sets: list[str] = []
+        params: list = []
+        if target_amount is not None:
+            sets.append("target_amount = ?")
+            params.append(decimal_to_pence(target_amount))
+        if target_date is not None:
+            sets.append("target_date = ?")
+            params.append(target_date)
+        if not sets:
+            return
+        params.append(goal_id)
+        try:
+            self._conn.execute(
+                f"UPDATE budget_goal SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def account_inflows_by_month(
+        self, account_id: int, start_month: str, end_month: str,
+    ) -> dict[str, Decimal]:
+        """Sum of positive (inflow) transaction amounts on an account per
+        ``'YYYY-MM'`` month, inclusive of the bounds. Used for a goal's
+        *actual paid* (R4b): payments onto a card / deposits into a savings
+        account land as inflows, while purchases (outflows) are excluded."""
+        cur = self._conn.execute(
+            "SELECT substr(posted_date, 1, 7) AS m, SUM(amount) AS s "
+            "FROM txn WHERE account_id = ? AND amount > 0 "
+            "AND substr(posted_date, 1, 7) BETWEEN ? AND ? "
+            "GROUP BY m",
+            (account_id, start_month, end_month),
+        )
+        return {r["m"]: pence_to_decimal(int(r["s"])) for r in cur}
+
+    def delete_budget_goal(self, goal_id: int) -> None:
+        try:
+            self._conn.execute(
+                "DELETE FROM budget_goal WHERE id = ?", (goal_id,),
+            )
             self.commit()
         except Exception:
             self.rollback()

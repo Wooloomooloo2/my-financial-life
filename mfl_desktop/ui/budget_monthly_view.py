@@ -281,6 +281,10 @@ class BudgetMonthlyView(QWidget):
     def _rebuild_rows(self, mi: int) -> None:
         _clear_layout(self._list_lay)
         for section in self._matrix.sections:
+            # Goals already have their own strip above the view (R4b) — don't
+            # repeat them as envelope bars here.
+            if section.kind == "goals":
+                continue
             self._list_lay.addWidget(self._section_header(section.title))
             for row in section.rows:
                 self._list_lay.addWidget(self._envelope_row(row, mi))
