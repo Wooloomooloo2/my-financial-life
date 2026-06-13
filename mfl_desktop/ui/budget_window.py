@@ -523,11 +523,24 @@ class _GoalCard(QFrame):
         lay.setContentsMargins(10, 6, 10, 8)
         lay.setSpacing(2)
 
-        title = QLabel(prog.account_name)
+        title = QLabel(prog.name)
         tf = title.font()
         tf.setBold(True)
         title.setFont(tf)
         lay.addWidget(title)
+
+        n = prog.account_count
+        meta = f"{n} account{'' if n == 1 else 's'} · {prog.currency}"
+        if prog.rate_missing:
+            meta += "  *"
+        sub_meta = QLabel(meta)
+        sub_meta.setStyleSheet("color: #94a3b8; font-size: 11px;")  # slate-400
+        if prog.rate_missing:
+            sub_meta.setToolTip(
+                "An account couldn't be converted to the goal currency "
+                "(no exchange rate) and was left out of the totals."
+            )
+        lay.addWidget(sub_meta)
 
         if prog.is_met:
             state = "Paid off ✓" if prog.kind == "paydown" else "Reached ✓"
@@ -812,28 +825,26 @@ class BudgetWindow(QMainWindow):
     def _build_goal_plans(
         self, budget: Budget, months: list[str], today: date,
     ) -> list[bc.GoalPlan]:
-        """Turn each goal into per-month planned (required payment spread from
-        this month to the target month) + actual (payments made), for the matrix
-        Goals section. The required figure comes from `goal_calc` so the strip
-        and the matrix agree."""
+        """Turn each goal into per-month planned (required contribution spread
+        from this month to the target month) + actual (contributions made), for
+        the matrix Goals section. The required figure comes from `goal_calc` so
+        the strip and the matrix agree."""
         goals = self._repo.list_budget_goals(budget.id)
         if not goals:
             return []
-        accounts = {a.id: a for a in self._repo.list_accounts()}
-        balances = self._repo.compute_account_balances()
-        progs = {
-            p.goal_id: p for p in goal_calc.compute_goals(
-                goals, balances=balances,
-                account_info={
-                    a.id: (a.name, a.currency) for a in accounts.values()
-                },
-                today=today,
-            )
-        }
+        aggs = self._repo.compute_goal_aggregates(
+            budget.id, on_date=today.isoformat(),
+        )
         cur_month = today.strftime("%Y-%m")
         plans: list[bc.GoalPlan] = []
         for g in goals:
-            prog = progs[g.id]
+            agg = aggs.get(g.id)
+            if agg is None:
+                continue
+            prog = goal_calc.compute_goal_progress(
+                g, start_amount=agg.start, current_amount=agg.current,
+                today=today, rate_missing=bool(agg.excluded),
+            )
             tgt_month = g.target_date[:7]
             planned: dict[str, Decimal] = {}
             if not prog.is_met:
@@ -843,39 +854,62 @@ class BudgetWindow(QMainWindow):
                 # Overdue (target already past): the whole remainder is due now.
                 if prog.is_overdue and cur_month in months:
                     planned[cur_month] = prog.required_monthly
-            actual = self._repo.account_inflows_by_month(
-                g.account_id, months[0], months[-1],
-            )
-            acc = accounts.get(g.account_id)
-            name = acc.name if acc else "?"
-            word = "pay-down" if g.kind == "paydown" else "savings"
             plans.append(bc.GoalPlan(
-                goal_id=g.id, label=f"{name} ({word})",
-                planned=planned, actual=actual,
+                goal_id=g.id, label=g.name,
+                planned=planned, actual=self._goal_actual_by_month(g, months),
             ))
         return plans
 
+    def _goal_actual_by_month(
+        self, goal, months: list[str],
+    ) -> dict[str, Decimal]:
+        """Σ over the goal's accounts of (monthly inflow × share), each converted
+        to the goal currency (ADR-058 R4c). Inflows are deposits/payments into
+        each contributing account; a month with no convertible contribution is
+        simply absent."""
+        accounts = {a.id: a for a in self._repo.list_accounts()}
+        out: dict[str, Decimal] = {}
+        for link in goal.accounts:
+            acc = accounts.get(link.account_id)
+            if acc is None:
+                continue
+            share = Decimal(link.share_bp) / Decimal(10000)
+            inflows = self._repo.account_inflows_by_month(
+                link.account_id, months[0], months[-1],
+            )
+            for m, amt in inflows.items():
+                conv, _ = self._repo.convert_amount(
+                    amt * share, from_ccy=acc.currency, to_ccy=goal.currency,
+                    on_date=f"{m}-28",
+                )
+                if conv is None:
+                    continue
+                out[m] = out.get(m, Decimal("0.00")) + conv
+        return out
+
     def _render_goals(self, budget: Budget, today: date) -> None:
         """Rebuild the goals strip: one card per goal + an Add button. Cards are
-        computed off live balances (balance-based progress, ADR-058 R4b)."""
+        computed off live balances (balance-based progress, ADR-058 R4b/R4c)."""
         self._clear_goals_bar()
         self._goals_bar.setVisible(True)
 
         goals = self._repo.list_budget_goals(budget.id)
-        accounts = {a.id: a for a in self._repo.list_accounts()}
-        balances = self._repo.compute_account_balances()
-        progs = goal_calc.compute_goals(
-            goals,
-            balances=balances,
-            account_info={a.id: (a.name, a.currency) for a in accounts.values()},
-            today=today,
+        aggs = self._repo.compute_goal_aggregates(
+            budget.id, on_date=today.isoformat(),
         )
 
         self._goals_layout.addWidget(QLabel("Goals:"))
-        for prog in progs:
+        for g in goals:
+            agg = aggs.get(g.id)
+            if agg is None:
+                continue
+            prog = goal_calc.compute_goal_progress(
+                g, start_amount=agg.start, current_amount=agg.current,
+                today=today, rate_missing=bool(agg.excluded),
+            )
             self._goals_layout.addWidget(_GoalCard(prog, self._on_edit_goal))
         add = QPushButton("＋ Goal…")
-        add.setToolTip("Set a pay-down goal for a card in this budget")
+        add.setToolTip("Set a savings or pay-down goal in this budget")
         add.clicked.connect(self._on_add_goal)
         self._goals_layout.addWidget(add)
         self._goals_layout.addStretch(1)
@@ -887,38 +921,65 @@ class BudgetWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
 
-    def _eligible_goal_accounts(self, budget: Budget) -> list[AccountSummary]:
-        """Perimeter accounts that can take a *new* goal: liabilities (a card /
-        debt) in this budget that don't already have one."""
-        perimeter = set(self._repo.list_budget_account_contributions(budget.id))
-        taken = {g.account_id for g in self._repo.list_budget_goals(budget.id)}
+    def _goal_candidate_accounts(self, budget: Budget) -> list[AccountSummary]:
+        """Accounts eligible for a goal: assets in the cash/investment families
+        (to save toward) or liabilities (to pay down). The dialog filters by the
+        chosen kind; an account can join several goals, split by share, so
+        there's no 'already taken' exclusion (ADR-058 R4c).
+
+        Goal accounts are deliberately **not** restricted to the budget perimeter
+        — a savings/investment/pension vehicle you fund is usually outside your
+        day-to-day spending perimeter (whose membership drives the pool +
+        actuals), yet it's exactly what a savings goal targets."""
         return [
             a for a in self._repo.list_accounts()
-            if a.id in perimeter and a.is_liability and a.id not in taken
+            if a.is_liability or a.family in ("cash", "investment")
         ]
+
+    def _goal_share_used(
+        self, budget: Budget, exclude_goal_id: Optional[int] = None,
+    ) -> dict[int, int]:
+        """``account_id -> total share_bp`` already committed across the budget's
+        goals (optionally excluding one goal, for edit mode) — feeds the dialog's
+        >100% over-commit warning."""
+        used: dict[int, int] = {}
+        for g in self._repo.list_budget_goals(budget.id):
+            if exclude_goal_id is not None and g.id == exclude_goal_id:
+                continue
+            for link in g.accounts:
+                used[link.account_id] = used.get(link.account_id, 0) + link.share_bp
+        return used
 
     def _on_add_goal(self) -> None:
         if self._budget is None:
             return
-        eligible = self._eligible_goal_accounts(self._budget)
-        if not eligible:
+        candidates = self._goal_candidate_accounts(self._budget)
+        if not candidates:
             QMessageBox.information(
                 None, "No account to set a goal on",
-                "A pay-down goal needs a credit card or other debt account "
-                "that's in this budget's accounts and doesn't already have a "
-                "goal.\n\nAdd one via Set up… ▸ Accounts first.",
+                "A goal needs a savings/investment account (to save toward) or a "
+                "credit/debt account (to pay down) in this budget's accounts."
+                "\n\nAdd one via Set up… ▸ Accounts first.",
             )
             return
-        dlg = GoalDialog(accounts=eligible, parent=None)
+        dlg = GoalDialog(
+            candidates=candidates,
+            currencies=self._repo.list_distinct_currencies(),
+            base_currency=self._display_ccy(),
+            share_used=self._goal_share_used(self._budget),
+            parent=None,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         self._repo.add_budget_goal(
             budget_id=self._budget.id,
-            account_id=dlg.result_account_id(),
+            name=dlg.result_name(),
+            kind=dlg.result_kind(),
+            currency=dlg.result_currency(),
             target_amount=dlg.result_target_amount(),
             target_date=dlg.result_target_date(),
+            accounts=dlg.result_accounts(),
             today=date.today().isoformat(),
-            kind=dlg.result_kind(),
         )
         self._render()
 
@@ -932,11 +993,16 @@ class BudgetWindow(QMainWindow):
         )
         if goal is None:
             return
-        account = next(
-            (a for a in self._repo.list_accounts() if a.id == goal.account_id),
-            None,
+        dlg = GoalDialog(
+            candidates=self._goal_candidate_accounts(self._budget),
+            currencies=self._repo.list_distinct_currencies(),
+            base_currency=self._display_ccy(),
+            share_used=self._goal_share_used(
+                self._budget, exclude_goal_id=goal_id,
+            ),
+            goal=goal,
+            parent=None,
         )
-        dlg = GoalDialog(accounts=[], goal=goal, account=account, parent=None)
         if dlg.exec() != QDialog.Accepted:
             return
         if dlg.was_deleted():
@@ -944,8 +1010,12 @@ class BudgetWindow(QMainWindow):
         else:
             self._repo.update_budget_goal(
                 goal_id,
+                name=dlg.result_name(),
                 target_amount=dlg.result_target_amount(),
                 target_date=dlg.result_target_date(),
+                currency=dlg.result_currency(),
+                accounts=dlg.result_accounts(),
+                today=date.today().isoformat(),
             )
         self._render()
 

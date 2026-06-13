@@ -301,22 +301,48 @@ class BudgetAllocation:
 
 
 @dataclass(frozen=True)
+class GoalAccountLink:
+    """One account's contribution to a goal (ADR-058 R4c). ``share_bp`` is basis
+    points (0..10000 = 0..100%) of the account's balance that counts toward the
+    goal; ``baseline_balance`` is the account's **full** signed native balance at
+    link creation — the share is applied at compute time, so changing a share
+    never needs a re-baseline. ``start_date`` is when this link was created."""
+    account_id: int
+    share_bp: int
+    baseline_balance: Decimal   # signed native balance at link creation
+    start_date: str             # 'YYYY-MM-DD'
+
+
+@dataclass(frozen=True)
 class BudgetGoal:
-    """A pay-down (or, later, savings) goal on one account in a budget
-    (ADR-058 R4b). ``target_amount`` / ``start_amount`` are **signed** balances
-    in the account's own currency (a card you owe £1,800 on is -1800.00);
-    ``start_amount`` / ``start_date`` are the baseline captured at creation, so
-    progress is measured from there. The required-monthly and progress figures
-    are computed live in :mod:`mfl_desktop.goal_calc`, never stored."""
+    """A savings or pay-down goal in a budget (ADR-058 R4b/R4c). A goal spans one
+    or more accounts (``accounts``), each contributing ``share_bp`` of its
+    balance; the goal rolls them up — converting each to ``currency`` via the FX
+    layer (ADR-055) — toward ``target_amount`` by ``target_date``.
+    ``target_amount`` is a **signed** balance in ``currency`` (a card you owe
+    £1,800 on is -1800.00; a £30,000 savings target is +30000.00). Per-account
+    baselines live on the links; the required-monthly and progress figures are
+    computed live in :mod:`mfl_desktop.goal_calc`, never stored."""
     id: int
     iri: str
     budget_id: int
-    account_id: int
+    name: str
     kind: str                   # 'paydown' | 'savings'
-    target_amount: Decimal      # signed target balance
+    currency: str               # the goal's reporting currency
+    target_amount: Decimal      # signed target balance in `currency`
     target_date: str            # 'YYYY-MM-DD'
-    start_amount: Decimal       # signed balance at creation
-    start_date: str             # 'YYYY-MM-DD'
+    accounts: tuple["GoalAccountLink", ...] = ()
+
+
+@dataclass(frozen=True)
+class GoalAggregate:
+    """A goal's account links rolled up + converted to its currency (ADR-058
+    R4c). ``start`` / ``current`` are signed Decimals in the goal currency;
+    ``excluded`` names accounts that couldn't be converted (no FX rate — excluded
+    per ADR-055, never par-added)."""
+    start: Decimal
+    current: Decimal
+    excluded: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -5651,18 +5677,27 @@ class Repository:
                 "WHERE ol.budget_id = ?",
                 (new_id, budget_id),
             )
-            # Goals (R4b): copy each onto the new budget with a fresh IRI,
-            # keeping the same account + target + captured baseline so the
-            # scenario starts where the source did.
+            # Goals (R4b/R4c): copy each goal onto the new budget with a fresh
+            # IRI, then its account links — baseline / share / start_date are
+            # preserved so the scenario starts where the source did.
             for g in self.list_budget_goals(budget_id):
-                self._conn.execute(
-                    "INSERT INTO budget_goal (iri, budget_id, account_id, "
-                    "kind, target_amount, target_date, start_amount, "
-                    "start_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (new_goal_iri(), new_id, g.account_id, g.kind,
-                     decimal_to_pence(g.target_amount), g.target_date,
-                     decimal_to_pence(g.start_amount), g.start_date),
+                gcur = self._conn.execute(
+                    "INSERT INTO budget_goal (iri, budget_id, name, kind, "
+                    "currency, target_amount, target_date) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (new_goal_iri(), new_id, g.name, g.kind, g.currency,
+                     decimal_to_pence(g.target_amount), g.target_date),
                 )
+                ngid = int(gcur.lastrowid)
+                for link in g.accounts:
+                    self._conn.execute(
+                        "INSERT INTO budget_goal_account (goal_id, account_id, "
+                        "share_bp, baseline_balance, start_date) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (ngid, link.account_id, link.share_bp,
+                         decimal_to_pence(link.baseline_balance),
+                         link.start_date),
+                    )
             self.commit()
         except Exception:
             self.rollback()
@@ -5678,55 +5713,80 @@ class Repository:
             self.rollback()
             raise
 
-    # ── pay-down / savings goals (ADR-058 R4b) ──
-
-    def _goal_from_row(self, r) -> BudgetGoal:
-        return BudgetGoal(
-            id=int(r["id"]), iri=r["iri"], budget_id=int(r["budget_id"]),
-            account_id=int(r["account_id"]), kind=r["kind"],
-            target_amount=pence_to_decimal(r["target_amount"]),
-            target_date=r["target_date"],
-            start_amount=pence_to_decimal(r["start_amount"]),
-            start_date=r["start_date"],
-        )
+    # ── savings / pay-down goals (ADR-058 R4b/R4c) ──
 
     def list_budget_goals(self, budget_id: int) -> list[BudgetGoal]:
-        """All goals in a budget, oldest first."""
-        cur = self._conn.execute(
-            "SELECT id, iri, budget_id, account_id, kind, target_amount, "
-            "target_date, start_amount, start_date FROM budget_goal "
-            "WHERE budget_id = ? ORDER BY id",
+        """All goals in a budget, oldest first, each with its account links."""
+        goal_rows = self._conn.execute(
+            "SELECT id, iri, budget_id, name, kind, currency, target_amount, "
+            "target_date FROM budget_goal WHERE budget_id = ? ORDER BY id",
             (budget_id,),
-        )
-        return [self._goal_from_row(r) for r in cur]
+        ).fetchall()
+        if not goal_rows:
+            return []
+        links: dict[int, list[GoalAccountLink]] = {}
+        for r in self._conn.execute(
+            "SELECT ga.goal_id, ga.account_id, ga.share_bp, ga.baseline_balance, "
+            "       ga.start_date "
+            "FROM budget_goal_account ga "
+            "JOIN budget_goal g ON g.id = ga.goal_id "
+            "WHERE g.budget_id = ? ORDER BY ga.id",
+            (budget_id,),
+        ):
+            links.setdefault(int(r["goal_id"]), []).append(GoalAccountLink(
+                account_id=int(r["account_id"]), share_bp=int(r["share_bp"]),
+                baseline_balance=pence_to_decimal(int(r["baseline_balance"])),
+                start_date=r["start_date"],
+            ))
+        return [
+            BudgetGoal(
+                id=int(r["id"]), iri=r["iri"], budget_id=int(r["budget_id"]),
+                name=r["name"], kind=r["kind"], currency=r["currency"],
+                target_amount=pence_to_decimal(int(r["target_amount"])),
+                target_date=r["target_date"],
+                accounts=tuple(links.get(int(r["id"]), [])),
+            )
+            for r in goal_rows
+        ]
 
     def add_budget_goal(
         self,
         *,
         budget_id: int,
-        account_id: int,
+        name: str,
+        kind: str,
+        currency: str,
         target_amount: Decimal,
         target_date: str,
+        accounts: list[tuple[int, int]],   # (account_id, share_bp)
         today: str,
-        kind: str = "paydown",
     ) -> int:
-        """Create a goal, capturing the account's *current* balance as the
-        baseline (ADR-058 R4b — progress is measured from creation, so later
-        charges reduce it). Raises on a duplicate ``(budget_id, account_id)``."""
-        start_amount = self.compute_account_balances().get(
-            account_id, Decimal("0.00"),
-        )
+        """Create a goal + its account links (ADR-058 R4c). ``accounts`` is
+        ``(account_id, share_bp)`` pairs (share_bp = basis points, 10000 = 100%);
+        each link captures the account's *current* native balance as its baseline
+        so progress is measured from creation."""
+        if not accounts:
+            raise ValueError("A goal needs at least one account.")
+        balances = self.compute_account_balances()
         try:
             cur = self._conn.execute(
-                "INSERT INTO budget_goal (iri, budget_id, account_id, kind, "
-                "target_amount, target_date, start_amount, start_date) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (new_goal_iri(), budget_id, account_id, kind,
-                 decimal_to_pence(target_amount), target_date,
-                 decimal_to_pence(start_amount), today),
+                "INSERT INTO budget_goal (iri, budget_id, name, kind, currency, "
+                "target_amount, target_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (new_goal_iri(), budget_id, (name or "").strip(), kind, currency,
+                 decimal_to_pence(target_amount), target_date),
             )
+            goal_id = int(cur.lastrowid)
+            for account_id, share_bp in accounts:
+                baseline = balances.get(account_id, Decimal("0.00"))
+                self._conn.execute(
+                    "INSERT INTO budget_goal_account (goal_id, account_id, "
+                    "share_bp, baseline_balance, start_date) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (goal_id, account_id, int(share_bp),
+                     decimal_to_pence(baseline), today),
+                )
             self.commit()
-            return int(cur.lastrowid)
+            return goal_id
         except Exception:
             self.rollback()
             raise
@@ -5735,32 +5795,126 @@ class Repository:
         self,
         goal_id: int,
         *,
+        name: Optional[str] = None,
         target_amount: Optional[Decimal] = None,
         target_date: Optional[str] = None,
+        currency: Optional[str] = None,
+        accounts: Optional[list[tuple[int, int]]] = None,
+        today: Optional[str] = None,
     ) -> None:
-        """Edit a goal's target balance and/or target date. The baseline
-        (``start_amount`` / ``start_date``) is immutable — re-baselining means
-        deleting and re-creating the goal."""
-        sets: list[str] = []
-        params: list = []
-        if target_amount is not None:
-            sets.append("target_amount = ?")
-            params.append(decimal_to_pence(target_amount))
-        if target_date is not None:
-            sets.append("target_date = ?")
-            params.append(target_date)
-        if not sets:
-            return
-        params.append(goal_id)
+        """Edit a goal's meta and/or reconcile its account links (ADR-058 R4c).
+        For ``accounts`` (``(account_id, share_bp)`` pairs): a kept account keeps
+        its captured baseline (only ``share_bp`` updates); a newly-added account
+        captures its baseline *now* (``today`` required); a removed account's link
+        is deleted. A kept account's baseline is immutable — re-baselining means
+        removing then re-adding it."""
         try:
-            self._conn.execute(
-                f"UPDATE budget_goal SET {', '.join(sets)} WHERE id = ?",
-                params,
-            )
+            sets: list[str] = []
+            params: list = []
+            if name is not None:
+                sets.append("name = ?")
+                params.append(name.strip())
+            if target_amount is not None:
+                sets.append("target_amount = ?")
+                params.append(decimal_to_pence(target_amount))
+            if target_date is not None:
+                sets.append("target_date = ?")
+                params.append(target_date)
+            if currency is not None:
+                sets.append("currency = ?")
+                params.append(currency)
+            if sets:
+                params.append(goal_id)
+                self._conn.execute(
+                    f"UPDATE budget_goal SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+            if accounts is not None:
+                if not accounts:
+                    raise ValueError("A goal needs at least one account.")
+                if today is None:
+                    raise ValueError("today is required to add goal accounts.")
+                existing = {
+                    int(r["account_id"]): int(r["share_bp"])
+                    for r in self._conn.execute(
+                        "SELECT account_id, share_bp FROM budget_goal_account "
+                        "WHERE goal_id = ?", (goal_id,),
+                    )
+                }
+                wanted = {int(aid): int(bp) for aid, bp in accounts}
+                for aid in set(existing) - set(wanted):       # removed
+                    self._conn.execute(
+                        "DELETE FROM budget_goal_account WHERE goal_id = ? "
+                        "AND account_id = ?", (goal_id, aid),
+                    )
+                balances = None
+                for aid, bp in wanted.items():
+                    if aid in existing:                       # kept — share only
+                        if existing[aid] != bp:
+                            self._conn.execute(
+                                "UPDATE budget_goal_account SET share_bp = ? "
+                                "WHERE goal_id = ? AND account_id = ?",
+                                (bp, goal_id, aid),
+                            )
+                    else:                                     # added — baseline now
+                        if balances is None:
+                            balances = self.compute_account_balances()
+                        baseline = balances.get(aid, Decimal("0.00"))
+                        self._conn.execute(
+                            "INSERT INTO budget_goal_account (goal_id, "
+                            "account_id, share_bp, baseline_balance, start_date) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (goal_id, aid, bp, decimal_to_pence(baseline), today),
+                        )
             self.commit()
         except Exception:
             self.rollback()
             raise
+
+    def compute_goal_aggregates(
+        self, budget_id: int, *, on_date: str,
+    ) -> dict[int, GoalAggregate]:
+        """Roll each goal's account links up into the goal's currency (ADR-058
+        R4c): ``start`` = Σ(baseline_balance × share), ``current`` =
+        Σ(current_balance × share), each converted from the account's currency to
+        the goal currency via the FX layer (ADR-055 — an account with no rate is
+        excluded + named, never par-added). Both bookends omit an excluded
+        account so they stay consistent."""
+        goals = self.list_budget_goals(budget_id)
+        if not goals:
+            return {}
+        balances = self.compute_account_balances()
+        accounts = {a.id: a for a in self.list_accounts()}
+        cents = Decimal("0.01")
+        out: dict[int, GoalAggregate] = {}
+        for g in goals:
+            start = Decimal("0.00")
+            current = Decimal("0.00")
+            excluded: list[str] = []
+            for link in g.accounts:
+                acc = accounts.get(link.account_id)
+                if acc is None:
+                    continue
+                share = Decimal(link.share_bp) / Decimal(10000)
+                base_c, _ = self.convert_amount(
+                    link.baseline_balance * share,
+                    from_ccy=acc.currency, to_ccy=g.currency, on_date=on_date,
+                )
+                cur_c, _ = self.convert_amount(
+                    balances.get(link.account_id, Decimal("0.00")) * share,
+                    from_ccy=acc.currency, to_ccy=g.currency, on_date=on_date,
+                )
+                if base_c is None or cur_c is None:
+                    excluded.append(acc.name)
+                    continue
+                start += base_c
+                current += cur_c
+            out[g.id] = GoalAggregate(
+                start=start.quantize(cents, rounding=ROUND_HALF_UP),
+                current=current.quantize(cents, rounding=ROUND_HALF_UP),
+                excluded=tuple(excluded),
+            )
+        return out
 
     def account_inflows_by_month(
         self, account_id: int, start_month: str, end_month: str,

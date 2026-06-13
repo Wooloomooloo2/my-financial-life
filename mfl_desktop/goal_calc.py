@@ -1,22 +1,26 @@
-"""Goal computation — pure Python, no Qt, no SQL (ADR-058 R4b).
+"""Goal computation — pure Python, no Qt, no SQL (ADR-058 R4b/R4c).
 
-Turns a stored goal (a target balance + date plus the baseline captured at
-creation) and an account's live balance into the figures the UI shows: the work
-still to do, the **required monthly contribution** to hit the target on time,
-and **balance-based progress** (measured from the captured baseline, so later
-charges that push a card's balance back up visibly reduce progress).
+Turns a goal (a target balance + date) and its **already-aggregated** start /
+current balances into the figures the UI shows: the work still to do, the
+**required monthly contribution** to hit the target on time, and **balance-based
+progress** (measured from the baseline captured at creation, so later activity
+moves it).
+
+A goal can span many accounts in possibly-different currencies (ADR-058 R4c).
+The roll-up + FX conversion into the goal's currency happen in the Repository
+(``compute_goal_aggregates``) / window, mirroring how ``compute_perimeter_pool``
+feeds ``budget_calc`` — so this module stays pure and just does the math on the
+two pre-converted signed Decimals.
 
 The math runs on **signed balances**, so it works unchanged for a pay-down (a
 liability climbing toward 0) and a savings goal (an asset climbing toward a
-larger figure) — the R4c direction is the very same formula, which is why the
-``kind`` flag carries no math, only labelling.
+larger figure) — the ``kind`` flag carries no math, only labelling.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Iterable
 
 from mfl_desktop.db.repository import BudgetGoal
 
@@ -25,15 +29,14 @@ _ZERO = Decimal("0.00")
 
 @dataclass(frozen=True)
 class GoalProgress:
-    """Live view of one goal. Amounts are in the account's own currency (a goal
-    is single-account, so no FX) and signed like a balance."""
+    """Live view of one goal, in the goal's reporting currency (signed like a
+    balance)."""
     goal_id: int
-    account_id: int
-    account_name: str
+    name: str
     kind: str                # 'paydown' | 'savings'
     currency: str
-    start_amount: Decimal    # signed baseline balance (at creation)
-    current_amount: Decimal  # signed live balance
+    start_amount: Decimal    # signed baseline aggregate (at creation)
+    current_amount: Decimal  # signed live aggregate
     target_amount: Decimal   # signed target balance
     target_date: str
     remaining: Decimal       # work still to do toward target (>= 0)
@@ -42,6 +45,8 @@ class GoalProgress:
     progress_pct: float      # 0..100, clamped
     is_met: bool
     is_overdue: bool
+    account_count: int       # how many accounts contribute
+    rate_missing: bool       # a contributing account couldn't be converted
 
 
 def _parse(d: str) -> date:
@@ -56,13 +61,14 @@ def _months_between(a: date, b: date) -> int:
 def compute_goal_progress(
     goal: BudgetGoal,
     *,
+    start_amount: Decimal,
     current_amount: Decimal,
-    account_name: str,
-    currency: str,
     today: date,
+    rate_missing: bool = False,
 ) -> GoalProgress:
-    """One goal's live figures. Pure — fixture-friendly via ``today``."""
-    start = goal.start_amount
+    """One goal's live figures from its (pre-aggregated, goal-currency) start +
+    current balances. Pure — fixture-friendly via ``today``."""
+    start = start_amount
     target = goal.target_amount
     span = target - start            # signed total distance to cover
     moved = current_amount - start   # signed distance covered so far
@@ -93,31 +99,11 @@ def compute_goal_progress(
     is_overdue = (tgt_date < today) and not is_met
 
     return GoalProgress(
-        goal_id=goal.id, account_id=goal.account_id,
-        account_name=account_name, kind=goal.kind, currency=currency,
+        goal_id=goal.id, name=goal.name, kind=goal.kind, currency=goal.currency,
         start_amount=start, current_amount=current_amount,
         target_amount=target, target_date=goal.target_date,
         remaining=remaining, months_left=months_left,
         required_monthly=required_monthly, progress_pct=progress_pct,
         is_met=is_met, is_overdue=is_overdue,
+        account_count=len(goal.accounts), rate_missing=rate_missing,
     )
-
-
-def compute_goals(
-    goals: Iterable[BudgetGoal],
-    *,
-    balances: dict[int, Decimal],
-    account_info: dict[int, tuple[str, str]],   # account_id -> (name, currency)
-    today: date,
-) -> list[GoalProgress]:
-    """Compute progress for many goals against current balances. Thin
-    orchestration so the window stays declarative; still pure (no Repository,
-    no Qt)."""
-    out: list[GoalProgress] = []
-    for g in goals:
-        name, ccy = account_info.get(g.account_id, ("?", ""))
-        out.append(compute_goal_progress(
-            g, current_amount=balances.get(g.account_id, _ZERO),
-            account_name=name, currency=ccy, today=today,
-        ))
-    return out
