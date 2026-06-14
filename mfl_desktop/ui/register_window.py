@@ -57,6 +57,7 @@ from mfl_desktop.ui.delegates import (
     StatusDelegate,
 )
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
+from mfl_desktop.ui.register_filters_popover import RegisterFiltersPopover
 from mfl_desktop.ui.payees_dialog import PayeesDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
@@ -151,6 +152,11 @@ _COLUMN_WIDTHS = {
 
 
 class RegisterWindow(QMainWindow):
+    # ADR-062: Filters button label, with a trailing dot when any date/amount
+    # filter is active.
+    _FILTERS_LABEL = "Filters ▾"
+    _FILTERS_LABEL_ACTIVE = "Filters ▾  ●"
+
     def __init__(
         self,
         repo: Repository,
@@ -258,6 +264,16 @@ class RegisterWindow(QMainWindow):
         filter_bar.addSpacing(12)
         filter_bar.addWidget(QLabel("Status:"))
         filter_bar.addWidget(status_combo)
+        filter_bar.addSpacing(12)
+        # A5 (ADR-062): date-range + amount-range filters live in a popover so
+        # the bar stays uncluttered. _filter_from_iso (the date-From lower bound)
+        # also widens the load window via _effective_since so an early From is
+        # reachable regardless of the Show preset.
+        self._filter_from_iso: Optional[str] = None
+        self._filters_popover: Optional[RegisterFiltersPopover] = None
+        self._filters_btn = QPushButton(self._FILTERS_LABEL)
+        self._filters_btn.clicked.connect(self._on_filters_button)
+        filter_bar.addWidget(self._filters_btn)
         filter_bar.addStretch(1)
         # A3 (2026-06-14): a visible New Transaction button for mouse/trackpad
         # users — same handler as the Transaction menu item and Ctrl/⌘+N.
@@ -427,7 +443,7 @@ class RegisterWindow(QMainWindow):
         self._account = acct
         self._update_window_title()
         self._set_model(TransactionTableModel(
-            self._repo, account_id=acct.id, since=self._current_since(),
+            self._repo, account_id=acct.id, since=self._effective_since(),
             invest=(acct.family == "investment"),
         ))
         self._import_action.setEnabled(True)
@@ -438,7 +454,7 @@ class RegisterWindow(QMainWindow):
         self._account = None
         self._update_window_title()
         self._set_model(TransactionTableModel(
-            self._repo, account_id=None, since=self._current_since(),
+            self._repo, account_id=None, since=self._effective_since(),
         ))
         self._import_action.setEnabled(False)
         self._import_action.setToolTip(
@@ -461,6 +477,16 @@ class RegisterWindow(QMainWindow):
         days = {"30d": 30, "90d": 90}.get(key, 90)
         return (today - timedelta(days=days)).isoformat()
 
+    def _effective_since(self) -> Optional[str]:
+        """The actual load lower bound (ADR-062): the Show preset's `since`,
+        widened earlier if the Filters popover's date-From sits before it, so an
+        early From is reachable. `None` (All / no preset bound) loads everything,
+        so a From can only narrow there (handled by the proxy), never widen."""
+        preset = self._current_since()
+        if self._filter_from_iso is None or preset is None:
+            return preset
+        return min(preset, self._filter_from_iso)
+
     def _on_window_change(self, index: int) -> None:
         """Date-window combo changed — re-window the current model in place.
 
@@ -468,7 +494,7 @@ class RegisterWindow(QMainWindow):
         resets the rows (no delegate/​column-width teardown). The proxy
         re-sorts on the model reset, keeping the active sort column."""
         self._window_key = self._window_combo.itemData(index)
-        self._model.set_since(self._current_since())
+        self._model.set_since(self._effective_since())
 
     def _update_window_title(self) -> None:
         # A dataset loaded from the library is a working *copy* on the bench file,
@@ -576,6 +602,33 @@ class RegisterWindow(QMainWindow):
         # a single _update_status walk. *args absorbs the rows{Inserted,Removed}
         # (parent, first, last) payloads.
         self._status_timer.start()
+
+    def _on_filters_button(self) -> None:
+        # ADR-062: toggle the date/amount Filters popover under the button.
+        if self._filters_popover is None:
+            self._filters_popover = RegisterFiltersPopover(self)
+            self._filters_popover.filters_changed.connect(self._on_filters_changed)
+        pop = self._filters_popover
+        if pop.isVisible():
+            pop.hide()
+        else:
+            pop.popup_under(self._filters_btn)
+
+    def _on_filters_changed(
+        self, date_from, date_to, amount_min, amount_max,
+    ) -> None:
+        # ADR-062: push the in-memory date/amount filters; widen the load window
+        # first if an early date-From now needs rows the Show preset didn't load.
+        self._filter_from_iso = date_from
+        new_since = self._effective_since()
+        if new_since != self._model.current_since():
+            self._model.set_since(new_since)
+        self._proxy.set_date_range(date_from, date_to)
+        self._proxy.set_amount_range(amount_min, amount_max)
+        active = self._filters_popover is not None and self._filters_popover.is_active()
+        self._filters_btn.setText(
+            self._FILTERS_LABEL_ACTIVE if active else self._FILTERS_LABEL
+        )
 
     def _update_status(self) -> None:
         visible = self._proxy.rowCount()

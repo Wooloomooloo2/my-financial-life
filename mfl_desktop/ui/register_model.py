@@ -137,6 +137,11 @@ class TransactionTableModel(QAbstractTableModel):
     def search_blob_at(self, source_row: int) -> str:
         return self._search_blobs[source_row]
 
+    def current_since(self) -> str | None:
+        """The active load lower bound (ADR-041/062), so callers can avoid a
+        redundant reload when the effective bound hasn't changed."""
+        return self._since
+
     def set_since(self, since: str | None) -> None:
         """Change the date window (ADR-041) and reload in place. The column
         layout is unchanged, so the window can re-window an existing model

@@ -13,6 +13,7 @@ search for "3250" finds the £3,250 receipt *and* the -£3,250 payment).
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Optional
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel
@@ -27,6 +28,13 @@ class TransactionFilterProxy(QSortFilterProxyModel):
         self._search = ""
         self._status = "All"
         self._category_id: Optional[int] = None
+        # ADR-062: optional date range (inclusive 'YYYY-MM-DD' strings — bare
+        # lexicographic compare, no parsing) and signed-amount range. None on
+        # either end means unbounded there.
+        self._date_from: Optional[str] = None
+        self._date_to: Optional[str] = None
+        self._amt_min: Optional[Decimal] = None
+        self._amt_max: Optional[Decimal] = None
 
     def set_search(self, text: str) -> None:
         # Strip commas so "3,250" and "3250" both produce the same needle —
@@ -42,6 +50,22 @@ class TransactionFilterProxy(QSortFilterProxyModel):
 
     def set_category_id(self, category_id: Optional[int]) -> None:
         self._category_id = category_id
+        self.invalidateRowsFilter()
+
+    def set_date_range(
+        self, date_from: Optional[str], date_to: Optional[str],
+    ) -> None:
+        """Inclusive 'YYYY-MM-DD' bounds (either None = unbounded)."""
+        self._date_from = date_from
+        self._date_to = date_to
+        self.invalidateRowsFilter()
+
+    def set_amount_range(
+        self, amount_min: Optional[Decimal], amount_max: Optional[Decimal],
+    ) -> None:
+        """Inclusive signed-amount bounds (either None = unbounded)."""
+        self._amt_min = amount_min
+        self._amt_max = amount_max
         self.invalidateRowsFilter()
 
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
@@ -68,6 +92,16 @@ class TransactionFilterProxy(QSortFilterProxyModel):
             # amount formats for every loaded row.
             if self._search not in model.search_blob_at(source_row):
                 return False
+        # ADR-062: date range — lexicographic on the stored ISO date, inclusive.
+        if self._date_from is not None and row.posted_date < self._date_from:
+            return False
+        if self._date_to is not None and row.posted_date > self._date_to:
+            return False
+        # ADR-062: signed-amount range, inclusive.
+        if self._amt_min is not None and row.amount < self._amt_min:
+            return False
+        if self._amt_max is not None and row.amount > self._amt_max:
+            return False
         return True
 
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
