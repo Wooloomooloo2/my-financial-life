@@ -1,8 +1,8 @@
 # ADR-018 — Reports framework + first chart: Spending Over Time
 
 **Date:** 2026-06-05
-**Status:** Accepted
-**Related:** ADR-008 (UI framework — PySide6); ADR-014 (Category kind — defines spending semantics)
+**Status:** Accepted (no-pies rule **narrowed by ADR-067**, 2026-06-14)
+**Related:** ADR-008 (UI framework — PySide6); ADR-014 (Category kind — defines spending semantics); ADR-067 (narrows the no-pies rule — a donut is allowed for a point-in-time composition of a single positive whole, e.g. the Net Worth donut; pies/donuts remain ruled out for time-series and cross-series comparison)
 
 ---
 

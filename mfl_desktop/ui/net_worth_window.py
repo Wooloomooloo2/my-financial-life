@@ -1,12 +1,16 @@
 """Net Worth — assets vs debts at a glance.
 
-Three columns: Summary on the left (total + horizontal proportional bar +
+Three columns: Summary on the left (net-worth total + two **two-ring donut
+charts** — a larger Assets donut and a smaller Debts donut — plus a
 colour-coded legend), Assets in the middle (grouped by family with each
 account listed), Debts on the right (mirror of Assets in red). + Asset
 and + Debt buttons at the bottom of their columns open the existing
 AccountDialog so adding shows up in the report on accept.
 
-Pies are deliberately substituted with a proportional bar — owner rule.
+The donuts' inner ring is account *type* and the outer ring is the
+individual accounts within each type (ADR-067 — an owner-approved exception
+to the ADR-018 "no pies" rule for this point-in-time composition view;
+debts get their own donut because a donut can't hold a negative slice).
 Investment balances are market value (cash + Σ shares × latest price, ADR-044);
 property/vehicle use the cash formula until the valuation pipeline lands.
 
@@ -47,7 +51,7 @@ from mfl_desktop.account_types import ACCOUNT_TYPES
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui.account_dialog import AccountDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
-from mfl_desktop.ui.proportional_bar import BarSegment, ProportionalBar
+from mfl_desktop.ui.donut_chart import DonutChart, DonutChild, DonutSegment
 
 
 # Family → (display label, color, kind) where kind ∈ {"asset","debt"}.
@@ -138,7 +142,8 @@ class NetWorthWindow(QMainWindow):
 
         # ── columns ──
         self._summary_panel, self._summary_total_lbl, \
-            self._bar, self._legend_layout = self._build_summary_panel()
+            self._assets_donut, self._debts_donut, self._debts_donut_title, \
+            self._legend_layout = self._build_summary_panel()
         self._assets_panel, self._assets_total_lbl, \
             self._assets_tree = self._build_side_panel(is_asset=True)
         self._debts_panel, self._debts_total_lbl, \
@@ -151,7 +156,7 @@ class NetWorthWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 1)
-        splitter.setSizes([400, 400, 400])
+        splitter.setSizes([500, 370, 370])
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -189,11 +194,13 @@ class NetWorthWindow(QMainWindow):
         self._ccy_combo.setCurrentIndex(i if i >= 0 else 0)
         self._ccy_combo.blockSignals(False)
 
-    def _build_summary_panel(self) -> tuple[QWidget, QLabel, ProportionalBar, QVBoxLayout]:
+    def _build_summary_panel(
+        self,
+    ) -> tuple[QWidget, QLabel, DonutChart, DonutChart, QLabel, QVBoxLayout]:
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         title = QLabel("Net Worth")
         title.setStyleSheet("color: #6b7280;")
@@ -207,21 +214,47 @@ class NetWorthWindow(QMainWindow):
         big.setBold(True)
         total_lbl.setFont(big)
 
-        bar = ProportionalBar()
+        # Assets donut — the main visual, takes the available vertical space.
+        assets_donut = DonutChart()
+        assets_donut.setMinimumHeight(240)
 
-        layout.addWidget(title)
-        layout.addWidget(total_lbl)
-        layout.addSpacing(6)
-        layout.addWidget(bar)
-        layout.addSpacing(8)
+        # Debts donut (smaller) sits beside the legend in a row below.
+        debts_donut_title = QLabel("DEBTS")
+        debts_donut_title.setStyleSheet(
+            "color: #6b7280; letter-spacing: 1px; margin-top: 6px;"
+        )
+        debts_donut = DonutChart()
+        debts_donut.setFixedSize(190, 190)
 
         # Legend rows are added dynamically by _refresh.
         legend = QVBoxLayout()
         legend.setContentsMargins(0, 0, 0, 0)
         legend.setSpacing(4)
-        layout.addLayout(legend)
-        layout.addStretch(1)
-        return panel, total_lbl, bar, legend
+        legend_holder = QWidget()
+        legend_holder.setLayout(legend)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(12)
+        debts_col = QVBoxLayout()
+        debts_col.setContentsMargins(0, 0, 0, 0)
+        debts_col.setSpacing(2)
+        debts_col.addWidget(debts_donut_title)
+        debts_col.addWidget(debts_donut)
+        debts_col.addStretch(1)
+        bottom_row.addLayout(debts_col, 0)
+        bottom_row.addWidget(legend_holder, 1)
+
+        layout.addWidget(title)
+        layout.addWidget(total_lbl)
+        layout.addSpacing(6)
+        layout.addWidget(assets_donut, stretch=1)
+        layout.addSpacing(4)
+        layout.addLayout(bottom_row)
+        return (
+            panel, total_lbl, assets_donut, debts_donut,
+            debts_donut_title, legend,
+        )
 
     def _build_side_panel(self, *, is_asset: bool) -> tuple[QWidget, QLabel, QTreeWidget]:
         panel = QWidget()
@@ -407,19 +440,33 @@ class NetWorthWindow(QMainWindow):
             "color: " + (_ASSET_COLOR.name() if net_worth >= 0 else _DEBT_COLOR.name()) + ";"
         )
 
-        # Proportional bar — assets only.
-        self._bar.set_segments([
-            BarSegment(label=ft.label, amount=ft.total, color=ft.color)
-            for ft in family_totals if ft.kind == "asset"
-        ])
-
-        # Legend.
-        self._rebuild_legend(family_totals)
-
-        # Type-level totals power the Assets / Debts columns. The summary
-        # panel stays family-level (above) so the proportional bar doesn't
-        # explode into 5–10 segments.
+        # Type-level totals power both the donuts and the Assets / Debts
+        # columns (finer-grained than family).
         type_totals = self._compute_type_totals(by_family)
+
+        # Donuts (ADR-067): inner ring = account type, outer ring = the
+        # individual accounts. Assets and debts get separate donuts because a
+        # donut can't carry a negative slice; debts are over positive
+        # magnitudes (the stored-negative balances are flipped in
+        # _compute_type_totals / _donut_segments).
+        symbol = _symbol(self._display_ccy) or "£"
+        asset_segs = self._donut_segments(type_totals, kind="asset")
+        self._assets_donut.set_data(
+            segments=asset_segs, center_label="Assets",
+            center_sub=self._format(asset_total), symbol=symbol,
+        )
+        debt_segs = self._donut_segments(type_totals, kind="debt")
+        has_debts = bool(debt_segs)
+        self._debts_donut.setVisible(has_debts)
+        self._debts_donut_title.setVisible(has_debts)
+        if has_debts:
+            self._debts_donut.set_data(
+                segments=debt_segs, center_label="Debts",
+                center_sub=self._format(debt_total), symbol=symbol,
+            )
+
+        # Legend (family-level colour key, shared with the donut inner ring).
+        self._rebuild_legend(family_totals)
 
         # Assets column header total + tree.
         self._assets_total_lbl.setText(self._format(asset_total))
@@ -465,6 +512,51 @@ class NetWorthWindow(QMainWindow):
                 total=total,
             ))
         return result
+
+    def _donut_segments(
+        self, type_totals: list[_TypeTotal], *, kind: str,
+    ) -> list[DonutSegment]:
+        """Build the two-ring donut data for one balance-sheet side (ADR-067):
+        one :class:`DonutSegment` per account type (inner ring), each carrying
+        its accounts as :class:`DonutChild` outer slices. Values are in the
+        display currency; unconvertable accounts (no rate) are skipped — they
+        already show in the missing-rate banner. Debt balances (stored
+        negative) are flipped to positive magnitudes so they form a donut."""
+        segments: list[DonutSegment] = []
+        for tt in type_totals:
+            if tt.kind != kind or tt.total <= 0:
+                continue
+            members: list[tuple[str, float]] = []
+            for acct in tt.accounts:
+                conv = self._converted.get(acct.id)
+                if conv is None:
+                    continue
+                val = float(-conv if kind == "debt" else conv)
+                if val <= 0:
+                    continue
+                members.append((acct.name, val))
+            n = len(members)
+            children = tuple(
+                DonutChild(
+                    label=name, value=val, color=self._shade(tt.color, i, n),
+                )
+                for i, (name, val) in enumerate(members)
+            )
+            segments.append(DonutSegment(
+                label=tt.type_label, value=float(tt.total),
+                color=tt.color, children=children,
+            ))
+        return segments
+
+    @staticmethod
+    def _shade(base: QColor, index: int, count: int) -> QColor:
+        """Progressively lighter tints of a type's colour so the individual
+        accounts in the outer ring are distinguishable while staying clearly
+        part of the same type."""
+        if count <= 1:
+            return base.lighter(118)
+        factor = 112 + int(48 * index / (count - 1))
+        return base.lighter(factor)
 
     def _rebuild_legend(self, family_totals: list[_FamilyTotal]) -> None:
         # Drop every previous legend row.
