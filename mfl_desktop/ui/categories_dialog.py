@@ -36,8 +36,10 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -61,6 +63,7 @@ from mfl_desktop.db.repository import CATEGORY_KINDS, CategoryNode, Repository
 # id assigned to the reserved Uncategorised row in 0001_initial.sql.
 UNCATEGORISED_ID = 1
 DEFAULT_NEW_KIND = "expense"
+_ARCHIVED_FG = QColor("#94a3b8")   # slate-400 — muted text for archived rows
 
 
 class CategoriesDialog(QDialog):
@@ -98,21 +101,32 @@ class CategoriesDialog(QDialog):
         self._reparent_btn = QPushButton("Re&parent…")
         self._change_kind_btn = QPushButton("Change &Kind…")
         self._merge_btn = QPushButton("&Merge…")
+        # ADR-070: one verb that flips between Archive and Restore depending
+        # on whether the selection is already archived.
+        self._archive_btn = QPushButton("&Archive")
         self._delete_btn = QPushButton("&Delete")
         self._new_btn.clicked.connect(self._on_new)
         self._rename_btn.clicked.connect(self._on_rename)
         self._reparent_btn.clicked.connect(self._on_reparent)
         self._change_kind_btn.clicked.connect(self._on_change_kind)
         self._merge_btn.clicked.connect(self._on_merge)
+        self._archive_btn.clicked.connect(self._on_archive_or_restore)
         self._delete_btn.clicked.connect(self._on_delete)
+
+        # 'Show archived' surfaces the hidden categories (greyed) so they can
+        # be restored or permanently deleted (ADR-070).
+        self._show_archived_chk = QCheckBox("Show archived")
+        self._show_archived_chk.toggled.connect(self._on_show_archived_toggled)
 
         action_row = QHBoxLayout()
         action_row.addWidget(self._new_btn)
+        action_row.addWidget(self._show_archived_chk)
         action_row.addStretch(1)
         action_row.addWidget(self._rename_btn)
         action_row.addWidget(self._reparent_btn)
         action_row.addWidget(self._change_kind_btn)
         action_row.addWidget(self._merge_btn)
+        action_row.addWidget(self._archive_btn)
         action_row.addWidget(self._delete_btn)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
@@ -134,7 +148,8 @@ class CategoriesDialog(QDialog):
     # ── tree population ──
 
     def _reload_tree(self) -> None:
-        nodes = self._repo.list_category_tree()
+        show_archived = self._show_archived_chk.isChecked()
+        nodes = self._repo.list_category_tree(include_archived=show_archived)
         self._nodes_by_id: dict[int, CategoryNode] = {n.id: n for n in nodes}
         children_of: dict[Optional[int], list[CategoryNode]] = {}
         for n in nodes:
@@ -146,11 +161,15 @@ class CategoriesDialog(QDialog):
 
         def add_subtree(parent_widget, parent_id: Optional[int]) -> None:
             for node in children_of.get(parent_id, []):
+                name = node.name + (" (archived)" if node.archived else "")
                 item = QTreeWidgetItem(
-                    [node.name, str(node.usage_count), node.kind, node.source]
+                    [name, str(node.usage_count), node.kind, node.source]
                 )
                 item.setData(0, Qt.UserRole, node.id)
                 item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+                if node.archived:
+                    for col in range(4):
+                        item.setForeground(col, QBrush(_ARCHIVED_FG))
                 if parent_widget is None:
                     self._tree.addTopLevelItem(item)
                 else:
@@ -197,6 +216,31 @@ class CategoriesDialog(QDialog):
         )
         self._merge_btn.setEnabled(len(ids) >= 2)
         self._delete_btn.setEnabled(len(ids) >= 1)
+
+        # Archive/Restore (ADR-070): the verb flips on whether the whole
+        # selection is already archived. Uncategorised can never be archived.
+        selected = [self._nodes_by_id[c] for c in ids if c in self._nodes_by_id]
+        archivable = [n for n in selected if n.id != UNCATEGORISED_ID]
+        all_archived = bool(selected) and all(n.archived for n in selected)
+        if all_archived:
+            self._archive_btn.setText("&Restore")
+            self._archive_btn.setEnabled(True)
+            self._archive_btn.setToolTip(
+                "Restore the selected categories (and their subtree + "
+                "ancestors) so they show up everywhere again."
+            )
+        else:
+            self._archive_btn.setText("&Archive")
+            # Enable when there's at least one not-yet-archived, non-reserved
+            # category to hide.
+            self._archive_btn.setEnabled(
+                any(not n.archived for n in archivable)
+            )
+            self._archive_btn.setToolTip(
+                "Hide the selected categories (and their subcategories). "
+                "History is kept and they still aggregate in reports; reopen "
+                "via 'Show archived' → Restore (ADR-070)."
+            )
 
     def _selected_ids(self) -> list[int]:
         ids: list[int] = []
@@ -245,6 +289,11 @@ class CategoriesDialog(QDialog):
         def walk(parent_id: Optional[int], depth: int) -> None:
             for node in children_of.get(parent_id, []):
                 if node.id in exclude_ids:
+                    continue
+                # Never offer an archived node as a parent — creating an active
+                # child under it would orphan the child in the default view
+                # (ADR-070). Skipping it also skips its subtree.
+                if node.archived:
                     continue
                 result.append((node.id, ("    " * depth) + node.name))
                 walk(node.id, depth + 1)
@@ -729,6 +778,77 @@ class CategoriesDialog(QDialog):
             QMessageBox.warning(picker, "Could not create category", str(e))
             return None
         return (new_id, typed, True)
+
+    def _on_show_archived_toggled(self, _checked: bool) -> None:
+        self._reload_tree()
+        self._update_button_state()
+
+    def _on_archive_or_restore(self) -> None:
+        """One handler for the flip-flopping Archive / Restore button (ADR-070).
+        Restores when every selected category is already archived; otherwise
+        archives the not-yet-archived (non-reserved) ones."""
+        ids = self._selected_ids()
+        nodes = [self._nodes_by_id[c] for c in ids if c in self._nodes_by_id]
+        if not nodes:
+            return
+
+        if all(n.archived for n in nodes):
+            restored = 0
+            try:
+                for n in nodes:
+                    restored += self._repo.unarchive_category(n.id)
+            except Exception as e:  # pragma: no cover - defensive
+                QMessageBox.critical(self, "Restore failed", str(e))
+            self._reload_tree()
+            self._update_button_state()
+            self.categories_changed.emit()
+            return
+
+        # Archive path. Drop the reserved row + already-archived ones.
+        targets = [n for n in nodes if n.id != UNCATEGORISED_ID and not n.archived]
+        if any(n.id == UNCATEGORISED_ID for n in nodes):
+            QMessageBox.warning(
+                self, "Cannot archive",
+                "The Uncategorised category is the reserved fallback and "
+                "cannot be archived. It will be skipped.",
+            )
+        if not targets:
+            return
+        with_children = [
+            n for n in targets if self._repo.category_has_children(n.id)
+        ]
+        if len(targets) == 1:
+            body = f"Archive category {targets[0].name!r}?"
+        else:
+            body = f"Archive {len(targets)} categories?"
+        if with_children:
+            body += (
+                "\n\nThis hides the selected categor"
+                f"{'y' if len(targets) == 1 else 'ies'} and every subcategory "
+                "beneath. Nothing is deleted — transactions keep their "
+                "category and still appear in reports, and you can restore "
+                "from 'Show archived' any time."
+            )
+        else:
+            body += (
+                "\n\nNothing is deleted — transactions keep their category "
+                "and still appear in reports. Restore from 'Show archived'."
+            )
+        if QMessageBox.question(
+            self, "Confirm archive", body,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        try:
+            for n in targets:
+                self._repo.archive_category(n.id)
+        except ValueError as e:
+            QMessageBox.warning(self, "Archive failed", str(e))
+        except Exception as e:  # pragma: no cover - defensive
+            QMessageBox.critical(self, "Archive failed", str(e))
+        self._reload_tree()
+        self._update_button_state()
+        self.categories_changed.emit()
 
     def _on_delete(self) -> None:
         ids = self._selected_ids()

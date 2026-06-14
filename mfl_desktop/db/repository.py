@@ -42,6 +42,13 @@ class AccountSummary:
     opening_balance: Decimal = Decimal("0.00")
     folder_id: Optional[int] = None
     credit_limit: Optional[Decimal] = None   # credit cards only (ADR-058 R4a)
+    archived_at: Optional[str] = None        # set = account is closed (ADR-069)
+
+    @property
+    def is_closed(self) -> bool:
+        """A closed (archived) account — kept for history but out of the
+        sidebar's active list, Net Worth, and report pickers (ADR-069)."""
+        return self.archived_at is not None
 
 
 @dataclass(frozen=True)
@@ -215,6 +222,7 @@ class CategoryNode:
     source: str
     kind: str
     usage_count: int
+    archived: bool = False   # True = archived/hidden (ADR-070)
 
 
 @dataclass(frozen=True)
@@ -753,7 +761,7 @@ class Repository:
 
     _ACCOUNT_COLS = (
         "id, iri, name, type, family, currency, is_liability, "
-        "opening_balance, folder_id, credit_limit"
+        "opening_balance, folder_id, credit_limit, archived_at"
     )
 
     def _row_to_account(self, row) -> AccountSummary:
@@ -767,6 +775,7 @@ class Repository:
                 pence_to_decimal(row["credit_limit"])
                 if row["credit_limit"] is not None else None
             ),
+            archived_at=row["archived_at"],
         )
 
     def get_account_by_iri(self, iri: str) -> Optional[AccountSummary]:
@@ -783,19 +792,34 @@ class Repository:
         ).fetchone()
         return self._row_to_account(row) if row is not None else None
 
-    def list_accounts(self) -> list[AccountSummary]:
-        """All non-archived accounts in display order (family, name)."""
+    def list_accounts(self, include_closed: bool = False) -> list[AccountSummary]:
+        """Accounts in display order (family, name).
+
+        By default only *open* accounts are returned (``archived_at IS NULL``)
+        — the single source of truth for the sidebar's active list, every
+        transaction/transfer picker, and every report's account filter. Pass
+        ``include_closed=True`` to also return closed (archived) accounts; the
+        only callers that do are the sidebar (which renders them in a separate
+        'Closed accounts' group) and Net Worth's 'Show closed' toggle (ADR-069).
+        """
+        where = "" if include_closed else "WHERE archived_at IS NULL "
         cur = self._conn.execute(
             f"SELECT {self._ACCOUNT_COLS} FROM account "
-            "WHERE archived_at IS NULL "
+            f"{where}"
             "ORDER BY family, name"
         )
         return [self._row_to_account(r) for r in cur]
 
-    def list_investment_accounts(self) -> list[AccountSummary]:
-        """Non-archived investment-family accounts in display order. Feeds the
-        Investment Returns report's account filter (ADR-046)."""
-        return [a for a in self.list_accounts() if a.family == "investment"]
+    def list_investment_accounts(
+        self, include_closed: bool = False,
+    ) -> list[AccountSummary]:
+        """Investment-family accounts in display order. Feeds the Investment
+        Returns report's account filter (ADR-046). Closed accounts are
+        excluded unless ``include_closed=True`` (ADR-069)."""
+        return [
+            a for a in self.list_accounts(include_closed=include_closed)
+            if a.family == "investment"
+        ]
 
     def account_has_transactions(self, account_id: int) -> bool:
         row = self._conn.execute(
@@ -1056,13 +1080,19 @@ class Repository:
             self.rollback()
             raise
 
-    def compute_account_balances(self) -> dict[int, Decimal]:
+    def compute_account_balances(
+        self, include_closed: bool = False,
+    ) -> dict[int, Decimal]:
         """Per-account balance: opening_balance + sum of txn.amount.
 
         Returns a dict keyed by account_id. Investment / property accounts
         use the same opening + txns formula for now — once the valuations
         UX ships (backlog) those families switch to latest-valuation.
+
+        Closed accounts are omitted unless ``include_closed=True`` (ADR-069),
+        matching :pymeth:`list_accounts`.
         """
+        where = "" if include_closed else "WHERE a.archived_at IS NULL"
         cur = self._conn.execute(
             "SELECT a.id, "
             "       a.opening_balance + COALESCE((SELECT SUM(t.amount) "
@@ -1070,7 +1100,7 @@ class Repository:
             "                                     WHERE t.account_id = a.id), 0) "
             "       AS balance_pence "
             "FROM account a "
-            "WHERE a.archived_at IS NULL"
+            f"{where}"
         )
         return {int(r["id"]): pence_to_decimal(r["balance_pence"]) for r in cur}
 
@@ -1099,17 +1129,22 @@ class Repository:
         ).fetchone()
         return opening + pence_to_decimal(sum_row["s"])
 
-    def compute_account_values(self) -> dict[int, Decimal]:
+    def compute_account_values(
+        self, include_closed: bool = False,
+    ) -> dict[int, Decimal]:
         """Per-account *market value* (ADR-044) — the figure Net Worth and the
         sidebar should show. For investment accounts this is
         ``cash + Σ(open-lot shares × latest price)``; unpriced holdings
         contribute nothing, so an account with no prices on file falls back to
         its cash balance. Every other family is the cash balance unchanged
         (``compute_account_balances``). The register's running-balance column is
-        a transaction ledger and is deliberately NOT affected by this."""
-        balances = self.compute_account_balances()
+        a transaction ledger and is deliberately NOT affected by this.
+
+        Closed accounts are omitted unless ``include_closed=True`` (ADR-069)."""
+        balances = self.compute_account_balances(include_closed=include_closed)
         investment = [
-            a for a in self.list_accounts() if a.family == "investment"
+            a for a in self.list_accounts(include_closed=include_closed)
+            if a.family == "investment"
         ]
         if not investment:
             return balances
@@ -1127,13 +1162,56 @@ class Repository:
             values[acct.id] = view.account_value
         return values
 
+    def close_account(self, account_id: int) -> AccountSummary:
+        """Soft-close an account: set ``archived_at`` to now (ADR-069).
+
+        Non-destructive — the account, its transactions, and all history are
+        kept. A closed account drops out of :pymeth:`list_accounts` (and so
+        the sidebar's active list, Net Worth, and every report's account
+        picker) but its past transactions still flow into the transaction-
+        driven reports (Spending / Income & Expense / Sankey / Payee). The
+        ADR-011 ``archived_at`` column is the store; this is the gentle
+        counterpart to the destructive :pymeth:`delete_account`. Idempotent —
+        re-closing an already-closed account leaves the original timestamp."""
+        try:
+            self._conn.execute(
+                "UPDATE account SET archived_at = datetime('now') "
+                "WHERE id = ? AND archived_at IS NULL",
+                (account_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        acct = self.get_account_by_id(account_id)
+        if acct is None:
+            raise ValueError(f"No account with id {account_id}")
+        return acct
+
+    def reopen_account(self, account_id: int) -> AccountSummary:
+        """Reverse :pymeth:`close_account` — clear ``archived_at`` so the
+        account rejoins the active list everywhere (ADR-069)."""
+        try:
+            self._conn.execute(
+                "UPDATE account SET archived_at = NULL WHERE id = ?",
+                (account_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        acct = self.get_account_by_id(account_id)
+        if acct is None:
+            raise ValueError(f"No account with id {account_id}")
+        return acct
+
     def delete_account(self, account_id: int) -> int:
         """Hard-delete an account and everything that references it
         (transactions, import batches, lots, valuations all cascade by FK).
         Returns the count of transactions that were cascaded.
 
-        Schema also reserves `archived_at` for a future soft-delete UX
-        (see ADR-011); this method is the destructive variant."""
+        This is the destructive variant — see :pymeth:`close_account` for the
+        non-destructive soft-close that keeps history (ADR-069)."""
         txn_count = self.count_account_transactions(account_id)
         try:
             self._conn.execute("DELETE FROM account WHERE id = ?", (account_id,))
@@ -1171,13 +1249,13 @@ class Repository:
         for name in clean:
             if parent_id is None:
                 row = self._conn.execute(
-                    "SELECT id, kind FROM category "
+                    "SELECT id, kind, archived_at FROM category "
                     "WHERE name = ? AND parent_id IS NULL",
                     (name,),
                 ).fetchone()
             else:
                 row = self._conn.execute(
-                    "SELECT id, kind FROM category "
+                    "SELECT id, kind, archived_at FROM category "
                     "WHERE name = ? AND parent_id = ?",
                     (name, parent_id),
                 ).fetchone()
@@ -1191,31 +1269,49 @@ class Repository:
                 parent_id = cur.lastrowid
                 parent_kind = kind
             else:
+                # An import re-using a path that the user had archived means
+                # the category is in use again (ADR-070). The UNIQUE
+                # (parent_id, name) constraint would block a fresh sibling, so
+                # resurrect the existing row rather than land transactions on an
+                # invisible (archived) category. Walking root→leaf this
+                # restores the whole matched path.
+                if row["archived_at"] is not None:
+                    self._conn.execute(
+                        "UPDATE category SET archived_at = NULL WHERE id = ?",
+                        (row["id"],),
+                    )
                 parent_id = row["id"]
                 parent_kind = row["kind"]
         return parent_id
 
     # ── Category — management (used by the category dialog) ──
 
-    def list_category_tree(self) -> list[CategoryNode]:
-        """All non-archived categories as a flat list. The dialog reassembles
-        the parent/child structure for display."""
+    def list_category_tree(
+        self, include_archived: bool = False,
+    ) -> list[CategoryNode]:
+        """Categories as a flat list; the dialog reassembles the parent/child
+        structure for display. Archived categories are excluded unless
+        ``include_archived=True`` (ADR-070) — the only caller that asks is the
+        Manage ▸ Categories dialog with its 'Show archived' toggle on."""
         # Usage counts a category's appearances in the split-unrolled view
         # (ADR-051): a split line counts under its own category, and a split
         # parent does NOT count under Uncategorised (the view emits its lines,
         # not the parent row). For a no-splits ledger this equals COUNT over
         # `txn`.
+        where = "" if include_archived else "WHERE c.archived_at IS NULL"
         cur = self._conn.execute(
             "SELECT c.id, c.parent_id, c.name, c.source, c.kind, "
+            "       c.archived_at, "
             "       (SELECT COUNT(*) FROM txn_category_line t "
             "        WHERE t.category_id = c.id) AS n "
             "FROM category c "
-            "WHERE c.archived_at IS NULL"
+            f"{where}"
         )
         return [
             CategoryNode(
                 id=r["id"], parent_id=r["parent_id"], name=r["name"],
                 source=r["source"], kind=r["kind"], usage_count=int(r["n"]),
+                archived=r["archived_at"] is not None,
             )
             for r in cur
         ]
@@ -1491,6 +1587,73 @@ class Repository:
             )
             self.commit()
             return moved
+        except Exception:
+            self.rollback()
+            raise
+
+    def _category_ancestors(self, category_id: int) -> set[int]:
+        """All ids on the path from `category_id` up to the root (inclusive).
+        Mirror of :pymeth:`category_descendants` walking the other way."""
+        cur = self._conn.execute(
+            "WITH RECURSIVE a(id, parent_id) AS ("
+            "  SELECT id, parent_id FROM category WHERE id = ? "
+            "  UNION ALL "
+            "  SELECT c.id, c.parent_id FROM category c JOIN a ON c.id = a.parent_id"
+            ") SELECT id FROM a",
+            (category_id,),
+        )
+        return {r["id"] for r in cur}
+
+    def archive_category(self, category_id: int) -> int:
+        """Soft-archive (hide) a category and its whole subtree (ADR-070).
+
+        Non-destructive — the rows, their kind/parent links, and every
+        transaction's ``category_id`` are untouched, so the archived
+        category's history still aggregates in the flow reports. An archived
+        category just drops out of the pickers, the dialog's default view, and
+        the budget setup. Cascades to descendants so a whole branch hides in
+        one action (and the tree never holds an active child under an archived
+        parent). Rejects the reserved Uncategorised row. Returns the number of
+        categories archived. Idempotent — already-archived rows keep their
+        original timestamp."""
+        if category_id == UNCATEGORISED_ID:
+            raise ValueError(
+                "The Uncategorised category is the reserved fallback and "
+                "cannot be archived."
+            )
+        ids = self.category_descendants(category_id)
+        placeholders = ",".join("?" * len(ids))
+        try:
+            cur = self._conn.execute(
+                f"UPDATE category SET archived_at = datetime('now') "
+                f"WHERE id IN ({placeholders}) AND archived_at IS NULL",
+                tuple(ids),
+            )
+            self.commit()
+            return cur.rowcount
+        except Exception:
+            self.rollback()
+            raise
+
+    def unarchive_category(self, category_id: int) -> int:
+        """Reverse :pymeth:`archive_category` (ADR-070) — clear ``archived_at``
+        on the category, its whole subtree, *and* every ancestor up to the
+        root, so the restored category is always reachable in the tree even if
+        it sat inside a previously-archived branch. Returns the number of
+        categories restored."""
+        ids = (
+            self.category_descendants(category_id)
+            | self._category_ancestors(category_id)
+        )
+        placeholders = ",".join("?" * len(ids))
+        try:
+            cur = self._conn.execute(
+                f"UPDATE category SET archived_at = NULL "
+                f"WHERE id IN ({placeholders}) AND archived_at IS NOT NULL",
+                tuple(ids),
+            )
+            self.commit()
+            return cur.rowcount
         except Exception:
             self.rollback()
             raise

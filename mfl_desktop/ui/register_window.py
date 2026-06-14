@@ -63,7 +63,7 @@ from mfl_desktop.ui.payees_dialog import PayeesDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
 from mfl_desktop.ui.schedules_dialog import SchedulesDialog
-from mfl_desktop.ui.sidebar import KIND_ROLE, Sidebar
+from mfl_desktop.ui.sidebar import CLOSED_ROLE, KIND_ROLE, Sidebar
 from mfl_desktop.ui.statements_window import StatementsWindow
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.new_report_dialog import NewReportDialog
@@ -189,11 +189,13 @@ class RegisterWindow(QMainWindow):
 
         # ── sidebar + filter bar ──
 
-        accounts = repo.list_accounts()
+        # include_closed=True so the sidebar can render the 'Closed accounts'
+        # group (ADR-069); it partitions open vs closed itself.
+        accounts = repo.list_accounts(include_closed=True)
         folders = repo.list_folders()
         # Sidebar shows each account's worth — market value for investment
         # accounts (cash + holdings), cash for everything else (ADR-044).
-        balances = repo.compute_account_values()
+        balances = repo.compute_account_values(include_closed=True)
         reports = repo.list_reports()
         report_folders = repo.list_report_folders()
         self._sidebar = Sidebar(
@@ -547,6 +549,14 @@ class RegisterWindow(QMainWindow):
         if hasattr(self, "_edit_account_action"):
             self._edit_account_action.setEnabled(account_selected)
             self._delete_account_action.setEnabled(account_selected)
+        if hasattr(self, "_close_account_action"):
+            # Close only applies to an open account; reopening a closed one
+            # is offered via the sidebar context menu (ADR-069).
+            self._close_account_action.setEnabled(
+                account_selected
+                and self._account is not None
+                and not self._account.is_closed
+            )
         if hasattr(self, "_account_summary_action"):
             self._account_summary_action.setEnabled(account_selected)
         if hasattr(self, "_reconcile_action"):
@@ -782,6 +792,12 @@ class RegisterWindow(QMainWindow):
         self._edit_account_action = QAction("&Edit Account…", self)
         self._edit_account_action.triggered.connect(self._on_edit_account)
         account_menu.addAction(self._edit_account_action)
+
+        # ADR-069: Close is the gentle, common verb (keeps history, leaves
+        # Net Worth); Delete is the destructive one below it.
+        self._close_account_action = QAction("&Close Account…", self)
+        self._close_account_action.triggered.connect(self._on_close_account)
+        account_menu.addAction(self._close_account_action)
 
         self._delete_account_action = QAction("&Delete Account…", self)
         self._delete_account_action.triggered.connect(self._on_delete_account)
@@ -2188,6 +2204,53 @@ class RegisterWindow(QMainWindow):
             6000,
         )
 
+    def _on_close_account(self) -> None:
+        """Soft-close the selected account (ADR-069). Non-destructive: it
+        moves to the 'Closed accounts' group and drops out of Net Worth, but
+        its transactions and history are kept and reopening is one click."""
+        if self._account is None or self._account.is_closed:
+            return
+        acct = self._account
+        confirm = QMessageBox.question(
+            self, "Close account",
+            f"Close account {acct.name!r}?\n\n"
+            "It will move to the 'Closed accounts' group and be excluded from "
+            "Net Worth and account pickers. Its transactions and history are "
+            "kept, and you can reopen it any time (right-click it in the "
+            "sidebar).",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self._repo.close_account(acct.id)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Could not close account",
+                f"The account was not closed:\n\n{e}",
+            )
+            return
+        # Drop the now-closed account from the active view — fall back to
+        # All transactions rather than re-selecting the closed row.
+        self._reload_sidebar(select_iri=None)
+        self.statusBar().showMessage(f"Closed account {acct.name!r}", 4000)
+
+    def _on_reopen_account(self, account_iri: str) -> None:
+        """Reverse a close (ADR-069) — clear the archive flag and re-select."""
+        acct = self._repo.get_account_by_iri(account_iri)
+        if acct is None or not acct.is_closed:
+            return
+        try:
+            reopened = self._repo.reopen_account(acct.id)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Could not reopen account",
+                f"The account was not reopened:\n\n{e}",
+            )
+            return
+        self._reload_sidebar(select_iri=reopened.iri)
+        self.statusBar().showMessage(f"Reopened account {reopened.name!r}", 4000)
+
     # ── folder ops (ADR-015) ──
 
     def _on_new_folder(self) -> None:
@@ -2291,19 +2354,20 @@ class RegisterWindow(QMainWindow):
         and gone since the last refresh (creates from a report window,
         deletes from the sidebar context menu).
         """
-        accounts = self._repo.list_accounts()
+        accounts = self._repo.list_accounts(include_closed=True)
         folders = self._repo.list_folders()
-        balances = self._repo.compute_account_values()
+        balances = self._repo.compute_account_values(include_closed=True)
         reports = self._repo.list_reports()
         report_folders = self._repo.list_report_folders()
         self._sidebar.reload(
             accounts, folders, balances,
             reports=reports, report_folders=report_folders,
         )
+        open_accounts = [a for a in accounts if not a.is_closed]
         if select_iri is not None:
             self._select_account_in_sidebar(select_iri)
-        elif accounts:
-            self._select_account_in_sidebar(accounts[0].iri)
+        elif open_accounts:
+            self._select_account_in_sidebar(open_accounts[0].iri)
         else:
             self._sidebar.select_all_transactions()
             self._show_all_transactions()
@@ -2313,9 +2377,9 @@ class RegisterWindow(QMainWindow):
         user has selected. Used after a saved-report create / update /
         delete so the Reports section reflects the new state without
         moving the user's focus."""
-        accounts = self._repo.list_accounts()
+        accounts = self._repo.list_accounts(include_closed=True)
         folders = self._repo.list_folders()
-        balances = self._repo.compute_account_values()
+        balances = self._repo.compute_account_values(include_closed=True)
         reports = self._repo.list_reports()
         report_folders = self._repo.list_report_folders()
         self._sidebar.reload(
@@ -2433,22 +2497,38 @@ class RegisterWindow(QMainWindow):
             )
             menu.exec(self._sidebar.viewport().mapToGlobal(pos))
             return
+        if kind == "closed_group":
+            # The 'Closed accounts' grouping row itself — just let the click
+            # toggle it; no verbs of its own (ADR-069).
+            return
         if kind == "account":
             iri = item.data(0, Qt.UserRole)
             # Make this the current selection so Edit/Delete operate on it.
             self._select_account_in_sidebar(iri)
+            is_closed = bool(item.data(0, CLOSED_ROLE))
             menu = QMenu(self._sidebar)
             # Summary first — it's the verb a Banktivity user reaches for
             # most often from a sidebar right-click (ADR-033).
             menu.addAction(self._account_summary_action)
             menu.addSeparator()
-            menu.addAction(self._new_account_action)
-            menu.addAction(self._edit_account_action)
-            menu.addSeparator()
-            move_menu = menu.addMenu("&Move to Folder")
-            self._populate_move_to_folder_menu(move_menu, iri)
-            menu.addSeparator()
-            menu.addAction(self._delete_account_action)
+            if is_closed:
+                # A closed account (ADR-069): Reopen is the primary verb;
+                # Edit / Move / Close don't apply while archived.
+                reopen_act = menu.addAction("Reopen Account")
+                reopen_act.triggered.connect(
+                    lambda checked=False, target=iri: self._on_reopen_account(target)
+                )
+                menu.addSeparator()
+                menu.addAction(self._delete_account_action)
+            else:
+                menu.addAction(self._new_account_action)
+                menu.addAction(self._edit_account_action)
+                menu.addSeparator()
+                move_menu = menu.addMenu("&Move to Folder")
+                self._populate_move_to_folder_menu(move_menu, iri)
+                menu.addSeparator()
+                menu.addAction(self._close_account_action)
+                menu.addAction(self._delete_account_action)
             menu.exec(self._sidebar.viewport().mapToGlobal(pos))
             return
 

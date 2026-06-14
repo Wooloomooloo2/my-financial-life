@@ -32,6 +32,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -111,8 +112,11 @@ class NetWorthWindow(QMainWindow):
         self._native: dict[int, Decimal] = {}
         self._missing: list[tuple[AccountSummary, Decimal]] = []
         self._fallback_used = False
+        # Closed accounts are excluded by default (ADR-069); the toggle below
+        # re-includes their balances in every total + the donuts + columns.
+        self._include_closed = False
 
-        # ── top bar: display-currency selector ──
+        # ── top bar: display-currency selector + show-closed toggle ──
         top_bar = QWidget()
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(20, 12, 20, 0)
@@ -121,6 +125,13 @@ class NetWorthWindow(QMainWindow):
         self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
         top_layout.addWidget(self._ccy_combo)
         top_layout.addStretch(1)
+        self._show_closed_chk = QCheckBox("Show closed accounts")
+        self._show_closed_chk.setToolTip(
+            "Include closed (archived) accounts and their balances in the "
+            "totals, donuts, and columns (ADR-069)."
+        )
+        self._show_closed_chk.toggled.connect(self._on_show_closed_toggled)
+        top_layout.addWidget(self._show_closed_chk)
         self._populate_ccy_combo()
 
         # ── missing-rate banner (hidden unless something can't convert) ──
@@ -392,11 +403,13 @@ class NetWorthWindow(QMainWindow):
     # ── data + render ──
 
     def _refresh(self) -> None:
-        accounts = self._repo.list_accounts()
+        accounts = self._repo.list_accounts(include_closed=self._include_closed)
         # Market value, not cash: investment accounts contribute
         # cash + Σ(shares × latest price); priced via security_price, falling
         # back to cash when unpriced (ADR-044, closing the ADR-019 follow-up).
-        native = self._repo.compute_account_values()
+        native = self._repo.compute_account_values(
+            include_closed=self._include_closed
+        )
 
         # Convert to the display currency before any summation (ADR-055).
         self._convert_all(accounts, native)
@@ -642,12 +655,15 @@ class NetWorthWindow(QMainWindow):
             for acct in tt.accounts:
                 conv = self._converted.get(acct.id)
                 native = self._native.get(acct.id, Decimal("0.00"))
+                # Mark closed accounts when the toggle has surfaced them
+                # (ADR-069) so the figure isn't mistaken for a live balance.
+                name = acct.name + (" (closed)" if acct.is_closed else "")
                 if conv is None:
                     # No rate — show the native value + a flag rather than a
                     # fabricated converted figure.
                     shown_native = -native if kind == "debt" else native
                     child = QTreeWidgetItem([
-                        acct.name,
+                        name,
                         f"{_symbol(acct.currency)}{shown_native:,.2f} (no rate)",
                     ])
                     child.setForeground(1, QBrush(QColor("#b45309")))
@@ -656,7 +672,7 @@ class NetWorthWindow(QMainWindow):
                     )
                 else:
                     shown = -conv if kind == "debt" else conv
-                    child = QTreeWidgetItem([acct.name, self._format(shown)])
+                    child = QTreeWidgetItem([name, self._format(shown)])
                     if acct.currency != self._display_ccy:
                         nshown = -native if kind == "debt" else native
                         child.setToolTip(
@@ -674,6 +690,10 @@ class NetWorthWindow(QMainWindow):
         if data:
             self._display_ccy = data
             self._refresh()
+
+    def _on_show_closed_toggled(self, checked: bool) -> None:
+        self._include_closed = checked
+        self._refresh()
 
     def _on_set_rate(self) -> None:
         """Open the Currencies dialog so the user can add (or fetch) the

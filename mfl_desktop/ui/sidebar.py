@@ -43,16 +43,22 @@ _ALL_SENTINEL = "__all__"
 #   "section_accounts" | "section_reports"  — non-selectable group headers
 #   "all"                                   — All transactions row
 #   "folder"                                — account folder
-#   "account"                               — leaf account
+#   "closed_group"                          — 'Closed accounts' grouping row (ADR-069)
+#   "account"                               — leaf account (open or closed)
 #   "report_folder"                         — saved-reports folder
 #   "report"                                — saved report row
 KIND_ROLE = Qt.UserRole + 1
+
+# Set True on a closed (archived) account leaf so callers (the register
+# window's context menu) can offer Reopen instead of Edit/Delete (ADR-069).
+CLOSED_ROLE = Qt.UserRole + 2
 
 # Section header palette — slate-700 text on a slate-50 background. The
 # REPORTS header gets a thin slate-200 top border via paintEvent (set on
 # the item's data role and consumed by a small delegate hook below).
 _HEADER_FG = QColor("#334155")    # slate-700
 _HEADER_BG = QColor("#f8fafc")    # slate-50
+_CLOSED_FG = QColor("#94a3b8")    # slate-400 — muted text for closed accounts
 
 _CURRENCY_SYMBOLS: dict[str, str] = {
     "GBP": "£",
@@ -157,8 +163,14 @@ class Sidebar(QTreeWidget):
         all_item.setFont(0, font)
         accounts_header.addChild(all_item)
 
+        # Closed (archived) accounts are pulled out of the folder layout and
+        # collected into a single collapsed 'Closed accounts' group at the
+        # bottom of the section (ADR-069); active accounts keep their folders.
+        active = [a for a in accounts if not a.is_closed]
+        closed = [a for a in accounts if a.is_closed]
+
         accounts_by_folder: dict[Optional[int], list[AccountSummary]] = {}
-        for a in accounts:
+        for a in active:
             accounts_by_folder.setdefault(a.folder_id, []).append(a)
         for siblings in accounts_by_folder.values():
             siblings.sort(key=lambda a: (a.family, a.name.lower()))
@@ -187,6 +199,28 @@ class Sidebar(QTreeWidget):
             key=lambda a: (a.family, a.name.lower()),
         ):
             accounts_header.addChild(self._make_account_item(a, balances))
+
+        # 'Closed accounts' group — collapsed by default, only when present.
+        if closed:
+            label = f"Closed accounts ({len(closed)})"
+            closed_group = QTreeWidgetItem([label, ""])
+            closed_group.setData(0, KIND_ROLE, "closed_group")
+            closed_group.setFlags(Qt.ItemIsEnabled)
+            font = closed_group.font(0)
+            font.setBold(True)
+            closed_group.setFont(0, font)
+            closed_group.setForeground(0, QBrush(_CLOSED_FG))
+            closed_group.setToolTip(
+                0,
+                "Closed accounts are kept for history but excluded from Net "
+                "Worth and account pickers. Right-click one to reopen it.",
+            )
+            accounts_header.addChild(closed_group)
+            for a in sorted(closed, key=lambda a: (a.family, a.name.lower())):
+                closed_group.addChild(
+                    self._make_account_item(a, balances, is_closed=True)
+                )
+            closed_group.setExpanded(False)
 
         accounts_header.setExpanded(True)
 
@@ -268,6 +302,7 @@ class Sidebar(QTreeWidget):
 
     def _make_account_item(
         self, account: AccountSummary, balances: dict[int, Decimal],
+        is_closed: bool = False,
     ) -> QTreeWidgetItem:
         bal = balances.get(account.id, Decimal("0.00"))
         item = QTreeWidgetItem(
@@ -276,10 +311,17 @@ class Sidebar(QTreeWidget):
         item.setData(0, Qt.UserRole, account.iri)
         item.setData(0, KIND_ROLE, "account")
         item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-        item.setToolTip(
-            0,
-            f"{account.iri}\nType: {account.type}\nCurrency: {account.currency}",
+        tooltip = (
+            f"{account.iri}\nType: {account.type}\nCurrency: {account.currency}"
         )
+        if is_closed:
+            # Muted text + a marker role so the register context menu offers
+            # Reopen (ADR-069); still selectable so its register is viewable.
+            item.setData(0, CLOSED_ROLE, True)
+            item.setForeground(0, QBrush(_CLOSED_FG))
+            item.setForeground(1, QBrush(_CLOSED_FG))
+            tooltip += "\n(closed)"
+        item.setToolTip(0, tooltip)
         return item
 
     def _make_report_item(self, report: ReportRow) -> QTreeWidgetItem:
@@ -397,7 +439,10 @@ class Sidebar(QTreeWidget):
         if item is None:
             return
         kind = item.data(0, KIND_ROLE)
-        if kind in ("folder", "report_folder", "section_accounts", "section_reports"):
+        if kind in (
+            "folder", "closed_group", "report_folder",
+            "section_accounts", "section_reports",
+        ):
             item.setExpanded(not item.isExpanded())
 
     # ── public helpers used by RegisterWindow ──
@@ -449,13 +494,18 @@ class Sidebar(QTreeWidget):
             if kind == "account" and child.data(0, Qt.UserRole) == iri:
                 self.setCurrentItem(child)
                 return True
-            if kind == "folder":
+            # Account leaves also live one level down inside folders and the
+            # 'Closed accounts' group (ADR-069).
+            if kind in ("folder", "closed_group"):
                 for k in range(child.childCount()):
                     grand = child.child(k)
                     if (
                         grand.data(0, KIND_ROLE) == "account"
                         and grand.data(0, Qt.UserRole) == iri
                     ):
+                        # Expand the closed group so the selection is visible.
+                        if kind == "closed_group":
+                            child.setExpanded(True)
                         self.setCurrentItem(grand)
                         return True
         return False
