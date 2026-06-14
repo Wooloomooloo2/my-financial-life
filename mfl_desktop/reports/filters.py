@@ -29,6 +29,7 @@ TYPE_NET_WORTH = "net_worth"
 TYPE_INCOME_EXPENSE = "income_expense"
 TYPE_SANKEY = "sankey"
 TYPE_INVESTMENT_RETURNS = "investment_returns"
+TYPE_PAYEE = "payee"
 
 REPORT_TYPES: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
@@ -36,6 +37,7 @@ REPORT_TYPES: tuple[str, ...] = (
     TYPE_INCOME_EXPENSE,
     TYPE_SANKEY,
     TYPE_INVESTMENT_RETURNS,
+    TYPE_PAYEE,
 )
 
 REPORT_TYPE_LABELS: dict[str, str] = {
@@ -44,6 +46,7 @@ REPORT_TYPE_LABELS: dict[str, str] = {
     TYPE_INCOME_EXPENSE:     "Income & Expense",
     TYPE_SANKEY:             "Sankey",
     TYPE_INVESTMENT_RETURNS: "Investment Returns",
+    TYPE_PAYEE:              "Payee",
 }
 
 
@@ -263,6 +266,62 @@ class SankeyFilters:
         return _from_dict(cls, raw)
 
 
+# ── Payee (ADR-066 / Arc E, E2) ─────────────────────────────────────────────
+
+# Default count of payees to show before the long tail folds into a single
+# "Other" row. 0 means "show every payee, no fold". Reuses the spending
+# period vocabulary (SPENDING_PERIOD_KEYS) so the report family stays
+# consistent. There is no granularity here — the Payee report is a ranked
+# snapshot over the whole period, not a time-bucketed series.
+PAYEE_DEFAULT_TOP_N = 15
+
+
+@dataclass(frozen=True)
+class PayeeReportFilters:
+    """Persisted filter set for a saved Payee report.
+
+    The report ranks **spending** (strict outflow — ``kind='expense'`` and
+    ``amount < 0``, the same definition as Spending Over Time) per payee,
+    rolling aliases up to their canonical payee (ADR-028/029). Empty
+    ``account_ids`` means "all accounts" (the shared report-filter
+    convention). ``top_n`` caps how many payees the chart/table show before
+    the remainder collapses into a single "Other" row (0 = show all).
+
+    Like the other reports, transfers between the owner's own accounts are
+    neither spending nor income; ``kind='transfer'`` categories are always
+    excluded by the kind rule, and ``include_transfers=False`` (the default)
+    additionally drops anything carrying a ``transfer_id`` (a linked
+    transfer leg). The display currency is a top-bar view preference, not
+    persisted here (matching Net Worth / Sankey / Income & Expense).
+    """
+
+    period_key: str = "1y"
+    custom_start: Optional[str] = None     # ISO date, only when period_key == "custom"
+    custom_end:   Optional[str] = None
+    account_ids: tuple[int, ...] = field(default_factory=tuple)
+    top_n: int = PAYEE_DEFAULT_TOP_N
+    include_transfers: bool = False
+
+    # ── round-trip helpers ──
+
+    @classmethod
+    def default(cls) -> "PayeeReportFilters":
+        return cls()
+
+    def to_json(self) -> str:
+        return json.dumps(_asdict_for_json(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, blob: str) -> "PayeeReportFilters":
+        raw = json.loads(blob) if blob else {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"PayeeReportFilters: expected JSON object, got "
+                f"{type(raw).__name__}"
+            )
+        return _from_dict(cls, raw)
+
+
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 # Maps the report.type enum value to its filter dataclass. Adding a new
@@ -272,6 +331,7 @@ _FILTER_CLASSES: dict[str, type] = {
     TYPE_INCOME_EXPENSE: IncomeExpenseFilters,
     TYPE_INVESTMENT_RETURNS: InvestmentReturnsFilters,
     TYPE_SANKEY: SankeyFilters,
+    TYPE_PAYEE: PayeeReportFilters,
 }
 
 

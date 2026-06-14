@@ -3282,6 +3282,108 @@ class Repository:
             for r in cur
         ]
 
+    def payee_spending_aggregates(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        account_ids: Optional[Iterable[int]] = None,
+        display_currency: Optional[str] = None,
+        include_transfers: bool = False,
+    ) -> dict:
+        """Outflow spending per **canonical payee** over a date range
+        (ADR-066 / Arc E, E2 — Payee report).
+
+        Uses the same **strict-outflow** definition as
+        :meth:`spending_aggregates`: only ``kind='expense'`` categories with
+        ``amount < 0`` contribute, so the bars are unambiguously positive and
+        income / refunds never leak in. Reads the split-unrolled
+        ``txn_category_line`` view (ADR-051) so a split lands on each line's
+        own category.
+
+        Aliases are rolled up to their canonical payee (ADR-028/029) via
+        ``COALESCE(p.canonical_id, p.id)`` — "AMZN" and "Amazon UK" count as
+        one payee, labelled with the canonical name. Lines with no payee
+        (``txn.payee_id IS NULL``) collapse to a single group with
+        ``payee_id = None`` (the caller labels it "(No payee)").
+
+        ``include_transfers`` (default False) additionally drops every line
+        carrying a ``transfer_id`` (a linked transfer leg) regardless of the
+        category it was filed under — mirrors the Income & Expense report's
+        transfer handling.
+
+        ``account_ids`` non-empty restricts to those accounts; ``None`` /
+        empty means all. ``display_currency`` converts each per-(payee,
+        currency) total into that one currency via the ADR-035 FX layer at
+        the period-end date (``date_to``); per ADR-055 a (payee, currency)
+        slice with no rate is **excluded** (never par-added) and its
+        magnitude collected under ``unconverted``. ``None`` keeps bare
+        same-units pence (single-currency case).
+
+        Returns ``{'payees': [{payee_id, name, spending_pence, txn_count}],
+        'unconverted': {currency: pence}}`` — pence ≥ 0, one entry per
+        canonical payee, unsorted (the pure ``payee_report`` module ranks +
+        folds the long tail into "Other").
+        """
+        clauses = [
+            "t.posted_date BETWEEN ? AND ?",
+            "c.kind = 'expense'",
+            "t.amount < 0",
+        ]
+        params: list = [date_from, date_to]
+        acc = list(account_ids) if account_ids else []
+        if acc:
+            clauses.append(f"t.account_id IN ({','.join('?' * len(acc))})")
+            params.extend(acc)
+        if not include_transfers:
+            clauses.append("t.transfer_id IS NULL")
+
+        cur = self._conn.execute(
+            "SELECT COALESCE(p.canonical_id, p.id) AS canon_id, "
+            "  canon.name AS payee_name, "
+            "  a.currency AS ccy, "
+            "  SUM(-t.amount) AS spending_pence, "
+            "  COUNT(*) AS txn_count "
+            "FROM txn_category_line t "
+            "JOIN category c ON c.id = t.category_id "
+            "JOIN account a ON a.id = t.account_id "
+            "LEFT JOIN payee p ON p.id = t.payee_id "
+            "LEFT JOIN payee canon ON canon.id = COALESCE(p.canonical_id, p.id) "
+            "WHERE " + " AND ".join(clauses) + " "
+            "GROUP BY canon_id, a.currency",
+            params,
+        )
+        target_ccy = (display_currency or "").strip().upper()
+        payees: dict = {}  # canon_id -> aggregated entry
+        unconverted: dict[str, int] = {}
+        for r in cur:
+            canon_id = r["canon_id"]  # None for the no-payee group
+            pence = int(r["spending_pence"])
+            count = int(r["txn_count"])
+            ccy = (r["ccy"] or "").strip().upper()
+            if target_ccy and ccy and ccy != target_ccy:
+                converted, _fb = self.convert_amount(
+                    Decimal(pence), from_ccy=ccy, to_ccy=target_ccy,
+                    on_date=date_to,
+                )
+                if converted is None:
+                    if pence != 0:
+                        unconverted[ccy] = unconverted.get(ccy, 0) + abs(pence)
+                    continue
+                pence = int(converted.to_integral_value(rounding=ROUND_HALF_UP))
+            entry = payees.get(canon_id)
+            if entry is None:
+                entry = {
+                    "payee_id": canon_id,
+                    "name": r["payee_name"],
+                    "spending_pence": 0,
+                    "txn_count": 0,
+                }
+                payees[canon_id] = entry
+            entry["spending_pence"] += pence
+            entry["txn_count"] += count
+        return {"payees": list(payees.values()), "unconverted": unconverted}
+
     def sankey_category_totals(
         self, *, date_from: str, date_to: str,
         account_ids: Optional[Iterable[int]] = None,

@@ -28,6 +28,7 @@ from mfl_desktop.reports.filters import (
     TYPE_INCOME_EXPENSE,
     TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
+    TYPE_PAYEE,
     TYPE_SANKEY,
     TYPE_SPENDING_OVER_TIME,
 )
@@ -36,11 +37,12 @@ from mfl_desktop.reports.filters import (
 # until their per-type ADR lands (ADR-039 §rounds).
 _AVAILABLE_TYPES: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME, TYPE_INCOME_EXPENSE, TYPE_INVESTMENT_RETURNS,
-    TYPE_SANKEY,
+    TYPE_SANKEY, TYPE_PAYEE,
 )
 _TYPE_ORDER: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
     TYPE_INCOME_EXPENSE,
+    TYPE_PAYEE,
     TYPE_INVESTMENT_RETURNS,
     TYPE_SANKEY,
     TYPE_NET_WORTH,

@@ -71,10 +71,12 @@ from mfl_desktop.ui.spending_report_window import SpendingReportWindow
 from mfl_desktop.ui.income_expense_window import IncomeExpenseWindow
 from mfl_desktop.ui.investment_returns_window import InvestmentReturnsWindow
 from mfl_desktop.ui.sankey_report_window import SankeyReportWindow
+from mfl_desktop.ui.payee_report_window import PayeeReportWindow
 from mfl_desktop.reports.filters import (
     TYPE_INCOME_EXPENSE,
     TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
+    TYPE_PAYEE,
     TYPE_SANKEY,
     TYPE_SPENDING_OVER_TIME,
 )
@@ -840,6 +842,10 @@ class RegisterWindow(QMainWindow):
             self._on_income_expense_report
         )
         reports_menu.addAction(self._income_expense_action)
+
+        self._payee_report_action = QAction("&Payee…", self)
+        self._payee_report_action.triggered.connect(self._on_payee_report)
+        reports_menu.addAction(self._payee_report_action)
 
         self._investment_returns_action = QAction("&Investment Returns…", self)
         self._investment_returns_action.triggered.connect(
@@ -2621,6 +2627,10 @@ class RegisterWindow(QMainWindow):
         (ADR-064)."""
         self._open_bare_report(TYPE_INCOME_EXPENSE)
 
+    def _on_payee_report(self) -> None:
+        """Reports menu → Payee. Opens the *bare* window (ADR-066)."""
+        self._open_bare_report(TYPE_PAYEE)
+
     def _on_investment_returns_report(self) -> None:
         """Reports menu → Investment Returns. Opens the *bare* window
         (ADR-046)."""
@@ -2646,6 +2656,8 @@ class RegisterWindow(QMainWindow):
             win = InvestmentReturnsWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_SANKEY:
             win = SankeyReportWindow.open_bare(self._repo, parent=self)
+        elif type_key == TYPE_PAYEE:
+            win = PayeeReportWindow.open_bare(self._repo, parent=self)
         else:
             # Other types not yet implemented; the menu items for them
             # haven't been added either, but keep the dispatcher honest.
@@ -2692,6 +2704,10 @@ class RegisterWindow(QMainWindow):
             )
         elif report.type == TYPE_SANKEY:
             win = SankeyReportWindow.load_from_id(
+                self._repo, report_id, parent=self,
+            )
+        elif report.type == TYPE_PAYEE:
+            win = PayeeReportWindow.load_from_id(
                 self._repo, report_id, parent=self,
             )
         else:

@@ -107,6 +107,13 @@ class TxnListFilter:
     title_label: str                       # primary breadcrumb — e.g. "Eating out"
     custom_start: Optional[date] = None
     custom_end: Optional[date] = None
+    # Rolled-up payee filter (ADR-066): when non-empty, match any of these
+    # payee ids — a canonical payee plus its aliases (ADR-029), so the
+    # drill-down matches what the rolled-up report row counted.
+    payee_ids: tuple[int, ...] = ()
+    # When True, match only transactions with NO payee (the report's
+    # "(No payee)" group). Takes precedence over payee_id / payee_ids.
+    payee_is_null: bool = False
 
     @classmethod
     def for_category(
@@ -138,6 +145,27 @@ class TxnListFilter:
             custom_start=custom_start, custom_end=custom_end,
         )
 
+    @classmethod
+    def for_payees(
+        cls, *, account_id: Optional[int], account_name: str,
+        payee_ids: tuple[int, ...], payee_label: str, period_key: str,
+        payee_is_null: bool = False,
+        custom_start: Optional[date] = None,
+        custom_end: Optional[date] = None,
+    ) -> "TxnListFilter":
+        """Drill-down for a rolled-up payee (ADR-066): match any id in
+        ``payee_ids`` (canonical + aliases), or — when ``payee_is_null`` —
+        transactions with no payee at all."""
+        return cls(
+            account_id=account_id, account_name=account_name,
+            category_id=None, category_label="",
+            payee_id=payee_ids[0] if payee_ids else None,
+            payee_label=payee_label,
+            period_key=period_key, title_label=payee_label,
+            custom_start=custom_start, custom_end=custom_end,
+            payee_ids=payee_ids, payee_is_null=payee_is_null,
+        )
+
     def signature(self) -> tuple:
         """Hashable key for the single-instance-per-filter registry
         on the summary window (ADR-034 §3 window policy). Custom bounds
@@ -148,6 +176,8 @@ class TxnListFilter:
             self.period_key,
             self.category_id,
             self.payee_id,
+            self.payee_ids,
+            self.payee_is_null,
             self.custom_start.isoformat() if self.custom_start else None,
             self.custom_end.isoformat() if self.custom_end else None,
         )
@@ -173,12 +203,25 @@ class DrillDownFilterProxy(TransactionFilterProxy):
     def __init__(self, source: TransactionTableModel) -> None:
         super().__init__(source)
         self._payee_id: Optional[int] = None
+        self._payee_ids: Optional[frozenset[int]] = None
+        self._payee_is_null: bool = False
         self._category_descendant_ids: Optional[set[int]] = None
         self._date_from: Optional[str] = None
         self._date_to: Optional[str] = None
 
     def set_payee_id(self, payee_id: Optional[int]) -> None:
         self._payee_id = payee_id
+        self.invalidateRowsFilter()
+
+    def set_payee_ids(self, payee_ids: Optional[set[int]]) -> None:
+        """Match any payee in the set (canonical + aliases, ADR-066).
+        ``None`` / empty clears the set filter."""
+        self._payee_ids = frozenset(payee_ids) if payee_ids else None
+        self.invalidateRowsFilter()
+
+    def set_payee_null(self, is_null: bool) -> None:
+        """When True, match only transactions with no payee."""
+        self._payee_is_null = is_null
         self.invalidateRowsFilter()
 
     def set_category_descendant_ids(self, ids: Optional[set[int]]) -> None:
@@ -196,7 +239,13 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         if not super().filterAcceptsRow(source_row, parent):
             return False
         row = self.sourceModel().row_at(source_row)
-        if self._payee_id is not None and row.payee_id != self._payee_id:
+        if self._payee_is_null:
+            if row.payee_id is not None:
+                return False
+        elif self._payee_ids is not None:
+            if row.payee_id not in self._payee_ids:
+                return False
+        elif self._payee_id is not None and row.payee_id != self._payee_id:
             return False
         if self._category_descendant_ids is not None:
             if row.category_id not in self._category_descendant_ids:
@@ -256,6 +305,10 @@ class TransactionsListWindow(QMainWindow):
         self._category_id: Optional[int] = txn_filter.category_id
         self._category_label: str = txn_filter.category_label
         self._payee_id: Optional[int] = txn_filter.payee_id
+        self._payee_ids: Optional[set[int]] = (
+            set(txn_filter.payee_ids) if txn_filter.payee_ids else None
+        )
+        self._payee_is_null: bool = txn_filter.payee_is_null
         self._payee_label: str = txn_filter.payee_label
         self._period_key: str = txn_filter.period_key
         self._title_label: str = txn_filter.title_label
@@ -475,7 +528,9 @@ class TransactionsListWindow(QMainWindow):
             self._proxy.set_category_descendant_ids(ids)
         else:
             self._proxy.set_category_descendant_ids(None)
-        # Payee — exact id.
+        # Payee — null group, rolled-up id set, or single exact id.
+        self._proxy.set_payee_null(self._payee_is_null)
+        self._proxy.set_payee_ids(self._payee_ids)
         self._proxy.set_payee_id(self._payee_id)
         # Date range — from period preset.
         start, end = self._resolve_period()
@@ -521,8 +576,14 @@ class TransactionsListWindow(QMainWindow):
                     self._on_remove_category,
                 )
             )
-        # Payee chip.
-        if self._payee_id is not None and self._payee_label:
+        # Payee chip — shown for an exact id, a rolled-up id set, or the
+        # no-payee group (ADR-066).
+        payee_active = (
+            self._payee_id is not None
+            or self._payee_ids is not None
+            or self._payee_is_null
+        )
+        if payee_active and self._payee_label:
             self._chips_layout.addWidget(
                 self._make_chip(
                     f"Payee: {self._payee_label}",
@@ -595,6 +656,8 @@ class TransactionsListWindow(QMainWindow):
 
     def _on_remove_payee(self) -> None:
         self._payee_id = None
+        self._payee_ids = None
+        self._payee_is_null = False
         self._payee_label = ""
         if not self._category_label:
             self._title_label = ""
