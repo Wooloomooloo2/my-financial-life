@@ -70,8 +70,16 @@ def compute_goal_progress(
     current balances. Pure — fixture-friendly via ``today``."""
     start = start_amount
     target = goal.target_amount
-    span = target - start            # signed total distance to cover
-    moved = current_amount - start   # signed distance covered so far
+    # Progress reference (the "0%" point) differs by direction. A **savings**
+    # goal counts the whole balance toward the target — existing savings ARE
+    # progress — so it measures from zero (£193k of a £1.2M target ≈ 16%, not 0%
+    # just because you already had it when the goal was set). A **pay-down**
+    # measures from the debt captured at creation, so clearing it runs 0→100%
+    # and later charges push progress back down (ADR-058 R4b). The captured
+    # baseline (``start_amount``) is still reported for reference.
+    ref = _ZERO if goal.kind == "savings" else start
+    span = target - ref              # signed total distance to cover
+    moved = current_amount - ref     # signed distance covered so far
 
     if span == _ZERO:
         ratio = 1.0 if current_amount == target else 0.0

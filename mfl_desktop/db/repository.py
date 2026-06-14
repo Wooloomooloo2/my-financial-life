@@ -5763,11 +5763,12 @@ class Repository:
     ) -> int:
         """Create a goal + its account links (ADR-058 R4c). ``accounts`` is
         ``(account_id, share_bp)`` pairs (share_bp = basis points, 10000 = 100%);
-        each link captures the account's *current* native balance as its baseline
-        so progress is measured from creation."""
+        each link captures the account's *current* native market value (cash +
+        holdings, ADR-044) as its baseline so progress is measured from
+        creation."""
         if not accounts:
             raise ValueError("A goal needs at least one account.")
-        balances = self.compute_account_balances()
+        balances = self.compute_account_values()   # market value (cash + holdings)
         try:
             cur = self._conn.execute(
                 "INSERT INTO budget_goal (iri, budget_id, name, kind, currency, "
@@ -5858,7 +5859,7 @@ class Repository:
                             )
                     else:                                     # added — baseline now
                         if balances is None:
-                            balances = self.compute_account_balances()
+                            balances = self.compute_account_values()
                         baseline = balances.get(aid, Decimal("0.00"))
                         self._conn.execute(
                             "INSERT INTO budget_goal_account (goal_id, "
@@ -5876,14 +5877,19 @@ class Repository:
     ) -> dict[int, GoalAggregate]:
         """Roll each goal's account links up into the goal's currency (ADR-058
         R4c): ``start`` = Σ(baseline_balance × share), ``current`` =
-        Σ(current_balance × share), each converted from the account's currency to
+        Σ(current_value × share), each converted from the account's currency to
         the goal currency via the FX layer (ADR-055 — an account with no rate is
         excluded + named, never par-added). Both bookends omit an excluded
-        account so they stay consistent."""
+        account so they stay consistent.
+
+        ``current`` uses **market value** (``compute_account_values`` — cash +
+        Σ(open-lot shares × latest price), ADR-044), NOT just cash: a 401(k) or
+        brokerage with no cash but six-figure holdings must count its holdings
+        toward a savings goal."""
         goals = self.list_budget_goals(budget_id)
         if not goals:
             return {}
-        balances = self.compute_account_balances()
+        values = self.compute_account_values()   # market value (cash + holdings)
         accounts = {a.id: a for a in self.list_accounts()}
         cents = Decimal("0.01")
         out: dict[int, GoalAggregate] = {}
@@ -5901,7 +5907,7 @@ class Repository:
                     from_ccy=acc.currency, to_ccy=g.currency, on_date=on_date,
                 )
                 cur_c, _ = self.convert_amount(
-                    balances.get(link.account_id, Decimal("0.00")) * share,
+                    values.get(link.account_id, Decimal("0.00")) * share,
                     from_ccy=acc.currency, to_ccy=g.currency, on_date=on_date,
                 )
                 if base_c is None or cur_c is None:
