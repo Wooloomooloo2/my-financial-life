@@ -109,6 +109,59 @@ class SpendingOverTimeFilters:
         return _from_dict(cls, raw)
 
 
+# ── Income & Expense (ADR-064 / Arc E, E1) ──────────────────────────────────
+
+# Reuses the Spending period + granularity vocabulary so the report family
+# stays consistent (SPENDING_PERIOD_KEYS / SPENDING_GRANULARITIES above).
+# The display currency is NOT persisted here — like Net Worth (ADR-055) and
+# Sankey (ADR-056) it's a view preference re-resolved each time the report
+# opens.
+
+
+@dataclass(frozen=True)
+class IncomeExpenseFilters:
+    """Persisted filter set for a saved Income & Expense report.
+
+    Income vs expense is decided by **category kind** (not raw sign) — the
+    aggregation is fixed in SQL, so there's no kind toggle here. Empty
+    ``account_ids`` means "all accounts" (same convention as the other
+    report filters). Default period is the trailing 12 months — the
+    natural cash-flow horizon (and matching the register's 12-month
+    default from Arc A / A1).
+    """
+
+    period_key: str = "1y"
+    custom_start: Optional[str] = None     # ISO date, only when period_key == "custom"
+    custom_end:   Optional[str] = None
+    granularity: str = "auto"
+    account_ids: tuple[int, ...] = field(default_factory=tuple)
+    # Transfers between the owner's own accounts are neither income nor
+    # expense. ``kind='transfer'`` categories are always excluded by the
+    # kind rule; this additionally drops anything carrying a ``transfer_id``
+    # (a linked transfer pair) regardless of the category it was filed
+    # under. Default False = exclude (the cash-flow-correct default).
+    include_transfers: bool = False
+
+    # ── round-trip helpers ──
+
+    @classmethod
+    def default(cls) -> "IncomeExpenseFilters":
+        return cls()
+
+    def to_json(self) -> str:
+        return json.dumps(_asdict_for_json(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, blob: str) -> "IncomeExpenseFilters":
+        raw = json.loads(blob) if blob else {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"IncomeExpenseFilters: expected JSON object, got "
+                f"{type(raw).__name__}"
+            )
+        return _from_dict(cls, raw)
+
+
 # ── Investment Returns (ADR-046) ────────────────────────────────────────────
 
 # Investment-native period presets. "max" = first transaction → today
@@ -216,6 +269,7 @@ class SankeyFilters:
 # type later means a new entry here + a new dataclass above.
 _FILTER_CLASSES: dict[str, type] = {
     TYPE_SPENDING_OVER_TIME: SpendingOverTimeFilters,
+    TYPE_INCOME_EXPENSE: IncomeExpenseFilters,
     TYPE_INVESTMENT_RETURNS: InvestmentReturnsFilters,
     TYPE_SANKEY: SankeyFilters,
 }

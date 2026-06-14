@@ -68,6 +68,7 @@ from mfl_desktop.ui.statements_window import StatementsWindow
 from mfl_desktop.ui.net_worth_window import NetWorthWindow
 from mfl_desktop.ui.new_report_dialog import NewReportDialog
 from mfl_desktop.ui.spending_report_window import SpendingReportWindow
+from mfl_desktop.ui.income_expense_window import IncomeExpenseWindow
 from mfl_desktop.ui.investment_returns_window import InvestmentReturnsWindow
 from mfl_desktop.ui.sankey_report_window import SankeyReportWindow
 from mfl_desktop.reports.filters import (
@@ -833,6 +834,12 @@ class RegisterWindow(QMainWindow):
         self._spending_report_action = QAction("&Spending Over Time…", self)
         self._spending_report_action.triggered.connect(self._on_spending_report)
         reports_menu.addAction(self._spending_report_action)
+
+        self._income_expense_action = QAction("Income && &Expense…", self)
+        self._income_expense_action.triggered.connect(
+            self._on_income_expense_report
+        )
+        reports_menu.addAction(self._income_expense_action)
 
         self._investment_returns_action = QAction("&Investment Returns…", self)
         self._investment_returns_action.triggered.connect(
@@ -2609,6 +2616,11 @@ class RegisterWindow(QMainWindow):
         instead (ADR-039 §reports-menu)."""
         self._open_bare_report(TYPE_SPENDING_OVER_TIME)
 
+    def _on_income_expense_report(self) -> None:
+        """Reports menu → Income & Expense. Opens the *bare* window
+        (ADR-064)."""
+        self._open_bare_report(TYPE_INCOME_EXPENSE)
+
     def _on_investment_returns_report(self) -> None:
         """Reports menu → Investment Returns. Opens the *bare* window
         (ADR-046)."""
@@ -2628,6 +2640,8 @@ class RegisterWindow(QMainWindow):
             return
         if type_key == TYPE_SPENDING_OVER_TIME:
             win = SpendingReportWindow.open_bare(self._repo, parent=self)
+        elif type_key == TYPE_INCOME_EXPENSE:
+            win = IncomeExpenseWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_INVESTMENT_RETURNS:
             win = InvestmentReturnsWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_SANKEY:
@@ -2666,6 +2680,10 @@ class RegisterWindow(QMainWindow):
             return
         if report.type == TYPE_SPENDING_OVER_TIME:
             win = SpendingReportWindow.load_from_id(
+                self._repo, report_id, parent=self,
+            )
+        elif report.type == TYPE_INCOME_EXPENSE:
+            win = IncomeExpenseWindow.load_from_id(
                 self._repo, report_id, parent=self,
             )
         elif report.type == TYPE_INVESTMENT_RETURNS:

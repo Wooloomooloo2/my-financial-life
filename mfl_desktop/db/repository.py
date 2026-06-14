@@ -3368,6 +3368,112 @@ class Repository:
             bucket[cid] = bucket.get(cid, 0) + pence
         return {"income": income, "expense": expense, "unconverted": unconverted}
 
+    def income_expense_series(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        granularity: str,
+        account_ids: Optional[Iterable[int]] = None,
+        display_currency: Optional[str] = None,
+        include_transfers: bool = False,
+    ) -> dict:
+        """Per-bucket income and expense totals for the Income & Expense
+        report (ADR-064 / Arc E, E1).
+
+        Income = inflows (``amount > 0``) on ``kind='income'`` categories;
+        expense = outflows (``amount < 0``) on ``kind='expense'`` categories
+        — the same kind-based definition as the Sankey report
+        (``sankey_category_totals``). ``kind='transfer'`` categories are
+        never income or expense, so they're excluded by the kind rule.
+        Reads the split-unrolled ``txn_category_line`` view (ADR-051) so a
+        split lands on each line's own category/kind.
+
+        ``include_transfers`` (default False) additionally drops every line
+        that carries a ``transfer_id`` — i.e. a linked transfer pair leg —
+        regardless of the category kind it was filed under, so an inter-
+        account move that slipped in under an income/expense category still
+        stays out of the cash-flow totals. Pass True to count those legs.
+        (A transfer recorded under an income/expense category but *not*
+        linked as a pair has no ``transfer_id`` and is indistinguishable
+        from a real flow here — the fix for that is to set its category's
+        kind to ``transfer`` or reconcile it as a transfer.)
+
+        ``granularity`` is one of ``_BUCKET_EXPR``'s keys (week / month /
+        quarter / year); the caller resolves ``'auto'`` to one of those
+        first. ``account_ids`` non-empty restricts to those accounts;
+        ``None``/empty means all.
+
+        ``display_currency`` converts every per-(bucket, currency) total
+        into that one currency via the ADR-035 FX layer, summed in the
+        display currency so a mixed GBP+USD scope is coherent. Conversion
+        is per (bucket, currency) at the **period-end** date (``date_to``)
+        — consistent with the Sankey report and fine under the owner's
+        sparse manual rates (``get_fx_rate_nearest`` resolves the same rate
+        at any date). Per ADR-055's policy a bucket with no rate to the
+        display currency is **excluded** (never par-added at 1:1) and its
+        magnitude collected under ``unconverted``. ``None`` keeps bare
+        same-units pence (single-currency case).
+
+        Returns ``{'income': {bucket: pence}, 'expense': {bucket: pence},
+        'unconverted': {currency: pence}}`` — pence ≥ 0, keyed by the
+        strftime bucket string (matches ``income_expense.enumerate_buckets``).
+        """
+        if granularity not in self._BUCKET_EXPR:
+            raise ValueError(
+                f"Unknown granularity {granularity!r}; expected one of "
+                f"{tuple(self._BUCKET_EXPR.keys())}"
+            )
+        bucket_expr = self._BUCKET_EXPR[granularity]
+
+        income: dict[str, int] = {}
+        expense: dict[str, int] = {}
+        unconverted: dict[str, int] = {}
+
+        clauses = [
+            "t.posted_date BETWEEN ? AND ?",
+            "( (c.kind = 'income'  AND t.amount > 0) "
+            "  OR (c.kind = 'expense' AND t.amount < 0) )",
+        ]
+        params: list = [date_from, date_to]
+        acc = list(account_ids) if account_ids else []
+        if acc:
+            clauses.append(f"t.account_id IN ({','.join('?' * len(acc))})")
+            params.extend(acc)
+        if not include_transfers:
+            clauses.append("t.transfer_id IS NULL")
+
+        cur = self._conn.execute(
+            f"SELECT {bucket_expr} AS bucket, c.kind AS kind, "
+            f"  a.currency AS ccy, "
+            f"  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
+            f"           ELSE -t.amount END) AS pence "
+            f"FROM txn_category_line t "
+            f"JOIN category c ON c.id = t.category_id "
+            f"JOIN account a ON a.id = t.account_id "
+            f"WHERE " + " AND ".join(clauses) + " "
+            f"GROUP BY bucket, c.kind, a.currency",
+            params,
+        )
+        target_ccy = (display_currency or "").strip().upper()
+        for r in cur:
+            bucket = r["bucket"]
+            pence = int(r["pence"])
+            ccy = (r["ccy"] or "").strip().upper()
+            if target_ccy and ccy and ccy != target_ccy:
+                converted, _fb = self.convert_amount(
+                    Decimal(pence), from_ccy=ccy, to_ccy=target_ccy,
+                    on_date=date_to,
+                )
+                if converted is None:
+                    if pence != 0:
+                        unconverted[ccy] = unconverted.get(ccy, 0) + abs(pence)
+                    continue
+                pence = int(converted.to_integral_value(rounding=ROUND_HALF_UP))
+            dest = income if r["kind"] == "income" else expense
+            dest[bucket] = dest.get(bucket, 0) + pence
+        return {"income": income, "expense": expense, "unconverted": unconverted}
+
     def list_categories_flat(
         self, kinds: Optional[tuple[str, ...]] = None,
     ) -> list[CategoryChoice]:
