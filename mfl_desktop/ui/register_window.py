@@ -13,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEvent
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop import data_library, snapshots
+from mfl_desktop.account_summary import bills_due_summary
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui.account_dialog import AccountDialog
@@ -156,6 +157,10 @@ class RegisterWindow(QMainWindow):
     # filter is active.
     _FILTERS_LABEL = "Filters ▾"
     _FILTERS_LABEL_ACTIVE = "Filters ▾  ●"
+    # A6 (ADR-063): base label for the register's Schedules button. The
+    # overdue/due-soon cue decorates it with a coloured count in
+    # _refresh_schedules_cue(); this is the plain "nothing due" form.
+    _SCHEDULES_LABEL = "Schedules"
 
     def __init__(
         self,
@@ -281,6 +286,16 @@ class RegisterWindow(QMainWindow):
         self._new_txn_btn.clicked.connect(self._on_new_transaction)
         filter_bar.addWidget(self._new_txn_btn)
         filter_bar.addSpacing(12)
+        # A6 (ADR-063): direct access to the cross-account Schedules dialog
+        # from the register — the same dialog as Manage ▸ Schedules — plus an
+        # overdue/due-soon cue so bills don't slip past unnoticed. The label
+        # gains a coloured count via _refresh_schedules_cue() (called at the
+        # end of __init__ after the auto-post sweep, on schedule changes, and
+        # on window re-activation).
+        self._schedules_btn = QPushButton(self._SCHEDULES_LABEL)
+        self._schedules_btn.clicked.connect(self._on_manage_schedules)
+        filter_bar.addWidget(self._schedules_btn)
+        filter_bar.addSpacing(12)
         # Reconcile button — opens the statement history for the current
         # account (ADR-040). Disabled in all-transactions mode, in lockstep
         # with the Account → Reconcile… menu action.
@@ -367,6 +382,11 @@ class RegisterWindow(QMainWindow):
         # via Manage ▸ Schedules.
         self._run_auto_post_sweep()
 
+        # A6 (ADR-063): paint the Schedules cue once the launch sweep has
+        # advanced any auto-posters past today, so an auto-paid bill the
+        # sweep just handled doesn't briefly flash as overdue.
+        self._refresh_schedules_cue()
+
         # Automatic rotating backups (ADR-057). Snapshot now — capturing the
         # state we opened against, *before* this session's edits, so the user
         # has a clean rollback point — then every interval_min minutes while the
@@ -403,6 +423,16 @@ class RegisterWindow(QMainWindow):
         self._repo.checkpoint()
         self._repo.close()
         super().closeEvent(event)
+
+    def changeEvent(self, event) -> None:
+        """Refresh the Schedules cue when the window regains focus (A6,
+        ADR-063). The overdue/due-soon split is date-relative, so an app
+        left open across midnight — or a schedule posted from another
+        window — should re-colour the button without forcing a relaunch.
+        Cheap enough to run on every activation (a handful of schedules)."""
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            self._refresh_schedules_cue()
 
     # ── sidebar plumbing ──
 
@@ -2493,6 +2523,60 @@ class RegisterWindow(QMainWindow):
     def _on_schedules_changed(self) -> None:
         self._model.reload()
         self._refresh_sidebar_balances()
+        self._refresh_schedules_cue()
+
+    def _refresh_schedules_cue(self) -> None:
+        """Decorate the register's Schedules button with the overdue /
+        due-soon cue (A6, ADR-063).
+
+        Re-queries every time rather than caching — there are only a
+        handful of schedules, so the cost is negligible and it can't go
+        stale. Plain label when nothing's pending; an amber ``● N`` when
+        items are due within 3 days; a red ``⚠ (N)`` (N = overdue +
+        due-soon) the moment anything is overdue. Best-effort: a DB error
+        resets to the plain label rather than refusing to paint the bar."""
+        if not hasattr(self, "_schedules_btn"):
+            return
+        try:
+            schedules = self._repo.list_scheduled_txns()
+        except Exception:
+            self._schedules_btn.setText(self._SCHEDULES_LABEL)
+            self._schedules_btn.setStyleSheet("")
+            self._schedules_btn.setToolTip("")
+            return
+
+        summary = bills_due_summary(schedules, date.today())
+        if not summary.has_alert:
+            self._schedules_btn.setText(self._SCHEDULES_LABEL)
+            self._schedules_btn.setStyleSheet("")
+            self._schedules_btn.setToolTip("Manage scheduled transactions")
+            return
+
+        if summary.overdue:
+            # Red — something's already past due; surface the whole count
+            # (overdue + due-soon) so the figure matches the dialog the
+            # click opens.
+            self._schedules_btn.setText(
+                f"⚠ {self._SCHEDULES_LABEL} ({summary.total})"
+            )
+            self._schedules_btn.setStyleSheet(
+                "QPushButton { color: #b91c1c; font-weight: 600; }"
+            )
+        else:
+            # Amber — nothing overdue yet, just a heads-up for the next 3 days.
+            self._schedules_btn.setText(
+                f"{self._SCHEDULES_LABEL} ● {summary.due_soon}"
+            )
+            self._schedules_btn.setStyleSheet(
+                "QPushButton { color: #b45309; font-weight: 600; }"
+            )
+
+        bits: list[str] = []
+        if summary.overdue:
+            bits.append(f"{summary.overdue} overdue")
+        if summary.due_soon:
+            bits.append(f"{summary.due_soon} due within 3 days")
+        self._schedules_btn.setToolTip(" · ".join(bits))
 
     def _run_auto_post_sweep(self) -> None:
         """Materialise any auto-post schedules whose next-due date has

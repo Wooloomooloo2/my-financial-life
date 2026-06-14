@@ -649,3 +649,53 @@ def count_scheduled_for_account(
         if s.account_id == account_id or s.transfer_to_account_id == account_id:
             n += 1
     return n
+
+
+@dataclass(frozen=True)
+class BillsDueSummary:
+    """Counts behind the register's Schedules cue (A6, ADR-063).
+
+    Computed over ALL active schedules across every account, because the
+    register's Schedules button opens the cross-account dialog — the cue
+    answers "is anything I scheduled overdue or about to come due?",
+    independent of which account is in view.
+
+    An occurrence is ``overdue`` when its ``next_due_date`` is strictly
+    before ``today``, and ``due_soon`` when it falls in the inclusive
+    window ``[today, today + horizon_days]``. Auto-posting schedules are
+    counted too (owner decision, ADR-063): the cue mirrors the dialog's
+    own "due in N days" summary, which has never distinguished auto-post.
+    """
+    overdue: int
+    due_soon: int
+
+    @property
+    def total(self) -> int:
+        return self.overdue + self.due_soon
+
+    @property
+    def has_alert(self) -> bool:
+        return self.total > 0
+
+
+def bills_due_summary(
+    schedules: Iterable[ScheduledTxnRow],
+    today: date,
+    horizon_days: int = 3,
+) -> BillsDueSummary:
+    """Bucket active schedules into overdue / due-soon for the register cue.
+
+    ``horizon_days`` is the "due soon" lookahead — A6 fixes it at 3 days
+    (the braindump's "due≤3d"); it stays a parameter so the value lives in
+    one place and the helper is testable. ``today`` is injected so the
+    function is pure and verifiable offscreen."""
+    horizon = today + timedelta(days=horizon_days)
+    overdue = 0
+    due_soon = 0
+    for s in schedules:
+        due = _parse_date(s.next_due_date)
+        if due < today:
+            overdue += 1
+        elif due <= horizon:
+            due_soon += 1
+    return BillsDueSummary(overdue=overdue, due_soon=due_soon)
