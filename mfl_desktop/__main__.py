@@ -83,7 +83,13 @@ class _PriceRefreshRunnable(QRunnable):
 
 
 APP_NAME = "MFL"
-LEGACY_DB = Path("mfl_dev.db")          # historical cwd dev database
+# Historical cwd dev databases, preferred in this order: the canonical .mfl
+# (ADR-016's save format) first, then the older .db. So a repo checked out on
+# any machine opens the live working file with no --db flag. (ADR-050 Tier-2
+# amended 2026-06-14: was .db-only, which silently diverged from a .mfl carried
+# across machines — the Windows checkout opened a stale mfl_dev.db while the
+# real data lived in mfl_dev.mfl.)
+LEGACY_DB_CANDIDATES = [Path("mfl_dev.mfl"), Path("mfl_dev.db")]
 DEFAULT_DB_FILENAME = "MyFinancialLife.mfl"
 
 
@@ -122,8 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mfl_desktop")
     parser.add_argument("--db", type=Path, default=None,
                         help="SQLite database path (default: the per-user "
-                             "application-data location, or ./mfl_dev.db when "
-                             "that legacy dev file is present)")
+                             "application-data location, or ./mfl_dev.mfl / "
+                             "./mfl_dev.db when that legacy dev file is present)")
     parser.add_argument("--account-iri",
                         help="Open this account (default: first in DB)")
     args = parser.parse_args(argv)
@@ -136,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve which database to open (ADR-050 rule 2 + ADR-016).
     seed_if_empty = False
+    legacy_db = next((p for p in LEGACY_DB_CANDIDATES if p.exists()), None)
     if args.db is not None:
         # Explicit path: the caller asked for a specific file — don't silently
         # create it; point at the CLI if it's missing (unchanged behaviour).
@@ -147,10 +154,11 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-    elif LEGACY_DB.exists():
+    elif legacy_db is not None:
         # Dev convenience: a checked-out repo with the historical working DB in
-        # cwd keeps launching against it with no --db flag.
-        db_path = LEGACY_DB
+        # cwd keeps launching against it with no --db flag. The canonical .mfl
+        # wins over a legacy .db when both are present (ADR-016/050).
+        db_path = legacy_db
     else:
         # Default: the OS-standard per-user location. Repository() bootstraps
         # the schema and mkdirs the parent on first run; we own this file, so

@@ -93,3 +93,9 @@ These are the concrete deltas the audit surfaced; none is a blocker for *running
 ### Implementation notes (non-binding)
 - The shortcut-modifier helper (rule 3) and the data-dir resolver (rule 2) are the two new shim points; keep each to a single small function so rule 9's "no platform branches in feature code" holds.
 - ADR-004's `platformdirs` recommendation is superseded *for the desktop app* by `QStandardPaths` (no extra dependency); ADR-004 otherwise still applies.
+
+---
+
+## Amendment (2026-06-14) — cwd legacy-DB bridge prefers `mfl_dev.mfl` over `mfl_dev.db`
+
+The Tier-2 resolution had the no-`--db` cwd bridge look only for `mfl_dev.db`. When the project was carried from a Mac (where the live working file was `mfl_dev.mfl`) to a Windows checkout that also had an older `mfl_dev.db` in the folder, the two silently diverged: Windows launched against the stale `.db` while the real data lived in `.mfl`. Fix: the bridge now tries an ordered candidate list — **`mfl_dev.mfl` first, then `mfl_dev.db`** (`LEGACY_DB_CANDIDATES` in `__main__.py`), so a repo on any machine opens the canonical `.mfl` (ADR-016's save format) with no flag, falling back to `.db` only for older checkouts, then the AppData default. `--db` and the AppData default branch are unchanged. Lesson: when two cwd files can both look "live", prefer the documented canonical format deterministically rather than whichever extension the older code happened to name.
