@@ -71,7 +71,25 @@ class PayeeTypeaheadDelegate(QStyledItemDelegate):
         # showing, which looked oppressive.
         popup = completer.popup()
         popup.setMinimumWidth(280)
+        # A4 fix (ADR-022 follow-up, 2026-06-14): inside a QTableView the
+        # delegate's editor lives under the view's edit event filter, which
+        # commits/closes the editor on focus-out and Enter. Picking a
+        # completion (click or Enter in the popup) therefore raced with the
+        # view closing the editor on the half-typed text, so inline typeahead
+        # "didn't work" even though the bulk-edit dialog (no view filter) did.
+        # Commit the chosen completion explicitly — same commit-on-activated
+        # pattern the Category/Status combo delegates use. The completer popup
+        # is a Qt::Popup, so it receives the Enter/click first and fires
+        # activated before the view's filter sees the key.
+        completer.activated[str].connect(
+            lambda text, e=editor: self._accept_completion(e, text)
+        )
         return editor
+
+    def _accept_completion(self, editor: QLineEdit, text: str) -> None:
+        editor.setText(text)
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor)
 
     def setEditorData(self, editor: QLineEdit, index) -> None:
         current = index.data(Qt.EditRole) or ""
