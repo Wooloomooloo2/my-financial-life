@@ -7,6 +7,7 @@ Balance column hidden — see project-all-transactions-view in memory).
 """
 from __future__ import annotations
 
+import calendar
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -94,13 +95,30 @@ STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 # turned into an inclusive lower bound on posted_date and pushed into the
 # Repository query, so the default view fetches and sorts only recent rows
 # instead of the full account history. Default = rolling quarter (90 days).
+# ADR-041 (amended 2026-06-14): the original 30d/90d/ytd/all set felt too
+# restrictive for everyday scanning, so 6- and 12-month windows were added and
+# the default moved to 12 months. The default is still a *windowed* query, so
+# even a big account opens cheaply (and ADR-061 made in-view search fast).
 _WINDOW_PRESETS = [
-    ("Last 30 days",   "30d"),
-    ("Rolling quarter", "90d"),
-    ("Year to date",   "ytd"),
-    ("All",            "all"),
+    ("Last 30 days",    "30d"),
+    ("Last 90 days",    "90d"),
+    ("Last 6 months",   "6m"),
+    ("Last 12 months",  "12m"),
+    ("Year to date",    "ytd"),
+    ("All",             "all"),
 ]
-_DEFAULT_WINDOW_KEY = "90d"
+_DEFAULT_WINDOW_KEY = "12m"
+
+
+def _months_before(d: date, months: int) -> date:
+    """Calendar-accurate 'N months ago' (so 'Last 12 months' is the same day
+    last year, not today − 365 days). The day is clamped to the target month's
+    last valid day (e.g. 31 Mar − 1 month → 28/29 Feb)."""
+    total = d.year * 12 + (d.month - 1) - months
+    year, month = divmod(total, 12)
+    month += 1
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(d.day, last_day))
 
 # Mirror of the sidebar's currency-symbol table so the status-bar Net
 # matches the in-app convention. Unknown currencies fall back to no
@@ -224,11 +242,11 @@ class RegisterWindow(QMainWindow):
         status_combo.addItems(["All", "Unreconciled", *STATUSES])
         status_combo.currentTextChanged.connect(lambda s: self._proxy.set_status(s))
 
-        self._category_combo = QComboBox()
-        self._populate_category_combo()
-        self._category_combo.currentIndexChanged.connect(
-            lambda i: self._proxy.set_category_id(self._category_combo.itemData(i))
-        )
+        # A2 (2026-06-14): the Category filter combo was removed — the general
+        # Search box now matches category names too (see register_model's
+        # _build_search_blob), so typing e.g. "groceries" filters the register
+        # without a dedicated combo. The proxy keeps its set_category_id()
+        # capability for other callers; it's simply no longer driven here.
 
         filter_bar = QHBoxLayout()
         filter_bar.setContentsMargins(8, 8, 8, 4)
@@ -240,9 +258,12 @@ class RegisterWindow(QMainWindow):
         filter_bar.addSpacing(12)
         filter_bar.addWidget(QLabel("Status:"))
         filter_bar.addWidget(status_combo)
-        filter_bar.addSpacing(12)
-        filter_bar.addWidget(QLabel("Category:"))
-        filter_bar.addWidget(self._category_combo, stretch=1)
+        filter_bar.addStretch(1)
+        # A3 (2026-06-14): a visible New Transaction button for mouse/trackpad
+        # users — same handler as the Transaction menu item and Ctrl/⌘+N.
+        self._new_txn_btn = QPushButton("＋ New Transaction")
+        self._new_txn_btn.clicked.connect(self._on_new_transaction)
+        filter_bar.addWidget(self._new_txn_btn)
         filter_bar.addSpacing(12)
         # Reconcile button — opens the statement history for the current
         # account (ADR-040). Disabled in all-transactions mode, in lockstep
@@ -409,9 +430,6 @@ class RegisterWindow(QMainWindow):
             self._repo, account_id=acct.id, since=self._current_since(),
             invest=(acct.family == "investment"),
         ))
-        # The category combo lists only the categories actually used in
-        # the current view — rebuild it now that _account has flipped.
-        self._populate_category_combo()
         self._import_action.setEnabled(True)
         self._import_action.setToolTip("Import OFX / QFX / QIF / CSV into this account")
         self._set_account_action_state(account_selected=True)
@@ -422,8 +440,6 @@ class RegisterWindow(QMainWindow):
         self._set_model(TransactionTableModel(
             self._repo, account_id=None, since=self._current_since(),
         ))
-        # See _show_account: the category combo is per-view.
-        self._populate_category_combo()
         self._import_action.setEnabled(False)
         self._import_action.setToolTip(
             "Select an account in the sidebar to import into it"
@@ -439,6 +455,9 @@ class RegisterWindow(QMainWindow):
         today = date.today()
         if key == "ytd":
             return f"{today.year:04d}-01-01"
+        months = {"6m": 6, "12m": 12}.get(key)
+        if months is not None:
+            return _months_before(today, months).isoformat()
         days = {"30d": 30, "90d": 90}.get(key, 90)
         return (today - timedelta(days=days)).isoformat()
 
@@ -1142,11 +1161,10 @@ class RegisterWindow(QMainWindow):
         return new_id
 
     def _reload_category_cache(self) -> None:
-        """Refresh the cached category list and the filter-bar combo without
-        touching the model or the typeahead delegate. Safe to call from
-        inside a delegate's setModelData."""
+        """Refresh the cached category list without touching the model or the
+        typeahead delegate. Safe to call from inside a delegate's
+        setModelData."""
         self._categories = self._repo.list_categories_flat()
-        self._populate_category_combo()
 
     # ── transfer helpers (category-driven, ADR-020) ──
 
@@ -1791,7 +1809,6 @@ class RegisterWindow(QMainWindow):
         # selects an item; the sidebar's selection_changed signal then drives
         # _show_account / _show_all_transactions which rebuild the model.
         self._reload_sidebar(select_iri=None)
-        self._populate_category_combo()
         self._update_window_title()
         # Retention policy is per-file (ADR-060), so re-arm the capture timer to
         # the newly-adopted file's cadence.
@@ -1946,7 +1963,7 @@ class RegisterWindow(QMainWindow):
     def _refresh_categories_view(self) -> None:
         """Reload everything that depends on the current category list:
         register rows (a merge/delete may have re-pointed category_id), the
-        cached choice list, the category delegate, and the filter-bar combo.
+        cached choice list, and the category delegate.
         Called after import and after the category-management dialog."""
         self._model.reload()
         self._categories = self._repo.list_categories_flat()
@@ -1960,7 +1977,6 @@ class RegisterWindow(QMainWindow):
                     self._table,
                 ),
             )
-        self._populate_category_combo()
 
     # ── account CRUD ──
 
@@ -2815,36 +2831,3 @@ class RegisterWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         return resp == QMessageBox.Yes
-
-    def _populate_category_combo(self) -> None:
-        """Rebuild the filter-bar Category combo, scoped to the
-        categories actually in use in the current view (single account
-        or all accounts). Preserves the previously-selected filter id
-        where it's still visible; otherwise reverts to All and clears
-        the proxy filter in lockstep."""
-        current_id = (
-            self._category_combo.currentData()
-            if self._category_combo.count() else None
-        )
-        in_use = self._repo.distinct_category_ids_for_account(
-            self._account.id if self._account is not None else None
-        )
-        self._category_combo.blockSignals(True)
-        self._category_combo.clear()
-        self._category_combo.addItem("All", userData=None)
-        restore_index = 0
-        for i, c in enumerate(
-            (c for c in self._categories if c.id in in_use), start=1,
-        ):
-            label = f"{c.name} ({c.parent_name})" if c.parent_name else c.name
-            self._category_combo.addItem(label, userData=c.id)
-            if c.id == current_id:
-                restore_index = i
-        self._category_combo.setCurrentIndex(restore_index)
-        self._category_combo.blockSignals(False)
-        # blockSignals(True) above swallows currentIndexChanged, so if
-        # the prior selection isn't visible in the new view we have to
-        # push the "All" filter through to the proxy by hand — otherwise
-        # the table keeps showing the now-invisible category's rows only.
-        if current_id is not None and restore_index == 0:
-            self._proxy.set_category_id(None)

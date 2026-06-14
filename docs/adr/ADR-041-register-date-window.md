@@ -87,3 +87,9 @@ Add a **date-window selector** to the register filter bar and back it with windo
 
 - **Any new register query path must thread `since` through** or it silently reverts to loading all history. The two existing methods are the only register feeds today.
 - **The seed-balance query and the windowed select must use the same `since` bound** (`< since` for the seed, `>= since` for the rows) or the running balance will double-count or skip the boundary day. The comment in `list_transactions_for_account` records this.
+
+---
+
+## Amendment (2026-06-14) — preset set widened, default moved to 12 months
+
+Real use found the original `30d / Rolling quarter (90d) / YTD / All` set **too restrictive** for everyday scanning, and 90 days too short a default. The presets are now **`Last 30 days / Last 90 days / Last 6 months / Last 12 months / Year to date / All`** and the **default opens on Last 12 months** (owner pick via `AskUserQuestion`). The 6- and 12-month bounds are **calendar-accurate** (a new `_months_before(d, months)` helper — same day N months back, day clamped to the target month's last valid day, e.g. 31 Mar − 1 month → 28/29 Feb) rather than `today − 180/365 days`, so "Last 12 months" reads as the same date last year. The default is still a *windowed* query, so even a large account opens cheaply; ADR-061 separately removed the in-view search cost that made a roomier default safe. No schema/Repository change — `_WINDOW_PRESETS`, `_DEFAULT_WINDOW_KEY`, and `_current_since` only.

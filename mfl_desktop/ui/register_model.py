@@ -125,6 +125,7 @@ class TransactionTableModel(QAbstractTableModel):
         ``TransactionFilterProxy.set_search``) matches either direction."""
         return " ".join(filter(None, [
             row.payee_name,
+            row.category_name,     # ADR-061 amend: search by category too
             row.memo,
             row.posted_date,
             row.security_symbol,   # investment rows: search by ticker…

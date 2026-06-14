@@ -80,3 +80,9 @@ Combine A + B + C — all view/model-layer only. **No migration, no schema chang
 - **Any new write to `TransactionTableModel._rows` must refresh `_search_blobs` at the same index** (or rebuild it), or search goes stale for that row. The two current sites are the contract.
 - **Any new register feed/field that should be searchable goes into `_build_search_blob`**, not into `filterAcceptsRow` — the proxy no longer assembles the haystack.
 - The visible-net walk in `_update_status` stays O(visible). If it ever needs to scale further, fold the net into the proxy (option D's neighbourhood).
+
+---
+
+## Amendment (2026-06-14) — category names are now in the search haystack; Category filter combo removed
+
+With the per-row haystack already cached, **`category_name` was added to `_build_search_blob`**, so the general Search box now matches a transaction's category too (typing "groceries" filters the register). That made the dedicated **Category filter combo redundant, so it was removed** from the register filter bar (and `_populate_category_combo` + its per-view rebuild calls deleted). The proxy keeps its `set_category_id()` capability — it's simply no longer driven from the register bar — so the ADR-051 split-line surfacing path stays intact for any future caller. `Repository.distinct_category_ids_for_account` is now unused by the register but left in place. Split rows still search on their own `category_name` (the "—Split—" parent's stored category); searching by a *split line's* category name is not covered (the row carries line *ids*, not names) — acceptable for v1, revisit if it comes up.
