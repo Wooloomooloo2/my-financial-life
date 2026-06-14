@@ -93,6 +93,12 @@ class TransactionTableModel(QAbstractTableModel):
         else:
             self.COLUMNS = self.COLUMNS_ALL
         self._rows: list[TransactionRow] = []
+        # ADR-061: a lowercased free-text haystack per row, built once on load
+        # (and refreshed on inline edit) so the proxy's filterAcceptsRow does a
+        # single substring test per keystroke instead of rebuilding the seven
+        # source fields + two amount formats for every row on every keystroke.
+        # Kept index-parallel with self._rows.
+        self._search_blobs: list[str] = []
         # Optional gate (ADR-040): set by the window to a callable
         # ``(txn_id) -> bool``. When a reconciled row is about to be edited
         # inline, the model asks the gate; a False answer rejects the edit.
@@ -108,7 +114,27 @@ class TransactionTableModel(QAbstractTableModel):
             )
         else:
             self._rows = self._repo.list_all_transactions(since=self._since)
+        self._search_blobs = [self._build_search_blob(r) for r in self._rows]
         self.endResetModel()
+
+    @staticmethod
+    def _build_search_blob(row: TransactionRow) -> str:
+        """The free-text haystack the proxy searches (ADR-061). Both the signed
+        and absolute amount forms are included — and the amount formats are
+        comma-free (``f"{x:.2f}"``) — so a needle with commas stripped (see
+        ``TransactionFilterProxy.set_search``) matches either direction."""
+        return " ".join(filter(None, [
+            row.payee_name,
+            row.memo,
+            row.posted_date,
+            row.security_symbol,   # investment rows: search by ticker…
+            row.security_name,     # …and by security name
+            f"{row.amount:.2f}",
+            f"{abs(row.amount):.2f}",
+        ])).lower()
+
+    def search_blob_at(self, source_row: int) -> str:
+        return self._search_blobs[source_row]
 
     def set_since(self, since: str | None) -> None:
         """Change the date window (ADR-041) and reload in place. The column
@@ -210,6 +236,7 @@ class TransactionTableModel(QAbstractTableModel):
         if updated is None:
             return False
         self._rows[index.row()] = updated
+        self._search_blobs[index.row()] = self._build_search_blob(updated)
         self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
         return True
 

@@ -62,18 +62,11 @@ class TransactionFilterProxy(QSortFilterProxyModel):
             ):
                 return False
         if self._search:
-            # Both signed and absolute amount forms are included so a search
-            # for "3250" matches both directions of a 3,250.00 transaction.
-            haystack = " ".join(filter(None, [
-                row.payee_name,
-                row.memo,
-                row.posted_date,
-                row.security_symbol,   # investment rows: search by ticker…
-                row.security_name,     # …and by security name
-                f"{row.amount:.2f}",
-                f"{abs(row.amount):.2f}",
-            ])).lower()
-            if self._search not in haystack:
+            # ADR-061: the haystack (payee/memo/date/security/both amount forms)
+            # is precomputed once per row by the model, so each keystroke is a
+            # single substring test rather than rebuilding seven fields + two
+            # amount formats for every loaded row.
+            if self._search not in model.search_blob_at(source_row):
                 return False
         return True
 

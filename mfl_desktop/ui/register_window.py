@@ -192,7 +192,19 @@ class RegisterWindow(QMainWindow):
 
         search = QLineEdit()
         search.setPlaceholderText("Search payee, memo, amount, or date…")
-        search.textChanged.connect(lambda s: self._proxy.set_search(s))
+        # ADR-061: debounce. Applying the filter re-evaluates every loaded row,
+        # and on a wide date window ("Show: All") that is tens of thousands —
+        # so filtering on each keystroke froze the UI while typing. Collapse a
+        # burst of keystrokes into a single filter pass ~200 ms after typing
+        # stops.
+        self._search_pending = ""
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(
+            lambda: self._proxy.set_search(self._search_pending)
+        )
+        search.textChanged.connect(self._on_search_text_changed)
 
         # ADR-041: date-window selector. Default seeded from self._window_key.
         self._window_combo = QComboBox()
@@ -286,10 +298,20 @@ class RegisterWindow(QMainWindow):
         self.setStatusBar(QStatusBar(self))
         self._build_menus()
 
-        self._proxy.layoutChanged.connect(self._update_status)
-        self._proxy.modelReset.connect(self._update_status)
-        self._proxy.rowsInserted.connect(self._update_status)
-        self._proxy.rowsRemoved.connect(self._update_status)
+        # ADR-061: coalesce status-bar refreshes. A single filter invalidation
+        # emits rowsRemoved + rowsInserted + layoutChanged, and _update_status
+        # walks every visible row (mapToSource + Decimal sum for the net), so
+        # firing it per signal meant 2–3 full walks per keystroke. Route the
+        # signals through a zero-delay single-shot timer that restarts on each
+        # emission, collapsing a burst into one walk per event-loop turn.
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.setInterval(0)
+        self._status_timer.timeout.connect(self._update_status)
+        self._proxy.layoutChanged.connect(self._schedule_status_update)
+        self._proxy.modelReset.connect(self._schedule_status_update)
+        self._proxy.rowsInserted.connect(self._schedule_status_update)
+        self._proxy.rowsRemoved.connect(self._schedule_status_update)
 
         # ── initial selection ──
 
@@ -522,6 +544,19 @@ class RegisterWindow(QMainWindow):
     def _set_default_column_widths(self) -> None:
         for i, (_, name, _) in enumerate(self._model.COLUMNS):
             self._table.setColumnWidth(i, _COLUMN_WIDTHS.get(name, 120))
+
+    def _on_search_text_changed(self, text: str) -> None:
+        # ADR-061: stash the latest text and (re)start the debounce timer; the
+        # actual proxy filter runs once typing settles. start() on a running
+        # single-shot restarts it, so a fast typist gets one filter pass.
+        self._search_pending = text
+        self._search_timer.start()
+
+    def _schedule_status_update(self, *args) -> None:
+        # ADR-061: coalesce the burst of proxy signals from one filter/sort into
+        # a single _update_status walk. *args absorbs the rows{Inserted,Removed}
+        # (parent, first, last) payloads.
+        self._status_timer.start()
 
     def _update_status(self) -> None:
         visible = self._proxy.rowCount()
