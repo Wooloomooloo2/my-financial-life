@@ -232,24 +232,80 @@ def refresh_latest_into(
     )
 
 
+# Sampling granularities for the historical backfill (ADR-065). One OXR
+# `/historical` call is made per *sampled* date, so the granularity is the
+# lever on API-call cost: monthly ≈ 12/yr, weekly ≈ 52/yr, daily ≈ 365/yr.
+# The nearest-prior lookup (ADR-035) fills the gaps between sampled dates,
+# so monthly is plenty for a personal-finance app.
+BACKFILL_GRANULARITIES: tuple[str, ...] = ("monthly", "weekly", "daily")
+
+
+def sample_backfill_dates(
+    date_from: str, date_to: str, granularity: str = "monthly",
+) -> list:
+    """The dates a backfill would fetch over ``[date_from, date_to]``
+    (inclusive) at the given sampling granularity — daily, weekly (every
+    7 days from the start), or monthly (the start date then the 1st of
+    each following month). ``date_to`` is always included as the final
+    sample so the most recent edge gets a rate. Pure + side-effect-free
+    so a dialog can call it for a live "≈ N API calls" estimate."""
+    from datetime import date, timedelta
+
+    if granularity not in BACKFILL_GRANULARITIES:
+        raise ValueError(
+            f"Unknown granularity {granularity!r}; expected one of "
+            f"{BACKFILL_GRANULARITIES}"
+        )
+    d_from = date.fromisoformat(date_from)
+    d_to = date.fromisoformat(date_to)
+    if d_from > d_to:
+        raise ValueError("date_from must be on or before date_to.")
+
+    out: list = []
+    if granularity == "daily":
+        cur = d_from
+        while cur <= d_to:
+            out.append(cur)
+            cur += timedelta(days=1)
+    elif granularity == "weekly":
+        cur = d_from
+        while cur <= d_to:
+            out.append(cur)
+            cur += timedelta(days=7)
+    else:  # monthly — start date, then the 1st of each subsequent month
+        cur = d_from
+        while cur <= d_to:
+            out.append(cur)
+            cur = (
+                date(cur.year + 1, 1, 1) if cur.month == 12
+                else date(cur.year, cur.month + 1, 1)
+            )
+    if not out or out[-1] != d_to:
+        out.append(d_to)
+    return out
+
+
 def backfill_historical(
     repo: "Repository",
     *,
     quotes: Iterable[str],
     date_from: str,
     date_to: str,
+    granularity: str = "monthly",
     on_progress=None,
 ) -> RefreshResult:
-    """Fetch one historical-day response per missing date in the range
-    ``[date_from, date_to]`` (inclusive) and upsert the rates.
+    """Fetch one historical-day response per *sampled* missing date in the
+    range ``[date_from, date_to]`` (inclusive) and upsert the rates.
 
-    Skips dates where every requested ``USD→quote`` already exists, so
-    re-running the backfill is cheap. Each successful day calls
-    ``on_progress(day_index, total_days)`` so the dialog can show a small
+    ``granularity`` (``monthly`` / ``weekly`` / ``daily``, ADR-065) sets
+    how many dates are sampled — and therefore the API-call cost. Skips
+    sampled dates where every requested ``USD→quote`` already exists, so
+    re-running the backfill is cheap. Each sampled date calls
+    ``on_progress(index, total_samples)`` so the dialog can show a small
     progress bar.
 
     Raises ``FxFetchError`` if the API key is missing — callers should
-    verify before invoking. Per-day errors are accumulated in
+    verify before invoking. Per-date errors are accumulated in
     ``RefreshResult.errors`` and the loop continues.
     """
     api_key = repo.get_setting("oxr_api_key")
@@ -258,23 +314,17 @@ def backfill_historical(
             "No openexchangerates API key set. Add one in "
             "Manage ▸ Currencies first."
         )
-    from datetime import date, timedelta
-
-    d_from = date.fromisoformat(date_from)
-    d_to = date.fromisoformat(date_to)
-    if d_from > d_to:
-        raise ValueError("date_from must be on or before date_to.")
     quote_list = [q.strip().upper() for q in quotes if q.strip()]
     if not quote_list:
         return RefreshResult(fetched_at=None, new_rates_count=0, errors=[])
 
+    sample_dates = sample_backfill_dates(date_from, date_to, granularity)
+
     client = OpenExchangeRatesClient(api_key)
     errors: list[str] = []
     count = 0
-    total_days = (d_to - d_from).days + 1
-    cur_date = d_from
-    idx = 0
-    while cur_date <= d_to:
+    total = len(sample_dates)
+    for idx, cur_date in enumerate(sample_dates):
         iso = cur_date.isoformat()
         # Skip if every quote already has a row for this date.
         missing = [
@@ -282,8 +332,6 @@ def backfill_historical(
             if repo.get_fx_rate_on(iso, "USD", q) is None
         ]
         if not missing:
-            cur_date += timedelta(days=1)
-            idx += 1
             continue
         try:
             rates = client.fetch_historical(iso, quotes=missing)
@@ -297,11 +345,9 @@ def backfill_historical(
             errors.append(f"{iso}: {e}")
         if on_progress is not None:
             try:
-                on_progress(idx + 1, total_days)
+                on_progress(idx + 1, total)
             except Exception:
                 pass
-        cur_date += timedelta(days=1)
-        idx += 1
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repo.set_setting("oxr_last_refresh_at", now)
     return RefreshResult(

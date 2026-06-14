@@ -113,6 +113,11 @@ class CurrenciesDialog(QDialog):
         self._refresh_btn = QPushButton("Refresh now")
         self._refresh_btn.clicked.connect(self._on_refresh_now)
         action_row.addWidget(self._refresh_btn)
+        # ADR-065: historical backfill (Refresh now only fetches today's
+        # rates). Opens a range + granularity picker.
+        self._backfill_btn = QPushButton("Backfill historical…")
+        self._backfill_btn.clicked.connect(self._on_backfill_historical)
+        action_row.addWidget(self._backfill_btn)
         prov_layout.addLayout(action_row)
 
         outer.addWidget(provider_box)
@@ -286,6 +291,30 @@ class CurrenciesDialog(QDialog):
                 + "\n".join(result.errors),
             )
         self._reload_rates_table()
+
+    def _on_backfill_historical(self) -> None:
+        """Open the historical-backfill dialog (ADR-065). Persists the typed
+        API key first (same as Refresh) so the user can paste + backfill in
+        one go; reloads the rates table if anything was fetched."""
+        from mfl_desktop.ui.fx_backfill_dialog import FxBackfillDialog
+
+        typed_key = self._key_edit.text().strip()
+        self._repo.set_setting("oxr_api_key", typed_key)
+        if not typed_key:
+            QMessageBox.warning(
+                self, "Need an API key",
+                "Add your openexchangerates.org app_id to the field "
+                "above before backfilling.",
+            )
+            return
+        dialog = FxBackfillDialog(self._repo, parent=self)
+        dialog.exec()
+        if dialog.ran_backfill():
+            self._refresh_status.setText(
+                f"Last refresh: "
+                f"{_fmt_refresh_time(self._repo.get_setting('oxr_last_refresh_at'))}"
+            )
+            self._reload_rates_table()
 
     def _on_add_manual_rate(self) -> None:
         base = self._add_base.currentText().strip().upper()
