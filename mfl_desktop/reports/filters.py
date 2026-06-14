@@ -30,6 +30,7 @@ TYPE_INCOME_EXPENSE = "income_expense"
 TYPE_SANKEY = "sankey"
 TYPE_INVESTMENT_RETURNS = "investment_returns"
 TYPE_PAYEE = "payee"
+TYPE_CATEGORY_PAYEE = "category_payee"
 
 REPORT_TYPES: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
@@ -38,6 +39,7 @@ REPORT_TYPES: tuple[str, ...] = (
     TYPE_SANKEY,
     TYPE_INVESTMENT_RETURNS,
     TYPE_PAYEE,
+    TYPE_CATEGORY_PAYEE,
 )
 
 REPORT_TYPE_LABELS: dict[str, str] = {
@@ -47,6 +49,7 @@ REPORT_TYPE_LABELS: dict[str, str] = {
     TYPE_SANKEY:             "Sankey",
     TYPE_INVESTMENT_RETURNS: "Investment Returns",
     TYPE_PAYEE:              "Payee",
+    TYPE_CATEGORY_PAYEE:     "Category & Payee",
 }
 
 
@@ -322,6 +325,59 @@ class PayeeReportFilters:
         return _from_dict(cls, raw)
 
 
+# ── Category & Payee (ADR-068 / Arc E, E3) ──────────────────────────────────
+
+# The two-level drill report's primary dimension. The report ranks one
+# dimension at level 1 and drills into the other at level 2. Reuses the
+# spending period vocabulary + the payee top-N default.
+CATEGORY_PAYEE_GROUP_BY: tuple[str, ...] = ("category", "payee")
+
+
+@dataclass(frozen=True)
+class CategoryPayeeFilters:
+    """Persisted filter set for a saved Category & Payee report.
+
+    The report ranks **spending** (strict outflow — same definition as
+    Spending Over Time / Payee) cross-cut by category and payee. ``group_by``
+    is the *primary* dimension shown at level 1 (the other is the level-2
+    drill); it's a saved preference but a toggle flips it live. The category
+    dimension is the **budget-line level** (``category_group_map`` — Groceries,
+    Transport…), and payees roll up to their canonical (ADR-028/029).
+
+    Empty ``account_ids`` means all accounts. ``top_n`` caps rows per level
+    (0 = all; tail omitted with a hidden-count note, like the Payee report).
+    Transfers excluded by default with ``include_transfers``. The display
+    currency and the live drill state are view-only, not persisted.
+    """
+
+    period_key: str = "1y"
+    custom_start: Optional[str] = None     # ISO date, only when period_key == "custom"
+    custom_end:   Optional[str] = None
+    account_ids: tuple[int, ...] = field(default_factory=tuple)
+    group_by: str = "category"             # primary dimension at level 1
+    top_n: int = 15
+    include_transfers: bool = False
+
+    # ── round-trip helpers ──
+
+    @classmethod
+    def default(cls) -> "CategoryPayeeFilters":
+        return cls()
+
+    def to_json(self) -> str:
+        return json.dumps(_asdict_for_json(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, blob: str) -> "CategoryPayeeFilters":
+        raw = json.loads(blob) if blob else {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"CategoryPayeeFilters: expected JSON object, got "
+                f"{type(raw).__name__}"
+            )
+        return _from_dict(cls, raw)
+
+
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 # Maps the report.type enum value to its filter dataclass. Adding a new
@@ -332,6 +388,7 @@ _FILTER_CLASSES: dict[str, type] = {
     TYPE_INVESTMENT_RETURNS: InvestmentReturnsFilters,
     TYPE_SANKEY: SankeyFilters,
     TYPE_PAYEE: PayeeReportFilters,
+    TYPE_CATEGORY_PAYEE: CategoryPayeeFilters,
 }
 
 

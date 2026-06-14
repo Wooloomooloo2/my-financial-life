@@ -3384,6 +3384,96 @@ class Repository:
             entry["txn_count"] += count
         return {"payees": list(payees.values()), "unconverted": unconverted}
 
+    def category_payee_matrix(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        account_ids: Optional[Iterable[int]] = None,
+        display_currency: Optional[str] = None,
+        include_transfers: bool = False,
+    ) -> dict:
+        """Outflow spending per **(category, canonical payee)** cell over a
+        date range (ADR-068 / Arc E, E3 — Category & Payee report).
+
+        Same **strict-outflow** definition as :meth:`spending_aggregates` /
+        :meth:`payee_spending_aggregates` (``kind='expense'`` and
+        ``amount < 0``), over the split-unrolled ``txn_category_line`` view
+        (ADR-051). ``category_id`` is the transaction's **leaf** category —
+        the caller rolls it up to the budget-line level
+        (``category_group_map``) and pivots either dimension. The payee is
+        rolled up to its canonical id (ADR-028/029); ``payee_id`` is ``None``
+        for transactions with no payee.
+
+        ``include_transfers`` (default False) additionally drops linked
+        transfer legs (``transfer_id``), mirroring the other reports.
+        ``account_ids`` non-empty restricts to those accounts. Each
+        per-(category, payee, currency) slice is FX-converted to
+        ``display_currency`` at ``date_to``; a slice with no rate is excluded
+        and its magnitude collected under ``unconverted`` (ADR-055).
+
+        Returns ``{'cells': [{category_id, payee_id, spending_pence,
+        txn_count}], 'unconverted': {currency: pence}}`` — one cell per
+        (leaf category, canonical payee), pence ≥ 0, unsorted.
+        """
+        clauses = [
+            "t.posted_date BETWEEN ? AND ?",
+            "c.kind = 'expense'",
+            "t.amount < 0",
+        ]
+        params: list = [date_from, date_to]
+        acc = list(account_ids) if account_ids else []
+        if acc:
+            clauses.append(f"t.account_id IN ({','.join('?' * len(acc))})")
+            params.extend(acc)
+        if not include_transfers:
+            clauses.append("t.transfer_id IS NULL")
+
+        cur = self._conn.execute(
+            "SELECT t.category_id AS category_id, "
+            "  COALESCE(p.canonical_id, p.id) AS canon_id, "
+            "  a.currency AS ccy, "
+            "  SUM(-t.amount) AS spending_pence, "
+            "  COUNT(*) AS txn_count "
+            "FROM txn_category_line t "
+            "JOIN category c ON c.id = t.category_id "
+            "JOIN account a ON a.id = t.account_id "
+            "LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE " + " AND ".join(clauses) + " "
+            "GROUP BY t.category_id, canon_id, a.currency",
+            params,
+        )
+        target_ccy = (display_currency or "").strip().upper()
+        cells: dict = {}  # (category_id, canon_id) -> aggregated cell
+        unconverted: dict[str, int] = {}
+        for r in cur:
+            pence = int(r["spending_pence"])
+            count = int(r["txn_count"])
+            ccy = (r["ccy"] or "").strip().upper()
+            if target_ccy and ccy and ccy != target_ccy:
+                converted, _fb = self.convert_amount(
+                    Decimal(pence), from_ccy=ccy, to_ccy=target_ccy,
+                    on_date=date_to,
+                )
+                if converted is None:
+                    if pence != 0:
+                        unconverted[ccy] = unconverted.get(ccy, 0) + abs(pence)
+                    continue
+                pence = int(converted.to_integral_value(rounding=ROUND_HALF_UP))
+            key = (r["category_id"], r["canon_id"])
+            cell = cells.get(key)
+            if cell is None:
+                cell = {
+                    "category_id": r["category_id"],
+                    "payee_id": r["canon_id"],
+                    "spending_pence": 0,
+                    "txn_count": 0,
+                }
+                cells[key] = cell
+            cell["spending_pence"] += pence
+            cell["txn_count"] += count
+        return {"cells": list(cells.values()), "unconverted": unconverted}
+
     def sankey_category_totals(
         self, *, date_from: str, date_to: str,
         account_ids: Optional[Iterable[int]] = None,
