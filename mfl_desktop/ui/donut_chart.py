@@ -25,6 +25,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import fmt_currency
+import mfl_desktop.ui.chart_helpers as _ch
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ class DonutChart(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.TextAntialiasing, True)
-        p.fillRect(self.rect(), QColor(self._COLOR_BG))
+        p.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         total = sum(max(0.0, s.value) for s in self._segments)
         if self._empty_message is not None or not self._segments or total <= 0:
@@ -121,7 +122,7 @@ class DonutChart(QWidget):
         mid_rect = QRectF(cx - r_mid, cy - r_mid, 2 * r_mid, 2 * r_mid)
         hole_rect = QRectF(cx - r_hole, cy - r_hole, 2 * r_hole, 2 * r_hole)
 
-        sep = QPen(QColor(self._COLOR_SEP))
+        sep = QPen(QColor(_ch.chart_surface()))
         sep.setWidth(1)
 
         a = 0.0  # degrees clockwise from 12 o'clock
@@ -163,7 +164,7 @@ class DonutChart(QWidget):
 
         # Punch the centre hole.
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(self._COLOR_BG))
+        p.setBrush(QColor(_ch.chart_surface()))
         p.drawEllipse(hole_rect)
         self._paint_center(p, cx, cy, r_hole)
         p.end()
@@ -190,7 +191,7 @@ class DonutChart(QWidget):
             f = QFont(p.font())
             f.setPointSize(9)
             p.setFont(f)
-            p.setPen(QPen(QColor(self._COLOR_LABEL)))
+            p.setPen(QPen(QColor(_ch.chart_axis_ink())))
             fm = QFontMetrics(f)
             text = fm.elidedText(self._center_label, Qt.ElideRight, max_w)
             p.drawText(int(cx - fm.horizontalAdvance(text) / 2),
@@ -200,7 +201,7 @@ class DonutChart(QWidget):
             f.setPointSize(12)
             f.setBold(True)
             p.setFont(f)
-            p.setPen(QPen(QColor(self._COLOR_TOTAL)))
+            p.setPen(QPen(QColor(_ch.chart_ink())))
             fm = QFontMetrics(f)
             text = fm.elidedText(self._center_sub, Qt.ElideRight, max_w)
             p.drawText(int(cx - fm.horizontalAdvance(text) / 2),
@@ -210,7 +211,7 @@ class DonutChart(QWidget):
         f = QFont(p.font())
         f.setPointSize(10)
         p.setFont(f)
-        p.setPen(QPen(QColor(self._COLOR_EMPTY)))
+        p.setPen(QPen(QColor(_ch.chart_faint())))
         fm = QFontMetrics(f)
         p.drawText(
             int((self.width() - fm.horizontalAdvance(message)) / 2),

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from mfl_desktop.reports.payee_report import PayeeSpendRow
 from mfl_desktop.ui.chart_helpers import fmt_currency
+import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_BAR     = "#2563eb"   # blue-600 — app accent
 _COLOR_TRACK   = "#f1f5f9"   # slate-100 — faint full-width bar track
@@ -89,7 +90,7 @@ class PayeeChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None:
             self._paint_empty(painter, self._empty_message)

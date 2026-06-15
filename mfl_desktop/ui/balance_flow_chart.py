@@ -35,6 +35,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from mfl_desktop.account_summary import BalanceFlowSeries
 from mfl_desktop.ui.chart_helpers import fmt_currency, nice_ticks
+import mfl_desktop.ui.chart_helpers as _ch
 
 
 # Series colours — local to this chart, not the GROUP_PALETTE. Picked
@@ -150,7 +151,7 @@ class BalanceFlowChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None:
             self._paint_empty(painter, self._empty_message)
@@ -496,7 +497,7 @@ class BalanceFlowChart(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor(_COLOR_INCOME)))
         painter.drawRoundedRect(QRectF(x, y_swatch, 10, 10), 2, 2)
-        painter.setPen(QPen(QColor("#374151")))
+        painter.setPen(QPen(QColor(_ch.chart_ink())))
         painter.drawText(int(x + 16), int(y_text), "Income (left axis)")
         x += 16 + fm.horizontalAdvance("Income (left axis)") + 18
 
@@ -504,7 +505,7 @@ class BalanceFlowChart(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor(_COLOR_SPENDING)))
         painter.drawRoundedRect(QRectF(x, y_swatch, 10, 10), 2, 2)
-        painter.setPen(QPen(QColor("#374151")))
+        painter.setPen(QPen(QColor(_ch.chart_ink())))
         painter.drawText(int(x + 16), int(y_text), "Spending (left axis)")
         x += 16 + fm.horizontalAdvance("Spending (left axis)") + 18
 
@@ -516,7 +517,7 @@ class BalanceFlowChart(QWidget):
             int(x), int(legend.top() + legend.height() / 2),
             int(x + 18), int(legend.top() + legend.height() / 2),
         )
-        painter.setPen(QPen(QColor("#374151")))
+        painter.setPen(QPen(QColor(_ch.chart_ink())))
         painter.drawText(int(x + 24), int(y_text), "Balance (right axis)")
 
     def _paint_axis_baseline(self, painter: QPainter, chart: QRectF) -> None:

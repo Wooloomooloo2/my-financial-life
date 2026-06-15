@@ -24,6 +24,10 @@ def apply_theme(app: QApplication, theme: str = "light") -> None:
     app.setStyle("Fusion")
     app.setPalette(_build_palette())
     app.setStyleSheet(_qss())
+    # paintEvent charts read their structural colours from tokens at paint
+    # time (ADR-076 round 2) — force a repaint so a live toggle redraws them.
+    for w in app.allWidgets():
+        w.update()
 
 
 def _build_palette() -> QPalette:

@@ -23,6 +23,9 @@ so flipping back from the register after an edit reflects new data.
 """
 from __future__ import annotations
 
+from mfl_desktop.ui import tokens
+import mfl_desktop.ui.chart_helpers as _ch
+
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -91,20 +94,8 @@ from mfl_desktop.ui.transactions_list_window import (
 
 # Tailwind v3 vocabulary — kept local because these are screen-level
 # accents rather than chart series colours.
-_COLOR_HEADING   = "#6b7280"   # slate-500 — section header text
-_COLOR_BODY      = "#111827"   # slate-900 — main values
-_COLOR_MUTED     = "#9ca3af"   # slate-400
-_COLOR_POSITIVE  = "#16a34a"   # green-600
-_COLOR_NEGATIVE  = "#dc2626"   # red-600
-_COLOR_ACCENT    = "#2563eb"   # blue-600 — clickable Reconcile link
-_COLOR_BAR_FILL  = "#bfdbfe"   # blue-200 — soft fill for the top-N bar
-_COLOR_BAR_TRACK = "#f1f5f9"   # slate-100 — track behind the bar
-_COLOR_ROW_HOVER = "#f1f5f9"   # slate-100 — Top-N hover tint (ADR-034)
 # Section card palette (ADR-034 §2): cards float on a slate-50 canvas
 # with a soft slate-200 border so the screen reads as a grid of units.
-_COLOR_CARD_BG     = "#ffffff"
-_COLOR_CARD_BORDER = "#e5e7eb"
-_COLOR_WINDOW_BG   = "#f8fafc"
 
 _DEFAULT_PERIOD = "quarter"   # rolling 90 days — replaces the old "90d" key
 _NON_CASH_FAMILIES = {"investment", "property", "vehicle"}
@@ -212,12 +203,12 @@ class _TopNList(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         self._hitmap.clear()
 
         if not self._rows:
-            painter.setPen(QPen(QColor(_COLOR_MUTED)))
+            painter.setPen(QPen(QColor(tokens.c("subtle"))))
             font = QFont(painter.font())
             font.setPointSize(10)
             painter.setFont(font)
@@ -258,11 +249,11 @@ class _TopNList(QWidget):
             # Hover highlight on clickable rows only.
             if i == self._hover_index and row.entity_id is not None:
                 painter.setPen(Qt.NoPen)
-                painter.setBrush(QBrush(QColor(_COLOR_ROW_HOVER)))
+                painter.setBrush(QBrush(QColor(tokens.c("surface_alt"))))
                 painter.drawRect(row_rect)
 
             # Label (left).
-            painter.setPen(QPen(QColor(_COLOR_BODY)))
+            painter.setPen(QPen(QColor(tokens.c("text"))))
             label_rect = QRectF(8, y, label_w, row_h)
             painter.drawText(
                 label_rect,
@@ -274,16 +265,16 @@ class _TopNList(QWidget):
             bar_y = y + (row_h - 8) / 2
             track = QRectF(bar_x, bar_y, bar_w_total, 8)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(_COLOR_BAR_TRACK)))
+            painter.setBrush(QBrush(QColor(tokens.c("surface_alt"))))
             painter.drawRoundedRect(track, 4, 4)
             fill_w = max(0.0, bar_w_total * max(0.0, min(1.0, row.proportion)))
             if fill_w > 0:
                 fill = QRectF(bar_x, bar_y, fill_w, 8)
-                painter.setBrush(QBrush(QColor(_COLOR_BAR_FILL)))
+                painter.setBrush(QBrush(QColor(tokens.c("accent_subtle"))))
                 painter.drawRoundedRect(fill, 4, 4)
 
             # Amount (right).
-            painter.setPen(QPen(QColor(_COLOR_BODY)))
+            painter.setPen(QPen(QColor(tokens.c("text"))))
             amt_rect = QRectF(
                 self.width() - amount_w - 4, y, amount_w, row_h,
             )
@@ -408,9 +399,7 @@ class AccountSummaryWindow(QMainWindow):
 
         container = QWidget()
         container.setObjectName("summaryRoot")
-        container.setStyleSheet(
-            f"QWidget#summaryRoot {{ background-color: {_COLOR_WINDOW_BG}; }}"
-        )
+        tokens.themed(container, "QWidget#summaryRoot { background-color: {canvas}; }")
         v = QVBoxLayout(container)
         v.setContentsMargins(20, 18, 20, 16)
         v.setSpacing(12)
@@ -491,17 +480,12 @@ class AccountSummaryWindow(QMainWindow):
         layout.setSpacing(8)
 
         header = QLabel("PORTFOLIO VALUE OVER TIME")
-        header.setStyleSheet(
-            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
-        )
+        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
         layout.addWidget(header)
 
         # The unpriced/valuations banner lives here on the Overview tab.
         self._non_cash_banner = QLabel("")
-        self._non_cash_banner.setStyleSheet(
-            "color: #92400e; background-color: #fef3c7; "
-            "padding: 6px 10px; border-radius: 4px; font-size: 9pt;"
-        )
+        tokens.themed(self._non_cash_banner, "color: {warning}; background-color: {accent_subtle}; padding: 6px 10px; border-radius: 4px; font-size: 9pt;")
         self._non_cash_banner.setWordWrap(True)
         self._non_cash_banner.hide()
         layout.addWidget(self._non_cash_banner)
@@ -518,7 +502,7 @@ class AccountSummaryWindow(QMainWindow):
         f.setPointSize(f.pointSize() + 8)
         f.setBold(True)
         title.setFont(f)
-        title.setStyleSheet(f"color: {_COLOR_BODY};")
+        tokens.themed(title, "color: {text};")
         return title
 
     def _make_card(self, name: str) -> QFrame:
@@ -528,9 +512,10 @@ class AccountSummaryWindow(QMainWindow):
         their own border to look right inside a card."""
         card = QFrame()
         card.setObjectName(name)
-        card.setStyleSheet(
-            f"QFrame#{name} {{ background-color: {_COLOR_CARD_BG}; "
-            f"border: 1px solid {_COLOR_CARD_BORDER}; border-radius: 10px; }}"
+        tokens.themed(
+            card,
+            "QFrame#%s { background-color: {surface}; "
+            "border: 1px solid {border}; border-radius: 10px; }" % name,
         )
         return card
 
@@ -541,9 +526,7 @@ class AccountSummaryWindow(QMainWindow):
         layout.setSpacing(8)
 
         header = QLabel("ACCOUNT BALANCE")
-        header.setStyleSheet(
-            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
-        )
+        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
         layout.addWidget(header)
 
         # Banner for non-cash families: investment / property / vehicle.
@@ -551,10 +534,7 @@ class AccountSummaryWindow(QMainWindow):
         self._non_cash_banner = QLabel(
             "Balance reflects recorded transactions; valuations not yet wired."
         )
-        self._non_cash_banner.setStyleSheet(
-            "color: #92400e; background-color: #fef3c7; "
-            "padding: 6px 10px; border-radius: 4px; font-size: 9pt;"
-        )
+        tokens.themed(self._non_cash_banner, "color: {warning}; background-color: {accent_subtle}; padding: 6px 10px; border-radius: 4px; font-size: 9pt;")
         self._non_cash_banner.setWordWrap(True)
         self._non_cash_banner.hide()
         layout.addWidget(self._non_cash_banner)
@@ -580,14 +560,7 @@ class AccountSummaryWindow(QMainWindow):
             btn = QPushButton(PERIOD_LABELS[key])
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton { padding: 5px 12px; border: 1px solid #cbd5e1; "
-                "border-radius: 14px; background-color: #ffffff; "
-                "color: #334155; font-size: 9pt; }"
-                "QPushButton:checked { background-color: #2563eb; "
-                "color: #ffffff; border-color: #2563eb; font-weight: bold; }"
-                "QPushButton:hover:!checked { background-color: #f1f5f9; }"
-            )
+            tokens.themed(btn, "QPushButton { padding: 5px 12px; border: 1px solid {border_strong}; border-radius: 14px; background-color: {surface}; color: {heading}; font-size: 9pt; }QPushButton:checked { background-color: {accent}; color: {surface}; border-color: {accent}; font-weight: bold; }QPushButton:hover:!checked { background-color: {surface_alt}; }")
             btn.clicked.connect(
                 lambda _checked=False, k=key: self._on_period_selected(k)
             )
@@ -606,9 +579,7 @@ class AccountSummaryWindow(QMainWindow):
         layout.setSpacing(4)
 
         self._report_header = QLabel("REPORT: ")
-        self._report_header.setStyleSheet(
-            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
-        )
+        tokens.themed(self._report_header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
         layout.addWidget(self._report_header)
 
         self._report_opening_lbl = QLabel("£0")
@@ -618,9 +589,9 @@ class AccountSummaryWindow(QMainWindow):
 
         layout.addLayout(self._kv_row("Opening balance", self._report_opening_lbl))
         layout.addLayout(self._kv_row("Inflows", self._report_inflows_lbl,
-                                       value_color=_COLOR_POSITIVE))
+                                       value_color="positive"))
         layout.addLayout(self._kv_row("Outflows", self._report_outflows_lbl,
-                                       value_color=_COLOR_NEGATIVE))
+                                       value_color="negative"))
         layout.addLayout(self._kv_row("Closing balance", self._report_closing_lbl,
                                        bold=True))
         return layout
@@ -637,7 +608,7 @@ class AccountSummaryWindow(QMainWindow):
         layout.addLayout(
             self._kv_row("Recorded Balance", self._recorded_balance_lbl, bold=True),
         )
-        self._scheduled_note_lbl.setStyleSheet(f"color: {_COLOR_HEADING}; font-size: 9pt;")
+        tokens.themed(self._scheduled_note_lbl, "color: {muted}; font-size: 9pt;")
         layout.addWidget(self._scheduled_note_lbl)
 
         layout.addWidget(self._build_separator())
@@ -648,7 +619,7 @@ class AccountSummaryWindow(QMainWindow):
         self._uncleared_count_lbl = QLabel("Uncleared")
         layout.addLayout(self._kv_row_pair(
             self._uncleared_count_lbl, self._uncleared_lbl,
-            value_color=_COLOR_NEGATIVE,
+            value_color="negative",
         ))
         layout.addLayout(self._kv_row("Cleared Balance", self._cleared_lbl))
 
@@ -660,9 +631,7 @@ class AccountSummaryWindow(QMainWindow):
         self._upcoming_container.setSpacing(4)
         layout.addLayout(self._upcoming_container)
         self._upcoming_empty_lbl = QLabel("None upcoming.")
-        self._upcoming_empty_lbl.setStyleSheet(
-            f"color: {_COLOR_HEADING}; font-size: 9pt;"
-        )
+        tokens.themed(self._upcoming_empty_lbl, "color: {muted}; font-size: 9pt;")
         layout.addWidget(self._upcoming_empty_lbl)
 
         layout.addStretch(1)
@@ -686,13 +655,11 @@ class AccountSummaryWindow(QMainWindow):
 
         header_row = QHBoxLayout()
         title = QLabel("HOLDINGS")
-        title.setStyleSheet(
-            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
-        )
+        tokens.themed(title, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
         header_row.addWidget(title)
         header_row.addStretch(1)
         self._holdings_totals_lbl = QLabel("")
-        self._holdings_totals_lbl.setStyleSheet(f"color: {_COLOR_BODY}; font-size: 9pt;")
+        tokens.themed(self._holdings_totals_lbl, "color: {text}; font-size: 9pt;")
         header_row.addWidget(self._holdings_totals_lbl)
         layout.addLayout(header_row)
 
@@ -766,7 +733,7 @@ class AccountSummaryWindow(QMainWindow):
                 item.setTextAlignment(int(align | Qt.AlignVCenter))
                 if col == 7 and h.unrealized_gain is not None:
                     item.setForeground(QBrush(QColor(
-                        _COLOR_POSITIVE if h.unrealized_gain >= 0 else _COLOR_NEGATIVE
+                        tokens.c("positive") if h.unrealized_gain >= 0 else tokens.c("negative")
                     )))
                 if col == 1 and h.basis_incomplete:
                     item.setToolTip(
@@ -786,9 +753,7 @@ class AccountSummaryWindow(QMainWindow):
 
         header_row = QHBoxLayout()
         header = QLabel("PORTFOLIO")
-        header.setStyleSheet(
-            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
-        )
+        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
         header_row.addWidget(header)
         header_row.addStretch(1)
         header_row.addWidget(QLabel("View:"))
@@ -971,28 +936,18 @@ class AccountSummaryWindow(QMainWindow):
         the account's statement state; the button opens the statement history
         (:class:`StatementsWindow`)."""
         row = QFrame()
-        row.setStyleSheet(
-            "QFrame { border: 1px solid #e5e7eb; border-radius: 6px; "
-            "background-color: #fafafa; }"
-        )
+        tokens.themed(row, "QFrame { border: 1px solid {border}; border-radius: 6px; background-color: {surface_alt}; }")
         h = QHBoxLayout(row)
         h.setContentsMargins(10, 8, 10, 8)
         h.setSpacing(8)
 
         self._statements_status_lbl = QLabel("NO STATEMENTS")
-        self._statements_status_lbl.setStyleSheet(
-            "color: #6b7280; letter-spacing: 1px; font-size: 9pt; "
-            "background: transparent; border: none;"
-        )
+        tokens.themed(self._statements_status_lbl, "color: {muted}; letter-spacing: 1px; font-size: 9pt; background: transparent; border: none;")
         h.addWidget(self._statements_status_lbl)
         h.addStretch(1)
 
         reconcile_btn = QPushButton("RECONCILE ›")
-        reconcile_btn.setStyleSheet(
-            "QPushButton { color: #2563eb; background: transparent; "
-            "border: none; font-weight: bold; font-size: 9pt; }"
-            "QPushButton:hover { color: #1d4ed8; }"
-        )
+        tokens.themed(reconcile_btn, "QPushButton { color: {accent}; background: transparent; border: none; font-weight: bold; font-size: 9pt; }QPushButton:hover { color: {accent_hover}; }")
         reconcile_btn.setCursor(Qt.PointingHandCursor)
         reconcile_btn.clicked.connect(self._on_reconcile_clicked)
         h.addWidget(reconcile_btn)
@@ -1031,9 +986,7 @@ class AccountSummaryWindow(QMainWindow):
 
     def _section_header(self, text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet(
-            f"color: {_COLOR_HEADING}; letter-spacing: 1px; font-size: 9pt;"
-        )
+        tokens.themed(lbl, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
         return lbl
 
     def _kv_row(
@@ -1048,13 +1001,13 @@ class AccountSummaryWindow(QMainWindow):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         key_lbl = QLabel(key)
-        key_lbl.setStyleSheet(f"color: {_COLOR_HEADING};")
+        tokens.themed(key_lbl, "color: {muted};")
         h.addWidget(key_lbl)
         h.addStretch(1)
         if value_color:
-            value_lbl.setStyleSheet(f"color: {value_color};")
+            tokens.themed(value_lbl, "color: {%s};" % value_color)
         else:
-            value_lbl.setStyleSheet(f"color: {_COLOR_BODY};")
+            tokens.themed(value_lbl, "color: {text};")
         if bold:
             f = value_lbl.font()
             f.setBold(True)
@@ -1075,13 +1028,13 @@ class AccountSummaryWindow(QMainWindow):
         h = QHBoxLayout()
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
-        key_lbl.setStyleSheet(f"color: {_COLOR_HEADING};")
+        tokens.themed(key_lbl, "color: {muted};")
         h.addWidget(key_lbl)
         h.addStretch(1)
         if value_color:
-            value_lbl.setStyleSheet(f"color: {value_color};")
+            tokens.themed(value_lbl, "color: {%s};" % value_color)
         else:
-            value_lbl.setStyleSheet(f"color: {_COLOR_BODY};")
+            tokens.themed(value_lbl, "color: {text};")
         value_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h.addWidget(value_lbl)
         return h
@@ -1260,20 +1213,20 @@ class AccountSummaryWindow(QMainWindow):
         h.setSpacing(8)
 
         when = QLabel(self._describe_when(row.days_until, row.next_due_date))
-        when.setStyleSheet(f"color: {_COLOR_HEADING}; font-size: 9pt;")
+        tokens.themed(when, "color: {muted}; font-size: 9pt;")
         when.setFixedWidth(86)
         h.addWidget(when)
 
         label = QLabel(row.label)
-        label.setStyleSheet(f"color: {_COLOR_BODY};")
+        tokens.themed(label, "color: {text};")
         h.addWidget(label)
         h.addStretch(1)
 
         amt = QLabel(_fmt_money(row.amount))
         if row.amount >= 0:
-            amt.setStyleSheet(f"color: {_COLOR_POSITIVE};")
+            tokens.themed(amt, "color: {positive};")
         else:
-            amt.setStyleSheet(f"color: {_COLOR_NEGATIVE};")
+            tokens.themed(amt, "color: {negative};")
         amt.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h.addWidget(amt)
         return h

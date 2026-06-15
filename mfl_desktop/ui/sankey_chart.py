@@ -24,6 +24,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import fmt_currency
+import mfl_desktop.ui.chart_helpers as _ch
 
 
 @dataclass
@@ -157,7 +158,7 @@ class SankeyChart(QWidget):
         if spine_value <= 0:
             return None
         self._spine = SankeyNode(
-            label="Total income", value=spine_value, color=QColor("#334155"),
+            label="Total income", value=spine_value, color=QColor(_ch.chart_ink()),
         )
         max_in, max_out = self._assign_columns()
         cols = self._columns(-max_in, max_out)

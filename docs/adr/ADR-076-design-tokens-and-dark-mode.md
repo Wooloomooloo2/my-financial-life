@@ -49,9 +49,15 @@ The series palette (`chart_helpers.GROUP_PALETTE`) stays — those saturated mid
 - New UI should use `tokens.c(...)` / `tokens.themed(...)` instead of hardcoded hex — future-proof for both themes.
 - Light mode is unchanged by construction (token light values == prior hexes), so the large sweep carries minimal visual risk.
 
-### Scope / deferred
+### Round 2 (2026-06-15) — charts + account-summary themed
 
-- **Light "islands" in dark mode (B2).** The paintEvent charts (which explicitly fill a white plot background and draw dark text on it) and the per-account **Summary** window (`account_summary_window`, a paintEvent dashboard built on module-level `_COLOR_*` constants) are intentionally left light for B1 — they stay internally consistent and readable (dark text on their own white surface). Theming the chart structural colours + that window onto the tokens (so they go dark too) is the B2 sweep. Everything else — the register, sidebar, Home dashboard, all dialogs, and the saved-report windows (Spending / Income & Expense / Payee / Category×Payee / Net Worth / Sankey / Investment Returns) — themes fully and switches live.
+The B1 light "islands" are now themed, completing dark mode everywhere:
+
+- **`chart_helpers` gained structural-colour accessors** — `chart_surface` / `chart_grid` / `chart_axis_ink` / `chart_ink` / `chart_faint` / `chart_tooltip_bg` / `chart_tooltip_ink`, each returning a token at paint time. The series palette (`GROUP_PALETTE`) stays (its saturated mid-tones read on both backgrounds). All ~12 paintEvent charts had their structural `QColor("#…")` calls converted to these accessors (plot background, gridlines, axis text, separators, tooltip); white-on-coloured-fill text (labels on bars/tiles, the amber today-pill) deliberately stays white.
+- **`account_summary_window`** (its `_COLOR_*` constants + inline `setStyleSheet` + paintEvent) converted to `tokens.themed()` / `tokens.c()` like the rest.
+- **`theme.apply_theme` now force-repaints all widgets** (`app.allWidgets()` → `update()`) after re-applying, so the paintEvent charts (which read tokens at paint time) redraw into the new theme on a live toggle without per-chart signal wiring.
+
+### Scope / deferred
 - This round consolidates colour. A spacing/typography **scale** (tokens exist but only colour is swept thoroughly) and per-screen layout refinement (e.g. the budget screen) are later Arc B rounds.
 - A system "auto" mode (follow OS light/dark) is deferred; the toggle is explicit.
 

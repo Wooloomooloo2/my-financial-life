@@ -37,14 +37,15 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import nice_ticks
+import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_BASE = QColor("#93c5fd")   # blue-300 — cost-basis / invested tone
 _COLOR_GAIN = QColor("#16a34a")   # green-600 — appreciation tip
 _COLOR_LOSS = QColor("#dc2626")   # red-600 — loss tip
-_COLOR_GRID = QColor("#e5e7eb")
-_COLOR_AXIS = QColor("#9ca3af")
-_COLOR_LABEL = QColor("#6b7280")
-_COLOR_LEGEND_TEXT = QColor("#374151")
+_COLOR_GRID = QColor(_ch.chart_grid())
+_COLOR_AXIS = QColor(_ch.chart_faint())
+_COLOR_LABEL = QColor(_ch.chart_axis_ink())
+_COLOR_LEGEND_TEXT = QColor(_ch.chart_ink())
 
 
 @dataclass(frozen=True)
@@ -109,7 +110,7 @@ class ValueChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None or not self._bars:
             self._paint_empty(painter)
@@ -238,8 +239,8 @@ class ValueChart(QWidget):
                 tip_rect = QRectF(x_left, full_top, bar_w, base_top - full_top)
                 self._draw_segment(painter, tip_rect, tip_colour,
                                    round_top=True, radius=radius)
-                # 1px white separator between base and tip.
-                sep = QPen(QColor("#ffffff"))
+                # 1px separator between base and tip (plot background colour).
+                sep = QPen(QColor(_ch.chart_surface()))
                 sep.setWidth(1)
                 painter.setPen(sep)
                 painter.drawLine(int(base_rect.left()), int(base_rect.top()),

@@ -28,11 +28,12 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import nice_ticks
+import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_LINE = QColor("#2563eb")    # blue-600
-_COLOR_GRID = QColor("#e5e7eb")
-_COLOR_AXIS = QColor("#9ca3af")
-_COLOR_LABEL = QColor("#6b7280")
+_COLOR_GRID = QColor(_ch.chart_grid())
+_COLOR_AXIS = QColor(_ch.chart_faint())
+_COLOR_LABEL = QColor(_ch.chart_axis_ink())
 _COLOR_DOT = QColor("#2563eb")
 
 
@@ -88,7 +89,7 @@ class PriceHistoryChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None or len(self._points) < 1:
             self._paint_empty(

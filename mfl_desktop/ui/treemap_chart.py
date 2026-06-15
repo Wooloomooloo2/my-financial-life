@@ -26,6 +26,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import colour_for
+import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui import tokens
 
 
 @dataclass(frozen=True)
@@ -128,7 +130,7 @@ class TreemapChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None or not self._tiles:
             self._paint_empty(painter, self._empty_message or "Nothing to show.")
@@ -152,7 +154,7 @@ class TreemapChart(QWidget):
         fm = QFontMetrics(font)
         for i, (tile, rect) in enumerate(zip(self._tiles, rects)):
             colour = colour_for(i)
-            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.setPen(QPen(QColor(_ch.chart_surface()), 1))
             painter.setBrush(QBrush(colour))
             painter.drawRect(rect)
             self._hitmap.append((rect, i))
@@ -175,11 +177,11 @@ class TreemapChart(QWidget):
 
         if self._subtitle:
             painter.setFont(font)
-            painter.setPen(QPen(QColor("#6b7280")))
+            painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
             painter.drawText(m, m + fm.ascent(), self._subtitle)
         if self._footnote:
             painter.setFont(font)
-            painter.setPen(QPen(QColor("#92400e")))
+            painter.setPen(QPen(QColor(tokens.c("warning"))))
             painter.drawText(m, self.height() - 4, self._footnote)
         painter.end()
 
@@ -187,7 +189,7 @@ class TreemapChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(QColor("#6b7280")))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(int((self.width() - tw) / 2), int(self.height() / 2), message)

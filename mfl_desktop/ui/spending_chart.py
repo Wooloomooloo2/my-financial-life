@@ -33,6 +33,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency, nice_ticks
+import mfl_desktop.ui.chart_helpers as _ch
 
 
 class SpendingChart(QWidget):
@@ -120,7 +121,7 @@ class SpendingChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None:
             self._paint_empty(painter)
@@ -177,7 +178,7 @@ class SpendingChart(QWidget):
     def _paint_gridlines(
         self, painter: QPainter, chart: QRectF, ymax: float, step: float
     ) -> None:
-        pen = QPen(QColor("#e5e7eb"))
+        pen = QPen(QColor(_ch.chart_grid()))
         pen.setWidth(1)
         painter.setPen(pen)
 
@@ -194,7 +195,7 @@ class SpendingChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor("#6b7280")))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
 
         n_ticks = int(round(ymax / step)) if step > 0 else 0
@@ -213,7 +214,7 @@ class SpendingChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor("#6b7280")))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
 
         n = len(self._buckets)
@@ -299,9 +300,9 @@ class SpendingChart(QWidget):
         else:
             painter.fillRect(rect, colour)
 
-        # 1px white separator between stacked segments.
+        # 1px separator between stacked segments (the plot background colour).
         if not is_top:
-            sep_pen = QPen(QColor("#ffffff"))
+            sep_pen = QPen(QColor(_ch.chart_surface()))
             sep_pen.setWidth(1)
             painter.setPen(sep_pen)
             painter.drawLine(
@@ -317,7 +318,7 @@ class SpendingChart(QWidget):
             return
         y = chart.bottom() - (self._avg_pounds / ymax) * chart.height()
 
-        pen = QPen(QColor("#374151"))
+        pen = QPen(QColor(_ch.chart_ink()))
         pen.setWidth(2)
         pen.setStyle(Qt.DashLine)
         painter.setPen(pen)
@@ -339,9 +340,9 @@ class SpendingChart(QWidget):
             th,
         )
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor("#1f2937")))
+        painter.setBrush(QBrush(QColor(_ch.chart_tooltip_bg())))
         painter.drawRoundedRect(pill, th / 2, th / 2)
-        painter.setPen(QPen(QColor("#ffffff")))
+        painter.setPen(QPen(QColor(_ch.chart_tooltip_ink())))
         painter.drawText(
             int(pill.left() + 6),
             int(pill.top() + fm.ascent() + 2),
@@ -371,7 +372,7 @@ class SpendingChart(QWidget):
             painter.setBrush(QBrush(colour_for(idx)))
             painter.drawRoundedRect(sw_rect, 2, 2)
 
-            painter.setPen(QPen(QColor("#374151")))
+            painter.setPen(QPen(QColor(_ch.chart_ink())))
             tw = fm.horizontalAdvance(name)
             painter.drawText(
                 int(x + swatch_size + gap_after_swatch),
@@ -387,7 +388,7 @@ class SpendingChart(QWidget):
                 break
 
     def _paint_axis_baseline(self, painter: QPainter, chart: QRectF) -> None:
-        pen = QPen(QColor("#9ca3af"))
+        pen = QPen(QColor(_ch.chart_faint()))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(
@@ -400,7 +401,7 @@ class SpendingChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(QColor("#6b7280")))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(

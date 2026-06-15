@@ -35,6 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import nice_ticks
+import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_COST = QColor("#2563eb")        # blue-600 — invested capital
 _COLOR_GAIN = QColor("#16a34a")        # green-600 — unrealized gain
@@ -43,9 +44,9 @@ _COLOR_REALIZED = QColor("#0d9488")    # teal-600 — realized gains
 _COLOR_REALIZED_NEG = QColor("#f87171")  # red-400 — realized loss (downward)
 _COLOR_DIVIDEND = QColor("#d97706")    # amber-600 — dividends / income
 _COLOR_COST_LINE = QColor("#1e3a8a")   # blue-900 — cost reference line
-_COLOR_GRID = QColor("#e5e7eb")
-_COLOR_AXIS = QColor("#9ca3af")
-_COLOR_LABEL = QColor("#6b7280")
+_COLOR_GRID = QColor(_ch.chart_grid())
+_COLOR_AXIS = QColor(_ch.chart_faint())
+_COLOR_LABEL = QColor(_ch.chart_axis_ink())
 
 
 class ReturnsChart(QWidget):
@@ -124,7 +125,7 @@ class ReturnsChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None or len(self._points) < 2:
             self._paint_empty(
@@ -320,7 +321,7 @@ class ReturnsChart(QWidget):
             painter.setBrush(QBrush(colour))
             painter.setPen(Qt.NoPen)
             painter.drawRect(int(x), int(y_chip - 6), 12, 12)
-            painter.setPen(QPen(QColor("#374151")))
+            painter.setPen(QPen(QColor(_ch.chart_ink())))
             painter.drawText(int(x + 18), int(y_text), name)
             x += 18 + fm.horizontalAdvance(name) + 20
         if self._any_fallback:

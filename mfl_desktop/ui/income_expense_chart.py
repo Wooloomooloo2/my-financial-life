@@ -31,6 +31,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from mfl_desktop.reports.income_expense import IEBucket
 from mfl_desktop.ui.chart_helpers import fmt_currency, nice_ticks
+import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_INCOME  = "#10b981"   # emerald-500 — income (matches BalanceFlowChart)
 _COLOR_EXPENSE = "#ef4444"   # red-500 — expense
@@ -150,7 +151,7 @@ class IncomeExpenseChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         if self._empty_message is not None:
             self._paint_empty(painter, self._empty_message)
@@ -431,7 +432,7 @@ class IncomeExpenseChart(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(QColor(colour)))
             painter.drawRoundedRect(QRectF(x, y_swatch, 10, 10), 2, 2)
-            painter.setPen(QPen(QColor("#374151")))
+            painter.setPen(QPen(QColor(_ch.chart_ink())))
             painter.drawText(int(x + 16), int(y_text), label)
             x += 16 + fm.horizontalAdvance(label) + 18
 
@@ -443,7 +444,7 @@ class IncomeExpenseChart(QWidget):
             int(x), int(legend.top() + legend.height() / 2),
             int(x + 18), int(legend.top() + legend.height() / 2),
         )
-        painter.setPen(QPen(QColor("#374151")))
+        painter.setPen(QPen(QColor(_ch.chart_ink())))
         painter.drawText(int(x + 24), int(y_text), "Net (income − expense)")
 
     def _paint_axis_baseline(self, painter: QPainter, chart: QRectF) -> None:

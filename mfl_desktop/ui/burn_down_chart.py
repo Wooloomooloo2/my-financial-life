@@ -34,6 +34,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from mfl_desktop.budget_calc import BurnDownData
 from mfl_desktop.ui.chart_helpers import fmt_currency, nice_ticks
+import mfl_desktop.ui.chart_helpers as _ch
 
 # Series colours — local to this chart, not the GROUP_PALETTE.
 _COLOR_ACTUAL = "#dc2626"   # red-600 — spend
@@ -72,7 +73,7 @@ class BurnDownChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         data = self._data
         if data is None or not data.x_days:
@@ -277,7 +278,7 @@ class BurnDownChart(QWidget):
             painter.setPen(pen)
             painter.drawLine(int(x), int(y_line), int(x + 18), int(y_line))
             x += 24
-            painter.setPen(QPen(QColor("#374151")))
+            painter.setPen(QPen(QColor(_ch.chart_ink())))
             painter.drawText(int(x), int(y_text), label)
             x += fm.horizontalAdvance(label) + 18
 

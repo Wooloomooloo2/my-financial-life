@@ -45,6 +45,46 @@ def colour_for(index: int) -> QColor:
     return QColor(GROUP_PALETTE[index % len(GROUP_PALETTE)])
 
 
+# ── theme-aware structural chart colours (ADR-076 round 2) ──
+# The GROUP_PALETTE series colours read on both themes; these *structural*
+# colours (plot background, gridlines, axis text, …) follow the active
+# light/dark theme via the design tokens, read fresh at paint time.
+
+def chart_surface() -> str:
+    """Plot background, and the thin separators between stacked segments."""
+    return tokens.c("surface")
+
+
+def chart_grid() -> str:
+    """Gridlines / faint rules."""
+    return tokens.c("border")
+
+
+def chart_axis_ink() -> str:
+    """Axis tick labels and secondary axis text."""
+    return tokens.c("muted")
+
+
+def chart_ink() -> str:
+    """Primary on-chart text — value labels, in-chart headings."""
+    return tokens.c("text")
+
+
+def chart_faint() -> str:
+    """Faint text — the empty-state 'no data' note, de-emphasised labels."""
+    return tokens.c("subtle")
+
+
+def chart_tooltip_bg() -> str:
+    """Hover-tooltip background (near-black in light, near-white in dark)."""
+    return tokens.c("text")
+
+
+def chart_tooltip_ink() -> str:
+    """Hover-tooltip text — pairs with chart_tooltip_bg."""
+    return tokens.c("surface")
+
+
 def nice_ticks(vmax: float, target_count: int = 5) -> tuple[float, float]:
     """Return (axis_max, step) so the axis lands on round numbers.
 
