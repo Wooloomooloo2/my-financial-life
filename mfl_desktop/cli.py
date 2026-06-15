@@ -223,6 +223,44 @@ def cmd_feeds_check(args) -> int:
     return 0
 
 
+def cmd_ofx_check(args) -> int:
+    """Verify an OFX Direct Connect setup against a real bank (ADR-077). No DB,
+    nothing stored — this proves the pipe reaches the bank's OFX server and that
+    transactions come back, before any UI is built. Connection details (URL /
+    ORG / FID) come from ofxhome.com; the user/password are online-banking (or
+    bank-issued Direct Connect) credentials."""
+    from mfl_desktop.feeds.ofx_direct import (
+        OfxAccountSpec, OfxDirectClient, OfxDirectError, OfxServer,
+    )
+    server = OfxServer(
+        url=args.url, org=args.org, fid=args.fid,
+        app_id=args.app_id, app_version=args.app_version,
+        ofx_version=args.ofx_version, client_uid=args.client_uid or "",
+    )
+    spec = OfxAccountSpec(
+        acct_id=args.acctid, acct_type=args.accttype,
+        bank_id=args.bankid or "", broker_id=args.brokerid or "",
+    )
+    client = OfxDirectClient(server, args.user, args.password)
+    if args.raw:
+        body = client.fetch_ofx(spec, days=args.days, dryrun=True)
+        print(body.decode("utf-8", "replace"))
+        return 0
+    try:
+        txns = client.fetch_transactions(spec, days=args.days)
+    except OfxDirectError as e:
+        print(f"OFX check FAILED: {e}", file=sys.stderr)
+        return 1
+    print(f"OK — {len(txns)} transactions in the last {args.days} days:")
+    for t in txns[:10]:
+        sign = "-" if t["tx_type"] == "debit" else "+"
+        payee = (t["payee_raw"] or t["memo"] or "")[:40]
+        print(f"  {t['date']}  {sign}{t['amount']:>10}  {payee}")
+    if len(txns) > 10:
+        print(f"  … and {len(txns) - 10} more")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows console defaults to cp1252; force UTF-8 so £ and tree markers
     # render correctly. Harmless on macOS/Linux which are already UTF-8.
@@ -281,6 +319,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--country", default="GB", help="ISO country (default: GB)")
     p.add_argument("--find", help="Filter the institution list by name substring")
     p.set_defaults(func=cmd_feeds_check)
+
+    p = sub.add_parser(
+        "ofx-check",
+        help="Verify an OFX Direct Connect bank setup + fetch txns (ADR-077)",
+    )
+    p.add_argument("--url", required=True, help="Bank OFX server URL (ofxhome.com)")
+    p.add_argument("--org", required=True, help="FI ORG (ofxhome.com)")
+    p.add_argument("--fid", required=True, help="FI FID (ofxhome.com)")
+    p.add_argument("--user", required=True, help="Online-banking / Direct Connect user id")
+    p.add_argument("--password", required=True, help="Online-banking / Direct Connect password")
+    p.add_argument("--acctid", required=True, help="Account number")
+    p.add_argument("--accttype", default="CHECKING",
+                   help="CHECKING/SAVINGS/MONEYMRKT/CREDITLINE/CD/CREDITCARD/INVESTMENT")
+    p.add_argument("--bankid", help="Routing/sort number (bank accounts)")
+    p.add_argument("--brokerid", help="Broker id (investment accounts)")
+    p.add_argument("--days", type=int, default=90, help="History window (default: 90)")
+    p.add_argument("--app-id", default="QWIN", help="Client app id (default: QWIN)")
+    p.add_argument("--app-version", default="2700", help="Client app version (default: 2700)")
+    p.add_argument("--ofx-version", type=int, default=102, help="OFX version (default: 102)")
+    p.add_argument("--client-uid", help="Stable CLIENTUID (some OFX 1.0.2+ banks require it)")
+    p.add_argument("--raw", action="store_true",
+                   help="Print the OFX request body and exit (no network)")
+    p.set_defaults(func=cmd_ofx_check)
 
     args = parser.parse_args(argv)
     return args.func(args)
