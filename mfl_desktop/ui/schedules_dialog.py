@@ -307,6 +307,65 @@ class SchedulesDialog(QDialog):
         if sched is None:
             return
 
+        # ADR-074: a transfer-kind schedule with no destination account used
+        # to error at post time ("missing a destination account") with no way
+        # to fix it. Capture the destination now and persist it to the
+        # schedule, so this post and every future one work. (Done before the
+        # amount prompt / confirm so the confirm shows the chosen destination;
+        # the cross-currency partner amount, if any, is collected by the
+        # existing block below once the destination is set.)
+        if (
+            sched.category_kind == "transfer"
+            and sched.transfer_to_account_id is None
+        ):
+            source_acct = self._repo.get_account_by_id(sched.account_id)
+            if source_acct is None:
+                QMessageBox.warning(
+                    self, "Could not post", "Source account not found.",
+                )
+                return
+            others = [
+                a for a in self._repo.list_accounts() if a.id != sched.account_id
+            ]
+            if not others:
+                QMessageBox.warning(
+                    self, "No destination account",
+                    "A transfer needs another account to move money to. "
+                    "Create one first, then post this schedule.",
+                )
+                return
+            dest_dialog = TransferDestinationDialog(
+                repo=self._repo,
+                source_account=source_acct,
+                source_magnitude=abs(sched.estimated_amount),
+                source_signed_display=sched.estimated_amount,
+                posted_date=sched.next_due_date,
+                exclude_account_ids={sched.account_id},
+                title="Transfer destination",
+                intro=(
+                    "This scheduled transfer doesn't have a destination "
+                    "account yet — choose the account the money moves to. "
+                    "It will be saved to the schedule for next time."
+                ),
+                parent=self,
+            )
+            if dest_dialog.exec() != QDialog.Accepted:
+                return
+            choice = dest_dialog.values()
+            if choice is None:
+                return
+            try:
+                self._repo.set_scheduled_transfer_destination(
+                    ids[0], choice.account_id,
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "Could not save destination", str(e))
+                return
+            # Re-read so the confirm + cross-currency block see the new dest.
+            sched = self._repo.get_scheduled_txn(ids[0])
+            if sched is None:
+                return
+
         actual: Optional[Decimal] = None
         if sched.variable:
             # Variable amount — prompt for the real number. Direction is fixed

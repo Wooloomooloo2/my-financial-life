@@ -6074,6 +6074,37 @@ class Repository:
             self.rollback()
             raise
 
+    def set_scheduled_transfer_destination(
+        self, schedule_id: int, transfer_to_account_id: int,
+    ) -> None:
+        """Set the destination account on a transfer-kind schedule that has
+        none (ADR-074).
+
+        A schedule can end up transfer-kind without a destination — e.g. its
+        category was switched to a transfer kind after the schedule was
+        created, or it was seeded from a transaction without one. Posting then
+        failed with no way to fix it; the Post Now flow now captures the
+        destination and persists it here so this and future posts work.
+        Validates the destination differs from the schedule's own account.
+        Commits."""
+        sched = self.get_scheduled_txn(schedule_id)
+        if sched is None:
+            raise ValueError(f"No schedule with id {schedule_id}")
+        if transfer_to_account_id == sched.account_id:
+            raise ValueError(
+                "The destination account can't be the same as the source."
+            )
+        try:
+            self._conn.execute(
+                "UPDATE scheduled_txn SET transfer_to_account_id = ? "
+                "WHERE id = ?",
+                (transfer_to_account_id, schedule_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
     def delete_scheduled_txn(self, schedule_id: int) -> None:
         """Hard-delete a schedule. Already-materialised txns are untouched —
         the schedule is a template, the txn is the truth, and the link
