@@ -598,6 +598,24 @@ class ReportRow:
 
 
 @dataclass(frozen=True)
+class FeedAccount:
+    """A bank-feed link: an MFL account ↔ a provider account (ADR-077).
+
+    Provider credentials live in the ``setting`` table, not here; access
+    tokens are never persisted. ``status`` tracks consent health
+    ('linked' / 'expired' / 'error')."""
+    id: int
+    account_id: int
+    provider: str
+    external_account_id: str
+    requisition_id: Optional[str]
+    institution_id: Optional[str]
+    institution_name: Optional[str]
+    status: str
+    last_synced_at: Optional[str]
+
+
+@dataclass(frozen=True)
 class StatementRow:
     """One reconciliation period for an account (ADR-040).
 
@@ -7623,6 +7641,104 @@ class Repository:
             self.rollback()
             raise
         return cur.rowcount > 0
+
+    # ── bank feeds (ADR-077) ──
+
+    _FEED_COLS = (
+        "id, account_id, provider, external_account_id, requisition_id, "
+        "institution_id, institution_name, status, last_synced_at"
+    )
+
+    def _row_to_feed(self, r) -> FeedAccount:
+        return FeedAccount(
+            id=r["id"], account_id=r["account_id"], provider=r["provider"],
+            external_account_id=r["external_account_id"],
+            requisition_id=r["requisition_id"],
+            institution_id=r["institution_id"],
+            institution_name=r["institution_name"],
+            status=r["status"], last_synced_at=r["last_synced_at"],
+        )
+
+    def list_feed_accounts(self) -> list[FeedAccount]:
+        cur = self._conn.execute(
+            f"SELECT {self._FEED_COLS} FROM feed_account ORDER BY id"
+        )
+        return [self._row_to_feed(r) for r in cur]
+
+    def get_feed_account(self, account_id: int) -> Optional[FeedAccount]:
+        r = self._conn.execute(
+            f"SELECT {self._FEED_COLS} FROM feed_account WHERE account_id = ?",
+            (account_id,),
+        ).fetchone()
+        return self._row_to_feed(r) if r is not None else None
+
+    def link_feed_account(
+        self, *, account_id: int, provider: str, external_account_id: str,
+        requisition_id: Optional[str] = None, institution_id: Optional[str] = None,
+        institution_name: Optional[str] = None,
+    ) -> FeedAccount:
+        """Link (or re-link) an MFL account to a provider account. Upserts on
+        the account (one feed per account, v1). Commits."""
+        try:
+            self._conn.execute(
+                "INSERT INTO feed_account "
+                "(account_id, provider, external_account_id, requisition_id, "
+                " institution_id, institution_name, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'linked') "
+                "ON CONFLICT(account_id) DO UPDATE SET "
+                "  provider=excluded.provider, "
+                "  external_account_id=excluded.external_account_id, "
+                "  requisition_id=excluded.requisition_id, "
+                "  institution_id=excluded.institution_id, "
+                "  institution_name=excluded.institution_name, "
+                "  status='linked'",
+                (account_id, provider, external_account_id, requisition_id,
+                 institution_id, institution_name),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        feed = self.get_feed_account(account_id)
+        assert feed is not None
+        return feed
+
+    def unlink_feed_account(self, account_id: int) -> None:
+        try:
+            self._conn.execute(
+                "DELETE FROM feed_account WHERE account_id = ?", (account_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def mark_feed_synced(self, account_id: int) -> None:
+        """Stamp last_synced_at = now and clear any error/expired status."""
+        try:
+            self._conn.execute(
+                "UPDATE feed_account "
+                "SET last_synced_at = datetime('now'), status = 'linked' "
+                "WHERE account_id = ?",
+                (account_id,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def set_feed_status(self, account_id: int, status: str) -> None:
+        if status not in ("linked", "expired", "error"):
+            raise ValueError(f"Invalid feed status {status!r}")
+        try:
+            self._conn.execute(
+                "UPDATE feed_account SET status = ? WHERE account_id = ?",
+                (status, account_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
 
     def create_report_folder(self, name: str) -> ReportFolderRow:
         """Create a Reports-section folder. Appended at the end of the

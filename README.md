@@ -29,7 +29,7 @@ It is a sister application to **My Retirement Life**, and is designed to exchang
 | Home dashboard — net worth, budget, accounts, bills, recent activity, top payees/categories, investment performance | ✅ |
 | Persistence — live auto-saving `.mfl` file, rotating snapshots (GFS retention), Data Library | ✅ |
 | Theming / visual polish | 🔧 In progress |
-| Automatic bank downloads (direct feeds) | 📋 Planned |
+| Automatic bank downloads (bank feeds) | 🔧 In progress — pluggable providers, GoCardless (UK Open Banking) foundation (ADR-077) |
 | Packaging — single-file installers (PyInstaller) | 📋 Planned |
 
 ---
@@ -149,6 +149,7 @@ my-financial-life/
 │   │   └── money.py                 # Decimal ↔ integer-pence conversion
 │   ├── migrations/                  # NNNN_*.sql forward migrations (0001–0025)
 │   ├── import_engine/               # OFX / QFX / CSV / QIF parsers + import service
+│   ├── feeds/                       # bank-feed providers (GoCardless Open Banking) — ADR-077
 │   ├── reports/                     # pure report builders (spending, payee, income/expense, …)
 │   ├── ui/                          # ~70 PySide6 widgets, dialogs, windows, charts
 │   ├── account_summary.py           # pure per-account + bills/Top-N compute

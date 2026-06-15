@@ -198,6 +198,31 @@ def _first_account_iri(repo: Repository) -> str | None:
     return row["iri"] if row else None
 
 
+def cmd_feeds_check(args) -> int:
+    """Verify a GoCardless Bank Account Data key by minting a token and
+    listing institutions for a country (ADR-077). No DB / no consent — this
+    just proves the pipe reaches GoCardless and your banks are covered."""
+    from mfl_desktop.feeds.gocardless import GoCardlessClient, GoCardlessError
+    client = GoCardlessClient(args.secret_id, args.secret_key)
+    try:
+        insts = client.list_institutions(args.country)
+    except GoCardlessError as e:
+        print(f"GoCardless check FAILED: {e}", file=sys.stderr)
+        return 1
+    print(f"OK — {len(insts)} institutions for {args.country}:")
+    needle = (args.find or "").lower()
+    shown = 0
+    for i in insts:
+        if needle and needle not in i.name.lower():
+            continue
+        print(f"  {i.id:32}  {i.name}  ({i.transaction_total_days}d history)")
+        shown += 1
+        if not needle and shown >= 40:
+            print(f"  … and {len(insts) - shown} more (use --find to filter)")
+            break
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows console defaults to cp1252; force UTF-8 so £ and tree markers
     # render correctly. Harmless on macOS/Linux which are already UTF-8.
@@ -246,6 +271,16 @@ def main(argv: list[str] | None = None) -> int:
         help="ISO currency code (default: GBP)",
     )
     p.set_defaults(func=cmd_add_account)
+
+    p = sub.add_parser(
+        "feeds-check",
+        help="Verify a GoCardless Bank Account Data key + list banks (ADR-077)",
+    )
+    p.add_argument("--secret-id", required=True, help="GoCardless secret_id")
+    p.add_argument("--secret-key", required=True, help="GoCardless secret_key")
+    p.add_argument("--country", default="GB", help="ISO country (default: GB)")
+    p.add_argument("--find", help="Filter the institution list by name substring")
+    p.set_defaults(func=cmd_feeds_check)
 
     args = parser.parse_args(argv)
     return args.func(args)

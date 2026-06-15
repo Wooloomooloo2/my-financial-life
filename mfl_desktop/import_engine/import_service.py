@@ -185,6 +185,19 @@ class ImportService:
         )
         return token, "preview"
 
+    def stage_feed(
+        self, account_iri: str, raw_txns: list[dict], provider: str = "feed",
+    ) -> str:
+        """Stage bank-feed transactions (ADR-077) through the same path as a
+        file import. ``raw_txns`` are normalised provider rows (see
+        ``mfl_desktop.feeds.normalize``). Returns a token for ``commit_import``;
+        dedup (``fitid`` → ``import_hash``), the manual-match heuristic, and the
+        review step are all reused unchanged."""
+        return self._classify_and_stage(
+            raw_txns, has_override=False, file_format=provider,
+            account_iri=account_iri, filename=f"{provider} feed",
+        )
+
     def _stage_for_mapping(
         self, file_bytes: bytes, filename: str, account_iri: str,
     ) -> str:
