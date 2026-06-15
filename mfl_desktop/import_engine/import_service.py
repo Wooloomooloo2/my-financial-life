@@ -21,7 +21,8 @@ import hashlib
 import io
 import logging
 import uuid
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from typing import Optional
 
@@ -169,6 +170,23 @@ class ImportService:
             content = csv_parser._decode(file_bytes)
             fmt = csv_parser._detect_format(content.splitlines())
             if fmt == "generic":
+                # Saved CSV mapping profiles (ADR-021 follow-up): if this export
+                # layout was mapped before, auto-apply it and skip the wizard.
+                sig = csv_parser.header_signature_from_content(content)
+                saved = self._repo.get_csv_mapping(sig)
+                if saved:
+                    try:
+                        mapping = csv_parser.CsvColumnMapping(**json.loads(saved))
+                        raw_txns = csv_parser.parse_with_mapping(content, mapping)
+                        token = self._classify_and_stage(
+                            raw_txns, has_override=False, file_format="csv-generic",
+                            account_iri=account_iri, filename=filename,
+                        )
+                        return token, "preview"
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        # Stale/incompatible saved mapping — fall back to the
+                        # wizard, which re-saves a fresh profile.
+                        pass
                 token = self._stage_for_mapping(file_bytes, filename, account_iri)
                 return token, "map"
             raw_txns, has_override, _label = csv_parser.parse_csv(file_bytes, filename)
@@ -368,6 +386,15 @@ class ImportService:
             raise ValueError("Mapping session not found or expired.")
         content = csv_parser._decode(pending_map.file_bytes)
         raw_txns = csv_parser.parse_with_mapping(content, mapping)
+        # Remember this mapping for next time (ADR-021 follow-up): the next
+        # import of the same export layout auto-applies it and skips the wizard.
+        try:
+            self._repo.save_csv_mapping(
+                csv_parser.header_signature(pending_map.headers),
+                json.dumps(asdict(mapping)),
+            )
+        except Exception:
+            pass
         del self._pending_maps[token]
         return self._classify_and_stage(
             raw_txns, has_override=False, file_format="csv-generic",

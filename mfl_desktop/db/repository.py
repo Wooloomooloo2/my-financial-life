@@ -7740,6 +7740,44 @@ class Repository:
             self.rollback()
             raise
 
+    # ── saved CSV mapping profiles (ADR-021 follow-up) ──
+
+    def get_csv_mapping(self, signature: str) -> Optional[str]:
+        """The saved column-mapping JSON for a CSV header signature, or None.
+        Touches last_used_at on a hit."""
+        row = self._conn.execute(
+            "SELECT mapping_json FROM csv_import_mapping WHERE signature = ?",
+            (signature,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            self._conn.execute(
+                "UPDATE csv_import_mapping SET last_used_at = datetime('now') "
+                "WHERE signature = ?",
+                (signature,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+        return row["mapping_json"]
+
+    def save_csv_mapping(self, signature: str, mapping_json: str) -> None:
+        """Persist (or update) the column mapping for a CSV header signature."""
+        try:
+            self._conn.execute(
+                "INSERT INTO csv_import_mapping (signature, mapping_json) "
+                "VALUES (?, ?) "
+                "ON CONFLICT(signature) DO UPDATE SET "
+                "  mapping_json = excluded.mapping_json, "
+                "  last_used_at = datetime('now')",
+                (signature, mapping_json),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
     def create_report_folder(self, name: str) -> ReportFolderRow:
         """Create a Reports-section folder. Appended at the end of the
         existing folder list (sort_order = current max + 1), matching the

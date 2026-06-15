@@ -53,6 +53,22 @@ class CsvColumnMapping:
     category_col:    str  = ""
 
 
+def header_signature(headers: list[str]) -> str:
+    """A stable key for a CSV export's column layout (ADR-021 follow-up).
+
+    Lower-cased, stripped, pipe-joined header row — same for every export of
+    the same format, so a saved column mapping can be looked up and reused.
+    Order is preserved (two banks with the same names in a different order are
+    distinct layouts)."""
+    return "|".join((h or "").strip().lower() for h in headers)
+
+
+def header_signature_from_content(content: str) -> str:
+    """Header signature read from the first row of decoded CSV content."""
+    reader = csv.DictReader(io.StringIO(content))
+    return header_signature(list(reader.fieldnames or []))
+
+
 def parse_with_mapping(content: str, mapping: CsvColumnMapping) -> list[dict]:
     """Parse CSV content using an explicit column mapping."""
     reader = csv.DictReader(io.StringIO(content))
