@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import PayeeRow, Repository
+from mfl_desktop.ui.category_picker import make_category_picker, selected_category_id
 
 
 class PayeesDialog(QDialog):
@@ -67,7 +68,12 @@ class PayeesDialog(QDialog):
         self._repo = repo
         self.setWindowTitle("Payees")
         self.setModal(True)
-        self.resize(640, 560)
+        self.resize(720, 560)
+
+        # ADR-072: full category breadcrumb paths for the Auto-category column
+        # and picker, keyed by id.
+        self._categories = repo.list_categories_flat()
+        self._cat_paths = {c.id: (c.path or c.name) for c in self._categories}
 
         # ── widgets ──
 
@@ -75,8 +81,10 @@ class PayeesDialog(QDialog):
         self._search.setPlaceholderText("Filter…")
         self._search.textChanged.connect(self._apply_filter)
 
-        self._table = QTableWidget(0, 3)
-        self._table.setHorizontalHeaderLabels(["Name", "Alias of", "Used in"])
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(
+            ["Name", "Alias of", "Auto-category", "Used in"]
+        )
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -88,6 +96,7 @@ class PayeesDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self._table.itemSelectionChanged.connect(self._update_button_state)
 
         self._new_btn = QPushButton("&New Payee…")
@@ -95,12 +104,14 @@ class PayeesDialog(QDialog):
         self._merge_btn = QPushButton("&Merge…")
         self._alias_btn = QPushButton("Make &Alias of…")
         self._promote_btn = QPushButton("&Promote to Canonical")
+        self._autocat_btn = QPushButton("Auto-&category…")
         self._delete_btn = QPushButton("&Delete")
         self._new_btn.clicked.connect(self._on_new)
         self._rename_btn.clicked.connect(self._on_rename)
         self._merge_btn.clicked.connect(self._on_merge)
         self._alias_btn.clicked.connect(self._on_make_alias)
         self._promote_btn.clicked.connect(self._on_promote)
+        self._autocat_btn.clicked.connect(self._on_set_auto_category)
         self._delete_btn.clicked.connect(self._on_delete)
 
         action_row = QHBoxLayout()
@@ -110,6 +121,7 @@ class PayeesDialog(QDialog):
         action_row.addWidget(self._merge_btn)
         action_row.addWidget(self._alias_btn)
         action_row.addWidget(self._promote_btn)
+        action_row.addWidget(self._autocat_btn)
         action_row.addWidget(self._delete_btn)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
@@ -159,6 +171,16 @@ class PayeesDialog(QDialog):
             if is_alias:
                 alias_of_item.setForeground(Qt.darkGray)
 
+            # Auto-category cell (ADR-072) — the canonical's remembered
+            # category, shown as a full breadcrumb path. Aliases route through
+            # their canonical, so the column is blank on alias rows.
+            autocat_text = (
+                self._cat_paths.get(p.default_category_id, "")
+                if p.default_category_id is not None else ""
+            )
+            autocat_item = QTableWidgetItem(autocat_text)
+            autocat_item.setForeground(Qt.darkGray)
+
             # Count cell — sort numerically by storing the int on the item.
             count_item = QTableWidgetItem()
             count_item.setData(Qt.DisplayRole, p.usage_count)
@@ -166,7 +188,8 @@ class PayeesDialog(QDialog):
 
             self._table.setItem(i, 0, name_item)
             self._table.setItem(i, 1, alias_of_item)
-            self._table.setItem(i, 2, count_item)
+            self._table.setItem(i, 2, autocat_item)
+            self._table.setItem(i, 3, count_item)
         self._apply_filter(self._search.text())
 
     def _apply_filter(self, text: str) -> None:
@@ -198,6 +221,7 @@ class PayeesDialog(QDialog):
         self._merge_btn.setEnabled(multi)
         self._alias_btn.setEnabled(any_selected)
         self._promote_btn.setEnabled(all_aliases)
+        self._autocat_btn.setEnabled(single)
         self._delete_btn.setEnabled(any_selected)
 
     def _selected_ids(self) -> list[int]:
@@ -550,6 +574,87 @@ class PayeesDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Could not promote", str(e))
             return
+        self._reload_table()
+        self.payees_changed.emit()
+
+    # ── auto-category memory (ADR-072) ──
+
+    def _on_set_auto_category(self) -> None:
+        ids = self._selected_ids()
+        if len(ids) != 1:
+            return
+        payee_id = ids[0]
+        name = self._name_for(payee_id)
+        current = self._repo.get_payee_default_category(payee_id)
+
+        picker = QDialog(self)
+        picker.setWindowTitle("Auto-category")
+        picker.setModal(True)
+        label = QLabel(
+            f"Automatically categorise transactions from “{name}” as:"
+        )
+        label.setWordWrap(True)
+        combo = make_category_picker(self._categories, default_id=current)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        clear_btn = buttons.addButton("Clear", QDialogButtonBox.DestructiveRole)
+        cleared = {"flag": False}
+
+        def _on_clear() -> None:
+            cleared["flag"] = True
+            picker.accept()
+
+        clear_btn.clicked.connect(_on_clear)
+        buttons.accepted.connect(picker.accept)
+        buttons.rejected.connect(picker.reject)
+        lay = QVBoxLayout(picker)
+        lay.addWidget(label)
+        lay.addWidget(combo)
+        lay.addWidget(buttons)
+        picker.resize(440, picker.sizeHint().height())
+        if picker.exec() != QDialog.Accepted:
+            return
+
+        if cleared["flag"]:
+            new_cat: Optional[int] = None
+        else:
+            new_cat = selected_category_id(combo)
+            if new_cat is None:
+                QMessageBox.warning(
+                    self, "Pick a category",
+                    "Choose a category from the list, or use Clear.",
+                )
+                return
+
+        try:
+            self._repo.set_payee_default_category(payee_id, new_cat)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not save", str(e))
+            return
+
+        # Offer to back-fill existing uncategorised transactions.
+        if new_cat is not None:
+            try:
+                existing = self._repo.count_uncategorised_for_payee(payee_id)
+            except Exception:
+                existing = 0
+            if existing > 0:
+                ask = QMessageBox.question(
+                    self, "Apply to existing transactions?",
+                    f"Apply this category to {existing:,} existing "
+                    f"uncategorised {name} transaction"
+                    f"{'s' if existing != 1 else ''}?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+                )
+                if ask == QMessageBox.Yes:
+                    try:
+                        self._repo.apply_default_category_to_uncategorised(
+                            payee_id, new_cat,
+                        )
+                    except Exception as e:
+                        QMessageBox.critical(self, "Could not apply", str(e))
+
         self._reload_table()
         self.payees_changed.emit()
 

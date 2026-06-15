@@ -200,6 +200,10 @@ class PayeeRow:
     canonical_id: Optional[int] = None
     canonical_name: Optional[str] = None
     direct_usage_count: int = 0
+    # ADR-072: the payee's remembered auto-category. Stored on the canonical
+    # row only (aliases route through their canonical), so this is populated
+    # for canonicals and left None on aliases.
+    default_category_id: Optional[int] = None
 
 
 CATEGORY_KINDS: tuple[str, ...] = ("income", "expense", "transfer")
@@ -2443,7 +2447,7 @@ class Repository:
         cleanly. Implementation: pull rows + direct counts in one query,
         do the rollup + sort in Python (payee table is small)."""
         cur = self._conn.execute(
-            "SELECT p.id, p.name, p.canonical_id, "
+            "SELECT p.id, p.name, p.canonical_id, p.default_category_id, "
             "       c.name AS canonical_name, "
             "       (SELECT COUNT(*) FROM txn t WHERE t.payee_id = p.id) "
             "           AS direct_cnt "
@@ -2478,6 +2482,7 @@ class Repository:
                 canonical_id=r["canonical_id"],
                 canonical_name=r["canonical_name"],
                 direct_usage_count=direct,
+                default_category_id=r["default_category_id"],
             )
 
         # Display order: canonical, then its aliases. Group keys are the
@@ -2562,6 +2567,142 @@ class Repository:
                 (payee_id,),
             )
             self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── Payee→category memory (ADR-072) ──
+
+    def _canonical_id_for(self, payee_id: int) -> int:
+        """Resolve a payee id to its canonical (itself, if already canonical).
+        The auto-category memory lives on the canonical, so every read/write
+        routes through here first."""
+        row = self._conn.execute(
+            "SELECT canonical_id FROM payee WHERE id = ?", (payee_id,),
+        ).fetchone()
+        if row is None or row["canonical_id"] is None:
+            return payee_id
+        return int(row["canonical_id"])
+
+    def set_payee_default_category(
+        self, payee_id: int, category_id: Optional[int],
+    ) -> None:
+        """Remember (or clear) the auto-category for a payee (ADR-072).
+
+        The memory is stored on the **canonical** — if ``payee_id`` is an
+        alias, its canonical carries it so every alias of the same merchant
+        shares one memory. ``category_id=None`` (or Uncategorised) clears it.
+        Commits."""
+        canon = self._canonical_id_for(payee_id)
+        if category_id == UNCATEGORISED_ID:
+            category_id = None
+        try:
+            self._conn.execute(
+                "UPDATE payee SET default_category_id = ? WHERE id = ?",
+                (category_id, canon),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def get_payee_default_category(self, payee_id: int) -> Optional[int]:
+        """The effective auto-category for a payee, read from its canonical
+        (ADR-072). None when no memory is set."""
+        canon = self._canonical_id_for(payee_id)
+        row = self._conn.execute(
+            "SELECT default_category_id FROM payee WHERE id = ?", (canon,),
+        ).fetchone()
+        if row is None or row["default_category_id"] is None:
+            return None
+        return int(row["default_category_id"])
+
+    def resolve_import_payee(
+        self, raw_name: str,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Resolve a raw import payee string to ``(payee_id, default_category_id)``
+        (ADR-072 / ADR-028 round 2).
+
+        - Empty name → ``(None, None)`` (investment rows carry no payee, ADR-071).
+        - Exact name match: if the matched row is an **alias**, the returned
+          id is its **canonical** — new ledger rows point at the canonical so
+          the register shows the clean name and the alias's history rolls up
+          without a read-time ``COALESCE``. Existing alias-pointing rows are
+          left alone; this only stops creating new ones.
+        - No match: a new canonical payee is created (today's behaviour).
+
+        The second element is the canonical's ``default_category_id`` (the
+        memorised auto-category) or None. Does **not** commit — the insert
+        stays inside the import service's transaction, like
+        ``get_or_create_payee``."""
+        name = (raw_name or "").strip()
+        if not name:
+            return (None, None)
+        row = self._conn.execute(
+            "SELECT id, canonical_id FROM payee WHERE name = ?", (name,),
+        ).fetchone()
+        if row is not None:
+            payee_id = (
+                int(row["canonical_id"])
+                if row["canonical_id"] is not None
+                else int(row["id"])
+            )
+        else:
+            cur = self._conn.execute(
+                "INSERT INTO payee (name) VALUES (?)", (name,),
+            )
+            payee_id = int(cur.lastrowid)
+        default = self._conn.execute(
+            "SELECT default_category_id FROM payee WHERE id = ?", (payee_id,),
+        ).fetchone()
+        default_cat = (
+            int(default["default_category_id"])
+            if default and default["default_category_id"] is not None
+            else None
+        )
+        return (payee_id, default_cat)
+
+    def count_uncategorised_for_payee(self, payee_id: int) -> int:
+        """How many plain transactions for this payee (rolled up over its
+        aliases) are still Uncategorised — the candidate set for a retroactive
+        auto-category apply (ADR-072). Excludes transfers and split parents
+        (whose categories live in ``txn_split``)."""
+        ids = self.expand_canonical_payee_ids([self._canonical_id_for(payee_id)])
+        if not ids:
+            return 0
+        ph = ",".join("?" * len(ids))
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS c FROM txn "
+            f"WHERE payee_id IN ({ph}) "
+            f"  AND category_id = ? "
+            f"  AND transfer_id IS NULL "
+            f"  AND id NOT IN (SELECT txn_id FROM txn_split)",
+            [*ids, UNCATEGORISED_ID],
+        ).fetchone()
+        return int(row["c"])
+
+    def apply_default_category_to_uncategorised(
+        self, payee_id: int, category_id: int,
+    ) -> int:
+        """Set ``category_id`` on every Uncategorised, non-transfer, non-split
+        transaction for this payee (rolled up over its aliases). Returns the
+        number of rows changed; never overwrites a category already set.
+        Commits."""
+        ids = self.expand_canonical_payee_ids([self._canonical_id_for(payee_id)])
+        if not ids:
+            return 0
+        ph = ",".join("?" * len(ids))
+        try:
+            cur = self._conn.execute(
+                f"UPDATE txn SET category_id = ? "
+                f"WHERE payee_id IN ({ph}) "
+                f"  AND category_id = ? "
+                f"  AND transfer_id IS NULL "
+                f"  AND id NOT IN (SELECT txn_id FROM txn_split)",
+                [category_id, *ids, UNCATEGORISED_ID],
+            )
+            self.commit()
+            return int(cur.rowcount)
         except Exception:
             self.rollback()
             raise

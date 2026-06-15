@@ -414,7 +414,21 @@ class ImportService:
 
                 effective_status = tx.status_override or import_status
                 category_id = self._resolve_category_id(tx.category_raw)
-                payee_id = self._repo.get_or_create_payee(tx.payee_raw)
+                # ADR-072 / ADR-028 round 2: resolve the raw payee to its
+                # canonical (aliases normalise to the canonical on the way in)
+                # and pick up its remembered auto-category. The memory only
+                # fills a row the source left Uncategorised, and never a split
+                # parent (its categories live in txn_split) — a category the
+                # file actually carried always wins.
+                payee_id, payee_default_cat = self._repo.resolve_import_payee(
+                    tx.payee_raw
+                )
+                if (
+                    payee_default_cat is not None
+                    and not tx.splits
+                    and category_id == self._repo.uncategorised_id()
+                ):
+                    category_id = payee_default_cat
                 signed_amount = -tx.amount if tx.tx_type == "debit" else tx.amount
 
                 # ADR-051: a split row inserts a parent carrying the signed

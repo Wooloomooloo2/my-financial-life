@@ -60,6 +60,7 @@ from mfl_desktop.ui.delegates import (
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.register_filters_popover import RegisterFiltersPopover
 from mfl_desktop.ui.payees_dialog import PayeesDialog
+from mfl_desktop.ui.memorise_category_dialog import MemoriseCategoryDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
 from mfl_desktop.ui.schedules_dialog import SchedulesDialog
@@ -1146,6 +1147,9 @@ class RegisterWindow(QMainWindow):
         if row.transfer_id is not None:
             return
         if self._category_kind(row.category_id) != "transfer":
+            # ADR-072: a plain category edit is the natural moment to offer to
+            # remember the payee→category mapping for future imports.
+            self._maybe_offer_memorise(row)
             return
         # ADR-035 amendment 2026-06-07: open the destination-amount-aware
         # dialog so the cross-currency case (USD txn marked as transfer
@@ -1307,6 +1311,48 @@ class RegisterWindow(QMainWindow):
             # (filter combo, dialogs) catch up too.
             self._reload_category_cache()
         return kind
+
+    def _category_label(self, category_id: int) -> str:
+        """Full breadcrumb path for a category id from the window cache,
+        falling back to the bare id if it's missing."""
+        for c in self._categories:
+            if c.id == category_id:
+                return c.path or c.name
+        return f"category {category_id}"
+
+    def _maybe_offer_memorise(self, row) -> None:
+        """ADR-072: after a plain (non-transfer) inline category edit, offer
+        to remember the payee→category mapping — but only when the payee has
+        no memory yet (changing an existing memory is a Payees-dialog job, so
+        a deliberate one-off override doesn't re-prompt)."""
+        if row.payee_id is None:
+            return
+        cat_id = row.category_id
+        if cat_id is None or cat_id == self._repo.uncategorised_id():
+            return
+        try:
+            if self._repo.get_payee_default_category(row.payee_id) is not None:
+                return
+            existing = self._repo.count_uncategorised_for_payee(row.payee_id)
+        except Exception:
+            return
+        payee_name = row.payee_name or "this payee"
+        dialog = MemoriseCategoryDialog(
+            payee_name, self._category_label(cat_id), existing, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            self._repo.set_payee_default_category(row.payee_id, cat_id)
+            if dialog.apply_to_existing():
+                changed = self._repo.apply_default_category_to_uncategorised(
+                    row.payee_id, cat_id,
+                )
+                if changed:
+                    self._model.reload()
+                    self._refresh_sidebar_balances()
+        except Exception as e:
+            QMessageBox.critical(self, "Could not save", str(e))
 
     def _offer_transfer_match(self, *, source_row, other_account_id: int):
         """Run the transfer matcher (ADR-036) for one source row.
