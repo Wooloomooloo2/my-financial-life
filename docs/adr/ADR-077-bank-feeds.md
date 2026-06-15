@@ -1,7 +1,7 @@
 # ADR-077 — Bank feeds (Arc H): pluggable providers, GoCardless first
 
 **Date:** 2026-06-15
-**Status:** Accepted — planning + round 1 (foundation). Per-round detail follows as each lands.
+**Status:** Accepted (framework) — **provider pivot, see Amendment 2026-06-15.** GoCardless is no longer the first provider; the pluggable framework + import reuse stand. Round 1 GoCardless code is kept (works for existing GoCardless customers) but is not the path forward.
 **Related:** ADR-021 (CSV import), the OFX/QFX import engine, ADR-035 (`setting` table for API keys), ADR-050 (cross-platform, local-first), ADR-016/057 (the `.mfl` is the dataset). Owner-chosen direction.
 
 ---
@@ -88,6 +88,17 @@ A **Manage ▸ Bank Feeds…** screen connects a bank and links its accounts; an
 - **Storing the access/refresh tokens on disk** — short-lived; re-minted from the persisted secret each session.
 
 ---
+
+## Amendment (2026-06-15) — GoCardless onboarding closed; pivot to frictionless import + OFX Direct Connect
+
+The headless `feeds-check` probe (built precisely to de-risk this before any UI) surfaced the make-or-break fact immediately: **GoCardless has disabled new Bank Account Data signups and is no longer onboarding customers** (existing customers keep access). The wider 2026 reality, confirmed by research: **there is no free Open-Banking data API available to a UK individual** — Plaid / TrueLayer / Tink cover the UK but only via business onboarding + custom-negotiated pricing, untenable for a freely-shared app; the modern self-hosted apps (Actual Budget) offer only SimpleFIN (US/Canada) or GoCardless (Europe, now closed). So the **UK side cannot have a free auto-feed**; the **US side still can**.
+
+The pluggable framework, `feed_account` schema, `stage_feed`, dedup reuse, and `normalize` pattern are all unaffected — only the *provider* changes. Owner decision (`AskUserQuestion`) on the new direction: **two free tracks**:
+
+1. **Frictionless file import (all banks, incl. UK)** — the realistic win for the UK accounts. Make the export→import loop near-instant: remember each account's import source (folder/format), a one-click "import my latest download" that auto-picks the newest recognised file and routes it straight to the existing review/dedup, and **saved CSV mapping profiles** (the ADR-021 follow-up) so repeat generic-CSV imports skip the column wizard. Free, works for every institution.
+2. **OFX Direct Connect (free US auto-feed)** — a real feed provider on the ADR-077 framework: HTTP-POST OFX requests to a bank's OFX server with the user's own credentials (URL/ORG/FID/user/pass), parsing the response with the existing OFX engine. No third party, no cost; covers US banks that still support it (coverage has thinned — verify per-bank at ofxhome.com).
+
+**GoCardless** stays in the tree as a working provider for anyone who already has access, but is not built upon further. **Plaid/TrueLayer (paid UK)** remain rejected for a freely-shared app. Build order: **frictionless import first** (immediate value to every account, lowest risk), then **OFX Direct Connect**.
 
 ## Verification
 
