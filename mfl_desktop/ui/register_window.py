@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTableView,
     QVBoxLayout,
@@ -49,6 +50,7 @@ from mfl_desktop.ui.categories_dialog import CategoriesDialog
 from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
+from mfl_desktop.ui.home_view import HomeView
 from mfl_desktop.ui.securities_dialog import SecuritiesDialog
 from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
@@ -348,9 +350,24 @@ class RegisterWindow(QMainWindow):
         right_layout.addLayout(filter_bar)
         right_layout.addWidget(self._table)
 
+        # ADR-075: the right side is a stack — page 0 the Home dashboard,
+        # page 1 the register/report panel. Selecting Home shows the dashboard;
+        # selecting an account / All transactions flips to the register.
+        self._home_view = HomeView(repo, self)
+        self._home_view.net_worth_requested.connect(self._on_net_worth)
+        self._home_view.budget_requested.connect(self._on_open_budget)
+        self._home_view.schedules_requested.connect(self._on_manage_schedules)
+        self._home_view.payee_report_requested.connect(self._on_payee_report)
+        self._home_view.spending_report_requested.connect(self._on_spending_report)
+        self._home_view.account_requested.connect(self._select_account_in_sidebar)
+
+        self._main_stack = QStackedWidget()
+        self._main_stack.addWidget(self._home_view)    # index 0
+        self._main_stack.addWidget(right_panel)        # index 1
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._sidebar)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(self._main_stack)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([360, 1000])
@@ -378,12 +395,10 @@ class RegisterWindow(QMainWindow):
 
         if initial_account_iri is not None:
             self._select_account_in_sidebar(initial_account_iri)
-        elif accounts:
-            # Default to the first account, not the All Transactions row, since
-            # for a single-account user that's the more useful starting view.
-            self._select_account_in_sidebar(accounts[0].iri)
         else:
-            self._show_all_transactions()
+            # ADR-075: Home is the default landing view on launch.
+            self._sidebar.select_home()
+            self._show_home()
 
         # Auto-post any schedules that have come due since the last launch —
         # see ADR-023. Runs against the freshly-opened DB only; the user's
@@ -442,6 +457,13 @@ class RegisterWindow(QMainWindow):
         super().changeEvent(event)
         if event.type() == QEvent.ActivationChange and self.isActiveWindow():
             self._refresh_schedules_cue()
+            # ADR-075: keep the Home dashboard fresh when it's the visible page
+            # and the window regains focus (edits made elsewhere show up).
+            # getattr-guarded: an ActivationChange can fire during construction
+            # before the stack exists.
+            stack = getattr(self, "_main_stack", None)
+            if stack is not None and stack.currentIndex() == 0:
+                self._home_view.refresh()
 
     # ── sidebar plumbing ──
 
@@ -460,6 +482,9 @@ class RegisterWindow(QMainWindow):
         - ``"report"`` (payload = report id int) → open the saved report
           window for that row (singleton per report id)
         """
+        if kind == "home":
+            self._show_home()
+            return
         if kind == "all_transactions":
             self._show_all_transactions()
             return
@@ -474,11 +499,19 @@ class RegisterWindow(QMainWindow):
 
     # ── view modes ──
 
+    def _show_home(self) -> None:
+        """Show the Home dashboard page (ADR-075) and refresh it from the DB."""
+        self._home_view.refresh()
+        self._main_stack.setCurrentIndex(0)
+        self._account = None
+        self._update_window_title()
+
     def _show_account(self, account_iri: str) -> None:
         acct = self._repo.get_account_by_iri(account_iri)
         if acct is None:
             self._show_all_transactions()
             return
+        self._main_stack.setCurrentIndex(1)
         self._account = acct
         self._update_window_title()
         self._set_model(TransactionTableModel(
@@ -490,6 +523,7 @@ class RegisterWindow(QMainWindow):
         self._set_account_action_state(account_selected=True)
 
     def _show_all_transactions(self) -> None:
+        self._main_stack.setCurrentIndex(1)
         self._account = None
         self._update_window_title()
         self._set_model(TransactionTableModel(

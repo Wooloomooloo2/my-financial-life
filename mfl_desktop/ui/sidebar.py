@@ -145,6 +145,15 @@ class Sidebar(QTreeWidget):
         reports: list[ReportRow],
         report_folders: list[ReportFolderRow],
     ) -> None:
+        # ── Home (ADR-075) — a top-level landing row above the sections ──
+        home_item = QTreeWidgetItem(["Home", ""])
+        home_item.setData(0, KIND_ROLE, "home")
+        home_item.setFirstColumnSpanned(True)
+        hfont = home_item.font(0)
+        hfont.setBold(True)
+        home_item.setFont(0, hfont)
+        self.addTopLevelItem(home_item)
+
         # ── Accounts section ──
         accounts_header = self._make_section_header(
             "ACCOUNTS", "section_accounts", with_top_rule=False,
@@ -425,7 +434,9 @@ class Sidebar(QTreeWidget):
         item = items[0]
         kind = item.data(0, KIND_ROLE)
         payload = item.data(0, Qt.UserRole)
-        if kind == "all":
+        if kind == "home":
+            self.selection_changed.emit("home", None)
+        elif kind == "all":
             self.selection_changed.emit("all_transactions", None)
         elif kind == "account":
             self.selection_changed.emit("account", payload)
@@ -563,6 +574,14 @@ class Sidebar(QTreeWidget):
         if accounts_top is not None and y >= accounts_top:
             return "accounts"
         return None
+
+    def select_home(self) -> None:
+        """Make the top-level Home row current (ADR-075)."""
+        for top_index in range(self.topLevelItemCount()):
+            top = self.topLevelItem(top_index)
+            if top.data(0, KIND_ROLE) == "home":
+                self.setCurrentItem(top)
+                return
 
     def select_all_transactions(self) -> None:
         """Make the 'All transactions' row current. Walks the Accounts

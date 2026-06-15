@@ -3625,6 +3625,56 @@ class Repository:
             for r in cur
         ]
 
+    def list_recent_transactions(self, limit: int = 10) -> list[TransactionRow]:
+        """The most recent ``limit`` transactions across every account,
+        newest first (ADR-075, Home dashboard's Recent activity card).
+
+        A bounded ``ORDER BY … DESC LIMIT`` so the dashboard never materialises
+        the full ledger (tens of thousands of rows) on every refresh. Mirrors
+        ``list_all_transactions``' join/row shape; running balance is not
+        meaningful across accounts and is reported as 0."""
+        cur = self._conn.execute(
+            "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
+            "       t.posted_date, t.amount, "
+            "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
+            "       t.category_id, COALESCE(c.name, '') AS category_name, "
+            "       t.status, COALESCE(t.memo, '') AS memo, "
+            "       t.transfer_id, "
+            "       t.action, t.security_id, t.quantity, t.price, "
+            "       COALESCE(s.name, '') AS security_name, "
+            "       COALESCE(s.symbol, '') AS security_symbol, "
+            "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
+            "FROM txn t "
+            "JOIN      account a  ON a.id = t.account_id "
+            "LEFT JOIN payee p    ON p.id = t.payee_id "
+            "LEFT JOIN category c ON c.id = t.category_id "
+            "LEFT JOIN security s ON s.id = t.security_id "
+            "LEFT JOIN (SELECT txn_id, COUNT(*) AS c, "
+            "                  GROUP_CONCAT(category_id) AS cids "
+            "           FROM txn_split GROUP BY txn_id) sp ON sp.txn_id = t.id "
+            "ORDER BY t.posted_date DESC, t.id DESC LIMIT ?",
+            (limit,),
+        )
+        return [
+            TransactionRow(
+                id=r["id"], iri=r["iri"],
+                account_id=r["account_id"], account_name=r["account_name"],
+                posted_date=r["posted_date"], amount=pence_to_decimal(r["amount"]),
+                payee_id=r["payee_id"], payee_name=r["payee_name"],
+                category_id=r["category_id"], category_name=r["category_name"],
+                status=r["status"], memo=r["memo"],
+                running_balance=Decimal("0.00"),
+                transfer_id=r["transfer_id"],
+                split_count=r["split_count"],
+                split_category_ids=_parse_split_cids(r["split_cids"]),
+                action=r["action"], security_id=r["security_id"],
+                security_name=r["security_name"],
+                security_symbol=r["security_symbol"],
+                quantity=r["quantity"], price=r["price"],
+            )
+            for r in cur
+        ]
+
     def list_transactions_for_security(
         self, security_id: int,
     ) -> list[TransactionRow]:
