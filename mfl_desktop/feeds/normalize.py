@@ -49,6 +49,61 @@ def _gc_row(t: dict) -> dict | None:
     }
 
 
+def _eb_remittance(t: dict) -> str:
+    info = t.get("remittance_information")
+    if isinstance(info, list):
+        return " ".join(str(x) for x in info if x).strip()
+    return str(info or "").strip()
+
+
+def _eb_row(t: dict) -> dict | None:
+    """One Enable Banking transaction → a raw-txn dict, or None if unusable."""
+    amt = (t.get("transaction_amount") or {}).get("amount")
+    try:
+        amount = Decimal(str(amt))
+    except (InvalidOperation, TypeError):
+        return None
+    date_iso = t.get("booking_date") or t.get("value_date")
+    if not date_iso:
+        return None
+    # Enable Banking reports a magnitude + a separate CRDT/DBIT indicator.
+    indicator = (t.get("credit_debit_indicator") or "").upper()
+    tx_type = "credit" if indicator == "CRDT" else "debit"
+    remittance = _eb_remittance(t)
+    # The counterparty is the creditor on money-out, the debtor on money-in.
+    counterparty = (
+        (t.get("creditor") or {}).get("name")
+        if tx_type == "debit"
+        else (t.get("debtor") or {}).get("name")
+    )
+    payee = counterparty or _first_line(remittance)
+    fitid = t.get("entry_reference") or t.get("transaction_id") or ""
+    return {
+        "date": str(date_iso)[:10],
+        "amount": abs(amount),
+        "tx_type": tx_type,
+        "payee_raw": payee or "",
+        "memo": remittance,
+        "fitid": str(fitid),
+    }
+
+
+def normalize_enablebanking(transactions: list[dict]) -> list[dict]:
+    """Enable Banking transaction rows → raw-txn dicts (booked only).
+
+    Pending rows (``status`` other than ``BOOK``) are skipped — they mutate
+    before posting, which would churn the FITID dedup. They land once booked.
+    """
+    rows: list[dict] = []
+    for t in transactions or []:
+        if (t.get("status") or "BOOK").upper() != "BOOK":
+            continue
+        row = _eb_row(t)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
 def normalize_gocardless(transactions: dict) -> list[dict]:
     """GoCardless ``{'booked': [...], 'pending': [...]}`` → raw-txn dicts.
 

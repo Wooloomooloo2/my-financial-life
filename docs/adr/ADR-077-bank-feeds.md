@@ -104,6 +104,25 @@ The pluggable framework, `feed_account` schema, `stage_feed`, dedup reuse, and `
 
 **GoCardless** stays in the tree as a working provider for anyone who already has access, but is not built upon further. **Plaid/TrueLayer (paid UK)** remain rejected for a freely-shared app. Build order: **frictionless import first** (immediate value to every account, lowest risk), then **OFX Direct Connect**.
 
+---
+
+## Amendment 2 (2026-06-15) — correction: a free UK auto-feed *does* exist (Enable Banking); BYO-credentials providers fit a one-time-purchase app
+
+The Amendment-1 conclusion that **"there is no free Open-Banking data API available to a UK individual"** was **wrong** — it generalised from GoCardless's closure without checking the successors. Research (2026 indie-developer landscape) corrects it:
+
+- **Enable Banking** is the practical GoCardless replacement for the UK/EU: **self-serve signup** (no business registration), a **free "Restricted Production" tier for connecting your own accounts**, covering **UK + EU** (~2,700 banks, 30 countries) **including HSBC UK**. This is exactly the gap GoCardless left, still free, and it covers the owner's actual bank. Auth differs from GoCardless: an **RS256-signed JWT** (header `{typ:JWT, alg:RS256, kid:application_id}`, claims `iss:"enablebanking.com"`, `aud:"api.enablebanking.com"`, `iat`, `exp` ≤ 24 h), signed with the application's RSA private key → a new **`cryptography`** dependency (ships macOS + Windows wheels, so ADR-050 holds). Flow: `POST /auth` (aspsp + access window + redirect + state) → browser bank consent → `POST /sessions {code}` → `GET /accounts/{uid}/transactions`. Base `https://api.enablebanking.com`.
+
+**The business-model insight that reframes everything (owner):** "a freely-shared app can't bear central per-user cost" never ruled out paid providers — only the *app developer* paying. Every provider here is **bring-your-own-credentials**: the *user* signs up and (if applicable) pays the aggregator directly, exactly as the app already stores the user's own OXR / Tiingo / GoCardless keys (ADR-035). So a **one-time App Store purchase + Patreon** is fully compatible, and **"willing to pay" genuinely unlocks options** that were dismissed in Amendment 1:
+
+- **Enable Banking** — free for your own UK/EU accounts (the owner's HSBC case).
+- **SimpleFIN Bridge** — ~$15/yr, user-paid, self-serve, **US** banks (read-only; the simplest possible client — claim URL → access URL → one `GET /accounts` returns accounts + transactions).
+- **Plaid** — as of **2026-04-15** a free **Trial** tier (real production data, **10** Items, US/Canada) + pay-as-you-go for hobbyists; broadest US coverage but the heaviest integration (OAuth/Link).
+- **Teller.io** — 100 free live connections, US-only (noted, not selected).
+
+Also corrected: **HSBC "Direct Access 2" / Automated File Delivery is an HSBCnet (commercial) product**, not available on personal banking; and an individual **cannot call HSBC's Open-Banking API directly** (production access requires being an FCA-authorised TPP) — you reach it through an authorised aggregator like Enable Banking. So for personal HSBC UK the only routes are **file download** (Track 1) or **Enable Banking** (this amendment).
+
+**Owner decision (`AskUserQuestion`):** build **three** more providers on the (unchanged) framework — **Enable Banking** (UK/EU, incl. HSBC), **SimpleFIN** (US), **Plaid** (US/CA) — all BYO-credentials. Build order: **Enable Banking first** (solves the owner's HSBC need, mirrors the GoCardless consent→fetch→normalize client), then **SimpleFIN** (simplest), then **Plaid** (heaviest). Each ships the same way as the GoCardless/OFX cores: a Qt-free client + a `normalize_*` into the existing `stage_feed` path + a headless probe + offscreen tests, with UI wiring after.
+
 ## Verification
 
 Round 1 (offscreen, no live network): the normalizer maps GoCardless booked/pending rows to the parser raw-txn shape (sign→tx_type, transactionId→fitid, names/remittance→payee/memo); `stage_feed` runs them through `_classify_and_stage` and `commit_import` with correct dedup on re-fetch (idempotent) and manual-match behaviour; `feed_account` CRUD round-trips and cascades on account delete; the GoCardless client builds correct requests (URLs, headers, bodies) against a stubbed transport. Live bank connectivity is verified by the owner against their own GoCardless secret (a headless check precedes the UI).

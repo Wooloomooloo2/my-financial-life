@@ -261,6 +261,38 @@ def cmd_ofx_check(args) -> int:
     return 0
 
 
+def cmd_enablebanking_check(args) -> int:
+    """Verify an Enable Banking application by minting a JWT and listing banks
+    for a country (ADR-077 Amendment 2). No DB / no consent — this just proves
+    the RS256 JWT signs correctly, the pipe reaches Enable Banking, and your
+    bank (e.g. HSBC) is covered. ``--key`` is the path to the application's RSA
+    private-key PEM."""
+    from mfl_desktop.feeds.enablebanking import EnableBankingClient, EnableBankingError
+    try:
+        key_pem = Path(args.key).read_bytes()
+    except OSError as e:
+        print(f"Could not read private key {args.key}: {e}", file=sys.stderr)
+        return 1
+    client = EnableBankingClient(args.app_id, key_pem)
+    try:
+        banks = client.list_aspsps(args.country)
+    except EnableBankingError as e:
+        print(f"Enable Banking check FAILED: {e}", file=sys.stderr)
+        return 1
+    print(f"OK — {len(banks)} banks for {args.country}:")
+    needle = (args.find or "").lower()
+    shown = 0
+    for b in banks:
+        if needle and needle not in b.name.lower():
+            continue
+        print(f"  {b.name}  ({b.country})")
+        shown += 1
+        if not needle and shown >= 40:
+            print(f"  … and {len(banks) - shown} more (use --find to filter)")
+            break
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows console defaults to cp1252; force UTF-8 so £ and tree markers
     # render correctly. Harmless on macOS/Linux which are already UTF-8.
@@ -342,6 +374,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--raw", action="store_true",
                    help="Print the OFX request body and exit (no network)")
     p.set_defaults(func=cmd_ofx_check)
+
+    p = sub.add_parser(
+        "enablebanking-check",
+        help="Verify an Enable Banking application + list banks (ADR-077)",
+    )
+    p.add_argument("--app-id", required=True, help="Enable Banking application_id")
+    p.add_argument("--key", required=True, help="Path to the application's RSA private-key PEM")
+    p.add_argument("--country", default="GB", help="ISO country (default: GB)")
+    p.add_argument("--find", help="Filter the bank list by name substring")
+    p.set_defaults(func=cmd_enablebanking_check)
 
     args = parser.parse_args(argv)
     return args.func(args)
