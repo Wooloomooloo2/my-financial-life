@@ -304,6 +304,10 @@ class PayeeReportFilters:
     account_ids: tuple[int, ...] = field(default_factory=tuple)
     top_n: int = PAYEE_DEFAULT_TOP_N
     include_transfers: bool = False
+    # Saved splitter sizes (ADR-076 follow-up): chart-over-table and
+    # content-vs-summary. Empty = use the window's defaults.
+    chart_split: tuple[int, ...] = field(default_factory=tuple)
+    body_split: tuple[int, ...] = field(default_factory=tuple)
 
     # ── round-trip helpers ──
 

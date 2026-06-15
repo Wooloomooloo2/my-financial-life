@@ -153,21 +153,27 @@ class PayeeReportWindow(QMainWindow):
         self._table = self._build_table()
         self._table.cellDoubleClicked.connect(self._on_table_double_clicked)
 
-        left_splitter = QSplitter(Qt.Vertical)
-        left_splitter.addWidget(self._chart)
-        left_splitter.addWidget(self._table)
-        left_splitter.setStretchFactor(0, 3)
-        left_splitter.setStretchFactor(1, 2)
-        left_splitter.setSizes([440, 280])
+        self._left_splitter = QSplitter(Qt.Vertical)
+        self._left_splitter.addWidget(self._chart)
+        self._left_splitter.addWidget(self._table)
+        self._left_splitter.setStretchFactor(0, 3)
+        self._left_splitter.setStretchFactor(1, 2)
 
         self._summary_panel = self._build_summary_panel()
 
-        body_splitter = QSplitter(Qt.Horizontal)
-        body_splitter.addWidget(left_splitter)
-        body_splitter.addWidget(self._summary_panel)
-        body_splitter.setStretchFactor(0, 1)
-        body_splitter.setStretchFactor(1, 0)
-        body_splitter.setSizes([900, 280])
+        self._body_splitter = QSplitter(Qt.Horizontal)
+        self._body_splitter.addWidget(self._left_splitter)
+        self._body_splitter.addWidget(self._summary_panel)
+        self._body_splitter.setStretchFactor(0, 1)
+        self._body_splitter.setStretchFactor(1, 0)
+
+        # Restore saved splitter sizes (else sensible defaults) so a layout
+        # the owner tuned and saved survives a reopen.
+        f = self._current_filters
+        self._left_splitter.setSizes(list(f.chart_split) if f.chart_split else [440, 280])
+        self._body_splitter.setSizes(list(f.body_split) if f.body_split else [900, 280])
+        left_splitter = self._left_splitter
+        body_splitter = self._body_splitter
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -544,6 +550,16 @@ class PayeeReportWindow(QMainWindow):
         self._dirty = True
         self._update_save_buttons()
 
+    def _filters_to_persist(self) -> "PayeeReportFilters":
+        """The current filters with the live splitter sizes folded in, so a
+        layout the owner tuned is saved with the report (ADR-076 follow-up)."""
+        from dataclasses import replace
+        return replace(
+            self._current_filters,
+            chart_split=tuple(self._left_splitter.sizes()),
+            body_split=tuple(self._body_splitter.sizes()),
+        )
+
     def _on_save(self) -> None:
         if self._report_id is None:
             self._on_save_as()
@@ -551,7 +567,7 @@ class PayeeReportWindow(QMainWindow):
         try:
             row = self._repo.update_report(
                 self._report_id,
-                filters_json=self._current_filters.to_json(),
+                filters_json=self._filters_to_persist().to_json(),
             )
         except Exception as e:
             QMessageBox.critical(
@@ -586,7 +602,7 @@ class PayeeReportWindow(QMainWindow):
                 name=choice.name,
                 type_key=TYPE_PAYEE,
                 folder_id=choice.folder_id,
-                filters_json=self._current_filters.to_json(),
+                filters_json=self._filters_to_persist().to_json(),
             )
         except ValueError as e:
             QMessageBox.warning(self, "Could not save report", str(e))
