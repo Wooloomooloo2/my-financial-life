@@ -274,9 +274,21 @@ def _normalise_invst_record(fields: list[tuple[str, str]]) -> Optional[dict]:
 
     # Memo: source free text, plus a note of the linked account for transfer
     # rows (round 1 imports these as plain cash; real linking is a later round).
+    #
+    # ADR-071: the brokerage `P` field on an investment row is a *description*
+    # (e.g. "DIV - SABRA HEALTH CARE REIT INC REC 08/29/25 …"), not a payee —
+    # the security (`Y`) already carries the "who". Earlier rounds copied it
+    # into payee_raw, so every re-import of an investment QIF regenerated a
+    # wall of junk payees. We now fold it into the memo and leave payee_raw
+    # empty (the service's get_or_create_payee("") returns None), so investment
+    # rows never mint a payee. De-duped against `M` so a P==M source doesn't
+    # double up; investment dedup hashes on action+security+quantity, not
+    # payee, so dropping it from payee_raw doesn't disturb re-import matching.
     memo_parts: list[str] = []
-    if memo:
-        memo_parts.append(memo)
+    for part in (payee, memo):
+        part = part.strip()
+        if part and part not in memo_parts:
+            memo_parts.append(part)
     if linked_account:
         direction = "from" if tx_type == "credit" else "to"
         memo_parts.append(f"Transfer {direction} {linked_account}")
@@ -293,7 +305,7 @@ def _normalise_invst_record(fields: list[tuple[str, str]]) -> Optional[dict]:
         "date": date_iso,
         "amount": amount,                 # positive magnitude; tx_type carries sign
         "tx_type": tx_type,
-        "payee_raw": payee,
+        "payee_raw": "",                  # ADR-071: P folded into memo, not a payee
         "memo": full_memo,
         "status_override": status_override,
         "category_raw": category_raw,
