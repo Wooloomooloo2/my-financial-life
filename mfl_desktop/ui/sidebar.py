@@ -110,6 +110,10 @@ class Sidebar(QTreeWidget):
         # Account") elided even when the user had dragged the splitter
         # wider, with the extra space appearing as dead whitespace
         # between the sidebar's right edge and the splitter handle.
+        # macOS draws a blue focus ring around the focused item view; QSS
+        # `outline: 0` doesn't remove it — this attribute does (ADR-076 fix).
+        # Harmless on other platforms.
+        self.setAttribute(Qt.WA_MacShowFocusRect, False)
         self.setColumnCount(2)
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)

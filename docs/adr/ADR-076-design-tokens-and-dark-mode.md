@@ -59,7 +59,7 @@ The series palette (`chart_helpers.GROUP_PALETTE`) stays — those saturated mid
 
 The bulk of the inline-style conversion (~140 call sites across ~30 files) was done by two bounded regex sweeps (single-line, then multi-line concatenated-literal `setStyleSheet` calls), mapping each hardcoded hex to the token whose **light** value equals it — so light mode is unchanged and only the dark values are new. Dynamic/`f-string` colours and constant-based/paintEvent files were handled by hand or deferred (above).
 
-**Brush-styled widgets** (the sidebar sets section-header and closed-account colours as item `QBrush`es, not via QSS, so neither the global re-apply nor the `themed` registry reaches them): the sidebar resolves those from tokens and re-applies them on `tokens.notifier.changed` via a small `_restyle` walk. The QSS also sets `outline: 0` on list/tree views to drop the focus rectangle (a stray bright-blue outline around the current sidebar row in dark mode).
+**Brush-styled widgets** (the sidebar sets section-header and closed-account colours as item `QBrush`es, not via QSS, so neither the global re-apply nor the `themed` registry reaches them): the sidebar resolves those from tokens and re-applies them on `tokens.notifier.changed` via a small `_restyle` walk. The "odd blue strip" around the current sidebar row on macOS was the **native focus ring**, which QSS `outline: 0` does *not* remove — `setAttribute(Qt.WA_MacShowFocusRect, False)` on the sidebar tree (and the register table) does; it's harmless on other platforms.
 
 ### Rejected alternatives
 

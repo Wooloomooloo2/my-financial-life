@@ -319,6 +319,9 @@ class RegisterWindow(QMainWindow):
         # ── table ──
 
         self._table = QTableView()
+        # macOS focus ring around the grid — remove it (ADR-076); QSS
+        # `outline: 0` doesn't cover the native ring. Harmless elsewhere.
+        self._table.setAttribute(Qt.WA_MacShowFocusRect, False)
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(QTableView.SelectRows)
