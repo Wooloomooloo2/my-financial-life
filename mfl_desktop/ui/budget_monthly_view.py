@@ -47,11 +47,15 @@ _MONTH_ABBR = [
     "July", "August", "September", "October", "November", "December",
 ]
 
-_OVER = "#dc2626"      # red-600 — over budget (expense/transfer)
-_NEAR = "#f59e0b"      # amber-500 — ≥85% spent
-_UNDER = "#16a34a"     # green-600 — comfortably under / income progress
-_OVER_INCOME = "#15803d"  # green-700 — income beat its target (good, not bad)
-_TRACK = "#e2e8f0"     # slate-200 — empty track
+# Bar-fill colours resolved from the design tokens at paint-time so they follow
+# the active light/dark theme (ADR-076). Each token's light value equals the hex
+# it replaced, so light mode is unchanged.
+def _over() -> QColor:        return QColor(tokens.c("negative"))         # over budget (expense/transfer)
+def _near() -> QColor:        return QColor(tokens.c("caution"))          # ≥85% spent
+def _under() -> QColor:       return QColor(tokens.c("positive"))         # comfortably under / income progress
+def _over_income() -> QColor: return QColor(tokens.c("positive_strong"))  # income beat its target (good)
+def _track() -> QColor:       return QColor(tokens.c("border"))           # empty track
+def _muted_fill() -> QColor:  return QColor(tokens.c("border_strong"))    # muted/unbudgeted bar fill
 _MUTED = "#64748b"     # slate-500
 _GREEN_TXT = "#15803d"
 _RED_TXT = "#b91c1c"
@@ -109,17 +113,17 @@ class _Bar(QWidget):
 
     def _fill_colour(self) -> QColor:
         if self._muted:
-            return QColor("#cbd5e1")          # slate-300
+            return _muted_fill()
         if self._income:
             # Earning more than planned is good, never bad — income bars are
             # never red and never amber. A deeper green marks beating the
             # target; normal green is progress toward it.
-            return QColor(_OVER_INCOME) if self._over else QColor(_UNDER)
+            return _over_income() if self._over else _under()
         if self._over:
-            return QColor(_OVER)
+            return _over()
         if self._fraction >= 0.85:
-            return QColor(_NEAR)
-        return QColor(_UNDER)
+            return _near()
+        return _under()
 
     def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
         self.doubleClicked.emit()
@@ -130,7 +134,7 @@ class _Bar(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(_TRACK))
+        p.setBrush(_track())
         p.drawRoundedRect(r, 4, 4)
         frac = 1.0 if self._muted else max(0.0, min(self._fraction, 1.0))
         if frac > 0:

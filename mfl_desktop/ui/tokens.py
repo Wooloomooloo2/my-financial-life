@@ -51,9 +51,14 @@ _TOKENS: dict[str, tuple[str, str]] = {
     "on_accent":       ("#ffffff", "#ffffff"),
     # state
     "positive":        ("#16a34a", "#22c55e"),
+    "positive_strong": ("#15803d", "#22c55e"),  # green-700 — strong surplus / income-beat / goal-met
     "negative":        ("#dc2626", "#f87171"),
     "negative_strong": ("#b91c1c", "#ef4444"),
+    "caution":         ("#f59e0b", "#fbbf24"),  # amber-500 — near-limit bar fill
     "warning":         ("#b45309", "#fbbf24"),
+    # tints (cell-background washes — kept subtle so light text reads on dark)
+    "today_col":       ("#eff6ff", "#243352"),  # today's month column (blue-50 light)
+    "rollover_bg":     ("#fef9c3", "#3f3a18"),  # carried-in rollover cell (amber-100 light)
 }
 
 _THEMES = ("light", "dark")

@@ -88,14 +88,21 @@ _NET_HEADER = "net_header"
 
 _NET_TITLE = "Net (Income − Expenses)"
 
-_OVER = QColor("#b91c1c")     # red-700 — over budget / deficit
-_UNDER = QColor("#15803d")    # green-700 — under budget / surplus
-_SECTION_BG = QColor("#e2e8f0")   # slate-200
-_SUBTOTAL_BG = QColor("#f1f5f9")  # slate-100
-_TODAY_BG = QColor("#eff6ff")     # blue-50 — today's month column
-_TOTAL_BG = QColor("#f8fafc")     # slate-50 — far-right Total column
-_ROLLOVER_BG = QColor("#fef9c3")  # amber-100 — a Budget cell with carried-in rollover
-_MUTED = QColor("#64748b")        # slate-500
+# Matrix colours are resolved from the design tokens at data()-time (not as
+# module-level QColor singletons), so they follow the active light/dark theme
+# (ADR-076). data() is re-queried on every repaint — including the global
+# force-repaint theme.apply_theme does on a live toggle — so these stay correct
+# with no per-model signal wiring. Each token's *light* value equals the hex it
+# replaced, so light mode is unchanged.
+def _over() -> QColor:        return QColor(tokens.c("negative_strong"))  # over budget / deficit
+def _under() -> QColor:       return QColor(tokens.c("positive_strong"))  # under budget / surplus
+def _section_bg() -> QColor:  return QColor(tokens.c("border"))           # section header rows
+def _subtotal_bg() -> QColor: return QColor(tokens.c("surface_alt"))      # subtotal / net rows
+def _today_bg() -> QColor:    return QColor(tokens.c("today_col"))        # today's month column
+def _total_bg() -> QColor:    return QColor(tokens.c("canvas"))           # far-right Total column
+def _rollover_bg() -> QColor: return QColor(tokens.c("rollover_bg"))      # Budget cell w/ carried-in rollover
+def _muted() -> QColor:       return QColor(tokens.c("muted"))            # secondary label ink
+
 _ZERO_D = Decimal("0.00")
 
 
@@ -287,7 +294,7 @@ class BudgetMatrixModel(QAbstractTableModel):
                     )
                     return chevron + row.matrix_row.title
                 if role == Qt.BackgroundRole:
-                    return _SECTION_BG
+                    return _section_bg()
                 if role == Qt.FontRole:
                     f = QFont()
                     f.setBold(True)
@@ -312,7 +319,7 @@ class BudgetMatrixModel(QAbstractTableModel):
                     f.setBold(True)
                     return f
             if role == Qt.BackgroundRole:
-                return _SECTION_BG
+                return _section_bg()
             return None
 
         is_sub = row.kind == _SUBTOTAL
@@ -354,9 +361,9 @@ class BudgetMatrixModel(QAbstractTableModel):
                     "forward.\nRight-click to enable rollover or change role."
                 )
             if role == Qt.ForegroundRole and metric != "budget" and not is_net:
-                return _MUTED
+                return _muted()
             if role == Qt.BackgroundRole and is_summary:
-                return _SUBTOTAL_BG
+                return _subtotal_bg()
             if role == Qt.FontRole and (is_summary or metric == "budget"):
                 f = QFont()
                 f.setBold(metric == "budget" and not mr.is_unbudgeted
@@ -381,9 +388,9 @@ class BudgetMatrixModel(QAbstractTableModel):
             if role == Qt.TextAlignmentRole:
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             if role == Qt.ForegroundRole:
-                return _MUTED
+                return _muted()
             if role == Qt.BackgroundRole and is_total:
-                return _TOTAL_BG
+                return _total_bg()
             return None
 
         # Rolled-over carry on a (month) Budget cell: annotate it so Budget /
@@ -417,18 +424,18 @@ class BudgetMatrixModel(QAbstractTableModel):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole and metric == "diff":
             if value < 0:
-                return _OVER
+                return _over()
             if value > 0:
-                return _UNDER
+                return _under()
         if role == Qt.BackgroundRole:
             if carry != 0:
-                return _ROLLOVER_BG
+                return _rollover_bg()
             if is_summary:
-                return _SUBTOTAL_BG
+                return _subtotal_bg()
             if is_total:
-                return _TOTAL_BG
+                return _total_bg()
             if col == self._today_col:
-                return _TODAY_BG
+                return _today_bg()
         if role == Qt.FontRole and (is_summary or is_total):
             f = QFont()
             f.setBold(True)
@@ -470,10 +477,14 @@ class BudgetMatrixModel(QAbstractTableModel):
         return bool(self._edit_cb(row.matrix_row.line_id, month, amount))
 
 
-_GOAL_BLUE = QColor("#2563eb")     # in-progress fill (blue-600)
-_GOAL_GREEN = QColor("#15803d")    # met (green-700)
-_GOAL_RED = QColor("#b91c1c")      # overdue, not met (red-700)
-_GOAL_TRACK = QColor("#e2e8f0")    # slate-200 track
+# Goal-card state → design token (resolved at paint/render time for theme
+# correctness, ADR-076). in-progress = accent, met = positive_strong,
+# overdue = negative_strong; the bar track is the border tone.
+_GOAL_TOKEN = {
+    "blue": "accent",            # in-progress
+    "green": "positive_strong",  # met
+    "red": "negative_strong",    # overdue, not met
+}
 
 
 class _GoalBar(QWidget):
@@ -481,10 +492,10 @@ class _GoalBar(QWidget):
     chart idiom (ADR-026). Fill colour reflects state: green met, red overdue,
     blue in-progress."""
 
-    def __init__(self, pct: float, colour: QColor, parent=None) -> None:
+    def __init__(self, pct: float, colour_token: str, parent=None) -> None:
         super().__init__(parent)
         self._pct = max(0.0, min(100.0, pct))
-        self._colour = colour
+        self._colour_token = colour_token
         self.setFixedHeight(8)
         self.setMinimumWidth(120)
 
@@ -494,11 +505,11 @@ class _GoalBar(QWidget):
         w, h = self.width(), self.height()
         radius = h / 2
         p.setPen(Qt.NoPen)
-        p.setBrush(_GOAL_TRACK)
+        p.setBrush(QColor(tokens.c("border")))
         p.drawRoundedRect(0, 0, w, h, radius, radius)
         fill_w = int(round(w * self._pct / 100.0))
         if fill_w > 0:
-            p.setBrush(self._colour)
+            p.setBrush(QColor(tokens.c(self._colour_token)))
             p.drawRoundedRect(0, 0, max(fill_w, h), h, radius, radius)
         p.end()
 
@@ -541,19 +552,19 @@ class _GoalCard(QFrame):
 
         if prog.is_met:
             state = "Paid off ✓" if prog.kind == "paydown" else "Reached ✓"
-            colour = _GOAL_GREEN
+            colour_token = _GOAL_TOKEN["green"]
         elif prog.is_overdue:
             state = "Overdue"
-            colour = _GOAL_RED
+            colour_token = _GOAL_TOKEN["red"]
         else:
-            colour = _GOAL_BLUE
+            colour_token = _GOAL_TOKEN["blue"]
             target_mag = abs(prog.target_amount)
             state = (
                 f"to {prog.currency} {_fmt(target_mag)} "
                 f"by {_fmt_month(prog.target_date[:7])}"
             )
         sub = QLabel(state)
-        sub.setStyleSheet(f"color: {colour.name()};")
+        tokens.themed(sub, "color: {%s};" % colour_token)
         lay.addWidget(sub)
 
         if not prog.is_met:
@@ -563,7 +574,7 @@ class _GoalCard(QFrame):
             tokens.themed(need, "color: {muted_strong};")  # slate-600
             lay.addWidget(need)
 
-        lay.addWidget(_GoalBar(prog.progress_pct, colour))
+        lay.addWidget(_GoalBar(prog.progress_pct, colour_token))
         pct = QLabel(f"{prog.progress_pct:.0f}% paid"
                      if prog.kind == "paydown"
                      else f"{prog.progress_pct:.0f}% saved")
