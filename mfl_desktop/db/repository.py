@@ -21,6 +21,7 @@ from typing import Iterable, Optional, Union
 from mfl_desktop.account_types import AccountTypeSpec, by_key
 from mfl_desktop.db.money import decimal_to_pence, pence_to_decimal
 from mfl_desktop.db.schema import bootstrap
+from mfl_desktop.rules_engine import rule_matches
 
 # The one non-deletable category (ADR-010 §4). Seeded as id=1 in
 # 0001_initial.sql; serves as the deletion sink for every other category.
@@ -204,6 +205,26 @@ class PayeeRow:
     # row only (aliases route through their canonical), so this is populated
     # for canonicals and left None on aliases.
     default_category_id: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class RuleRow:
+    """One auto-categorisation rule (ADR-073). Matches a transaction's raw
+    payee text or memo and sets a payee and/or a category at import.
+
+    The display fields (``set_payee_name`` / ``set_category_path``) are
+    resolved by the Repository for the management screen; the rest are the
+    raw `rule` columns and are also what the pure ``rules_engine`` reads
+    (duck-typed)."""
+    id: int
+    pattern: str
+    pattern_kind: str          # contains | starts_with | ends_with | is_exactly
+    match_field: str           # payee_raw | memo
+    set_payee_id: Optional[int]
+    set_category_id: Optional[int]
+    priority: int
+    set_payee_name: Optional[str] = None
+    set_category_path: Optional[str] = None
 
 
 CATEGORY_KINDS: tuple[str, ...] = ("income", "expense", "transfer")
@@ -675,6 +696,10 @@ def new_statement_iri() -> str:
 
 def new_security_iri() -> str:
     return f"mfl:Security_{uuid.uuid4().hex[:8]}"
+
+
+def new_rule_iri() -> str:
+    return f"mfl:Rule_{uuid.uuid4().hex[:8]}"
 
 
 # ── Repository ──────────────────────────────────────────────────────────────
@@ -2703,6 +2728,172 @@ class Repository:
             )
             self.commit()
             return int(cur.rowcount)
+        except Exception:
+            self.rollback()
+            raise
+
+    # ── Auto-categorisation rules (ADR-073) ──
+
+    _RULE_KINDS = ("contains", "starts_with", "ends_with", "is_exactly")
+    _RULE_FIELDS = ("payee_raw", "memo")
+
+    def list_rules(self) -> list[RuleRow]:
+        """All rules in priority order (ascending = highest priority first),
+        with display names resolved for the management screen."""
+        cur = self._conn.execute(
+            "SELECT r.id, r.pattern, r.pattern_kind, r.match_field, "
+            "       r.set_payee_id, r.set_category_id, r.priority, "
+            "       p.name AS payee_name "
+            "FROM      rule r "
+            "LEFT JOIN payee p ON p.id = r.set_payee_id "
+            "ORDER BY r.priority, r.id"
+        )
+        rows = cur.fetchall()
+        paths = {c.id: (c.path or c.name) for c in self.list_categories_flat()}
+        return [
+            RuleRow(
+                id=r["id"], pattern=r["pattern"], pattern_kind=r["pattern_kind"],
+                match_field=r["match_field"], set_payee_id=r["set_payee_id"],
+                set_category_id=r["set_category_id"], priority=r["priority"],
+                set_payee_name=r["payee_name"],
+                set_category_path=paths.get(r["set_category_id"]),
+            )
+            for r in rows
+        ]
+
+    def create_rule(
+        self, *, pattern: str, pattern_kind: str, match_field: str,
+        set_payee_id: Optional[int], set_category_id: Optional[int],
+        priority: int = 100,
+    ) -> int:
+        """Insert an auto-categorisation rule. Validates the matcher kind /
+        field and that at least one setter is present. Commits; returns the id."""
+        self._validate_rule(
+            pattern, pattern_kind, match_field, set_payee_id, set_category_id,
+        )
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO rule (iri, pattern, pattern_kind, match_field, "
+                " set_category_id, set_payee_id, priority) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_rule_iri(), pattern.strip(), pattern_kind, match_field,
+                    set_category_id, set_payee_id, priority,
+                ),
+            )
+            self.commit()
+            return int(cur.lastrowid)
+        except Exception:
+            self.rollback()
+            raise
+
+    def update_rule(
+        self, rule_id: int, *, pattern: str, pattern_kind: str,
+        match_field: str, set_payee_id: Optional[int],
+        set_category_id: Optional[int], priority: int,
+    ) -> None:
+        """Update every editable field of a rule. Validates as create_rule."""
+        self._validate_rule(
+            pattern, pattern_kind, match_field, set_payee_id, set_category_id,
+        )
+        try:
+            self._conn.execute(
+                "UPDATE rule SET pattern = ?, pattern_kind = ?, "
+                " match_field = ?, set_category_id = ?, set_payee_id = ?, "
+                " priority = ? WHERE id = ?",
+                (
+                    pattern.strip(), pattern_kind, match_field,
+                    set_category_id, set_payee_id, priority, rule_id,
+                ),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def delete_rule(self, rule_id: int) -> None:
+        try:
+            self._conn.execute("DELETE FROM rule WHERE id = ?", (rule_id,))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    @classmethod
+    def _validate_rule(
+        cls, pattern, pattern_kind, match_field, set_payee_id, set_category_id,
+    ) -> None:
+        if not (pattern or "").strip():
+            raise ValueError("A rule needs a pattern to match.")
+        if pattern_kind not in cls._RULE_KINDS:
+            raise ValueError(f"Unknown matcher kind: {pattern_kind!r}")
+        if match_field not in cls._RULE_FIELDS:
+            raise ValueError(f"Unknown match field: {match_field!r}")
+        if set_payee_id is None and set_category_id is None:
+            raise ValueError("A rule must set a payee, a category, or both.")
+
+    def _txns_matching_rule(self, rule):
+        """Rows (id, category_id, payee_id) for non-transfer, non-split txns
+        whose stored payee name / memo matches the rule (ADR-073 retroactive).
+
+        Reuses the pure ``rule_matches`` so import-time and retroactive
+        matching agree; the stored payee **name** stands in for the original
+        raw import string (it isn't retained), which is what the user sees."""
+        cur = self._conn.execute(
+            "SELECT t.id, t.category_id, t.payee_id, "
+            "       COALESCE(p.name, '') AS pname, "
+            "       COALESCE(t.memo, '') AS memo "
+            "FROM      txn t "
+            "LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE t.transfer_id IS NULL "
+            "  AND t.id NOT IN (SELECT txn_id FROM txn_split)"
+        )
+        return [r for r in cur.fetchall() if rule_matches(rule, r["pname"], r["memo"])]
+
+    @staticmethod
+    def _rule_would_change(rule, row) -> bool:
+        if rule.set_category_id is not None and row["category_id"] == UNCATEGORISED_ID:
+            return True
+        if rule.set_payee_id is not None and row["payee_id"] is None:
+            return True
+        return False
+
+    def count_txns_matching_rule(self, rule) -> int:
+        """How many existing transactions the rule would change — matching
+        rows whose target field is still unset (Uncategorised category / NULL
+        payee). Never counts rows already set."""
+        return sum(
+            1 for r in self._txns_matching_rule(rule)
+            if self._rule_would_change(rule, r)
+        )
+
+    def apply_rule_to_existing(self, rule) -> int:
+        """Apply ``rule`` to matching existing transactions, filling only an
+        Uncategorised category / NULL payee — never overwriting, never
+        touching transfers or split parents. Returns rows changed. Commits."""
+        changed = 0
+        try:
+            for r in self._txns_matching_rule(rule):
+                sets: list[str] = []
+                params: list = []
+                if (
+                    rule.set_category_id is not None
+                    and r["category_id"] == UNCATEGORISED_ID
+                ):
+                    sets.append("category_id = ?")
+                    params.append(rule.set_category_id)
+                if rule.set_payee_id is not None and r["payee_id"] is None:
+                    sets.append("payee_id = ?")
+                    params.append(rule.set_payee_id)
+                if not sets:
+                    continue
+                params.append(r["id"])
+                self._conn.execute(
+                    f"UPDATE txn SET {', '.join(sets)} WHERE id = ?", params,
+                )
+                changed += 1
+            self.commit()
+            return changed
         except Exception:
             self.rollback()
             raise

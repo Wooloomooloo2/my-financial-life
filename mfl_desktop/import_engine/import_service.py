@@ -27,6 +27,7 @@ from typing import Optional
 
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.import_engine import csv_parser, ofx_parser, qif_parser
+from mfl_desktop.rules_engine import apply_rules
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +395,9 @@ class ImportService:
                 if sid is not None:
                     security_ids[sec.name] = sid
 
+            # ADR-073: load the auto-categorisation rules once for this batch.
+            rules = self._repo.list_rules()
+
             imported = skipped = matched = 0
 
             for tx in pending.transactions:
@@ -423,12 +427,25 @@ class ImportService:
                 payee_id, payee_default_cat = self._repo.resolve_import_payee(
                     tx.payee_raw
                 )
+                # ADR-073: pattern rules run after alias resolution. A rule that
+                # sets a payee overrides the resolved one (and re-points the
+                # default-category lookup at the rule's payee); a rule category
+                # takes precedence over the per-payee default. A category the
+                # source file carried still wins over both (handled below by the
+                # Uncategorised guard).
+                rule_payee, rule_cat = apply_rules(rules, tx.payee_raw, tx.memo)
+                if rule_payee is not None:
+                    payee_id = rule_payee
+                    payee_default_cat = self._repo.get_payee_default_category(
+                        rule_payee
+                    )
                 if (
-                    payee_default_cat is not None
-                    and not tx.splits
+                    not tx.splits
                     and category_id == self._repo.uncategorised_id()
                 ):
-                    category_id = payee_default_cat
+                    chosen = rule_cat if rule_cat is not None else payee_default_cat
+                    if chosen is not None:
+                        category_id = chosen
                 signed_amount = -tx.amount if tx.tx_type == "debit" else tx.amount
 
                 # ADR-051: a split row inserts a parent carrying the signed

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QDoubleValidator
@@ -59,6 +59,7 @@ class NewTransactionDialog(QDialog):
         accounts: list[AccountSummary],
         categories: list[CategoryChoice],
         default_account_id: Optional[int] = None,
+        payee_category_lookup: Optional[Callable[[str], Optional[int]]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -66,6 +67,10 @@ class NewTransactionDialog(QDialog):
         self.setModal(True)
         self._accounts = accounts
         self._categories = categories
+        # ADR-073: optional name → remembered-category lookup. When set, the
+        # category is pre-filled after the payee is entered (only if the user
+        # hasn't already chosen a non-Uncategorised category).
+        self._payee_category_lookup = payee_category_lookup
 
         # ── widgets ──
 
@@ -87,6 +92,7 @@ class NewTransactionDialog(QDialog):
 
         self._payee_edit = QLineEdit()
         self._payee_edit.setPlaceholderText("Optional")
+        self._payee_edit.editingFinished.connect(self._maybe_prefill_category)
 
         # Searchable dropdown — same helper used in BulkEditDialog so the
         # two surfaces behave identically. Default to Uncategorised (id=1).
@@ -158,6 +164,26 @@ class NewTransactionDialog(QDialog):
         w = QWidget()
         w.setLayout(inner_layout)
         return w
+
+    def _maybe_prefill_category(self) -> None:
+        """ADR-073: pre-fill the category from the payee's remembered
+        auto-category, but only when the user hasn't already picked a real
+        (non-Uncategorised) category, so a deliberate choice is never clobbered."""
+        if self._payee_category_lookup is None:
+            return
+        name = self._payee_edit.text().strip()
+        if not name:
+            return
+        current = selected_category_id(self._category_combo)
+        if current is not None and current != 1:
+            return
+        cat_id = self._payee_category_lookup(name)
+        if cat_id is None:
+            return
+        for i in range(self._category_combo.count()):
+            if self._category_combo.itemData(i) == cat_id:
+                self._category_combo.setCurrentIndex(i)
+                break
 
     def _on_accept(self) -> None:
         # Account

@@ -61,6 +61,7 @@ from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.register_filters_popover import RegisterFiltersPopover
 from mfl_desktop.ui.payees_dialog import PayeesDialog
 from mfl_desktop.ui.memorise_category_dialog import MemoriseCategoryDialog
+from mfl_desktop.ui.rules_dialog import RulesDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
 from mfl_desktop.ui.schedules_dialog import SchedulesDialog
@@ -825,6 +826,14 @@ class RegisterWindow(QMainWindow):
         self._manage_categories_action.triggered.connect(self._on_manage_categories)
         manage_menu.addAction(self._manage_categories_action)
 
+        self._manage_rules_action = QAction("R&ules…", self)
+        self._manage_rules_action.setToolTip(
+            "Auto-categorisation rules — match payee/memo text to set a "
+            "payee and/or category on import"
+        )
+        self._manage_rules_action.triggered.connect(self._on_manage_rules)
+        manage_menu.addAction(self._manage_rules_action)
+
         self._manage_schedules_action = QAction("&Schedules…", self)
         self._manage_schedules_action.triggered.connect(self._on_manage_schedules)
         manage_menu.addAction(self._manage_schedules_action)
@@ -895,6 +904,14 @@ class RegisterWindow(QMainWindow):
 
     # ── new / delete transaction ──
 
+    def _payee_default_category_for_name(self, name: str):
+        """ADR-073: resolve a typed payee name to its remembered auto-category
+        (or None) so the New Transaction dialog can pre-fill the category."""
+        pid = self._repo.find_payee_id_by_name(name)
+        if pid is None:
+            return None
+        return self._repo.get_payee_default_category(pid)
+
     def _on_new_transaction(self) -> None:
         accounts = self._repo.list_accounts()
         if not accounts:
@@ -913,6 +930,7 @@ class RegisterWindow(QMainWindow):
             accounts=accounts,
             categories=self._categories,
             default_account_id=default_id,
+            payee_category_lookup=self._payee_default_category_for_name,
             parent=self,
         )
         if dialog.exec() != NewTransactionDialog.Accepted:
@@ -2627,6 +2645,13 @@ class RegisterWindow(QMainWindow):
         # filter combo are both built off the cached category list — so
         # refresh the lot whenever the dialog changes anything.
         dialog.categories_changed.connect(self._refresh_categories_view)
+        dialog.exec()
+
+    def _on_manage_rules(self) -> None:
+        # ADR-073: a retroactive apply re-points payee/category on existing
+        # rows, so reload the register when the rules dialog changes anything.
+        dialog = RulesDialog(self._repo, parent=self)
+        dialog.rules_changed.connect(self._model.reload)
         dialog.exec()
 
     def _on_manage_schedules(self) -> None:
