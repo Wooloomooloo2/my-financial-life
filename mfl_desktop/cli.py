@@ -293,6 +293,33 @@ def cmd_enablebanking_check(args) -> int:
     return 0
 
 
+def cmd_simplefin_check(args) -> int:
+    """Verify a SimpleFIN connection (ADR-077 Amendment 2). With --setup-token,
+    claims it for an access URL (printed once — store it; the token is
+    single-use) and lists accounts. With --access-url, just lists accounts. No
+    DB — proves the pipe reaches SimpleFIN and your banks are covered."""
+    from mfl_desktop.feeds.simplefin import (
+        SimpleFinClient, SimpleFinError, claim_access_url,
+    )
+    access_url = args.access_url
+    try:
+        if args.setup_token:
+            access_url = claim_access_url(args.setup_token)
+            print(f"Access URL (store this — the setup token is now used):\n  {access_url}\n")
+        if not access_url:
+            print("Provide --setup-token or --access-url.", file=sys.stderr)
+            return 1
+        accounts = SimpleFinClient(access_url).list_accounts()
+    except SimpleFinError as e:
+        print(f"SimpleFIN check FAILED: {e}", file=sys.stderr)
+        return 1
+    print(f"OK — {len(accounts)} accounts:")
+    for a in accounts:
+        print(f"  {a.id:24}  {a.name}  ({a.currency} {a.balance})  "
+              f"{len(a.transactions)} txns")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows console defaults to cp1252; force UTF-8 so £ and tree markers
     # render correctly. Harmless on macOS/Linux which are already UTF-8.
@@ -384,6 +411,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--country", default="GB", help="ISO country (default: GB)")
     p.add_argument("--find", help="Filter the bank list by name substring")
     p.set_defaults(func=cmd_enablebanking_check)
+
+    p = sub.add_parser(
+        "simplefin-check",
+        help="Verify a SimpleFIN setup token / access URL + list accounts (ADR-077)",
+    )
+    p.add_argument("--setup-token", help="One-time SimpleFIN setup token (claimed → access URL)")
+    p.add_argument("--access-url", help="A previously-claimed SimpleFIN access URL")
+    p.set_defaults(func=cmd_simplefin_check)
 
     args = parser.parse_args(argv)
     return args.func(args)

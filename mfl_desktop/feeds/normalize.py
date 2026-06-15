@@ -10,6 +10,7 @@ heuristic, review, and commit.
 """
 from __future__ import annotations
 
+import datetime
 from decimal import Decimal, InvalidOperation
 
 
@@ -99,6 +100,45 @@ def normalize_enablebanking(transactions: list[dict]) -> list[dict]:
         if (t.get("status") or "BOOK").upper() != "BOOK":
             continue
         row = _eb_row(t)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _sf_row(t: dict) -> dict | None:
+    """One SimpleFIN transaction → a raw-txn dict, or None if unusable."""
+    try:
+        amount = Decimal(str(t.get("amount")))
+    except (InvalidOperation, TypeError):
+        return None
+    posted = t.get("posted")
+    try:
+        date_iso = datetime.datetime.fromtimestamp(
+            int(posted), datetime.timezone.utc
+        ).date().isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    description = str(t.get("description", "") or "")
+    payee = str(t.get("payee", "") or "") or description
+    memo = str(t.get("memo", "") or "") or description
+    return {
+        "date": date_iso,
+        "amount": abs(amount),
+        # SimpleFIN amounts are signed: negative = money out.
+        "tx_type": "debit" if amount < 0 else "credit",
+        "payee_raw": payee,
+        "memo": memo,
+        "fitid": str(t.get("id") or ""),
+    }
+
+
+def normalize_simplefin(transactions: list[dict]) -> list[dict]:
+    """SimpleFIN transaction rows (one account's ``transactions``) → raw-txn
+    dicts. SimpleFIN only returns posted transactions, so there is no pending
+    filter to apply."""
+    rows: list[dict] = []
+    for t in transactions or []:
+        row = _sf_row(t)
         if row is not None:
             rows.append(row)
     return rows
