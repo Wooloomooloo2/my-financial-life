@@ -43,6 +43,8 @@ from mfl_desktop.ui.sankey_chart import SankeyChart, SankeyNode
 from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.report_save import resolve_save_as
+from dataclasses import replace
 
 _PERIOD_LABELS = [
     ("Year to date", "ytd"),
@@ -111,11 +113,14 @@ class SankeyReportWindow(QMainWindow):
         self._chart = SankeyChart()
         self._summary_panel = self._build_summary_panel()
         body = QSplitter(Qt.Horizontal)
+        self._body_splitter = body
         body.addWidget(self._chart)
         body.addWidget(self._summary_panel)
         body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 0)
-        body.setSizes([980, 300])
+        _bs = self._current_filters.body_split
+        body.setSizes(list(_bs) if _bs else [980, 300])
+        body.splitterMoved.connect(lambda *_: self._mark_dirty())
         outer.addWidget(body, 1)
         self.setCentralWidget(central)
 
@@ -542,12 +547,19 @@ class SankeyReportWindow(QMainWindow):
         self._dirty = True
         self._update_name_label()
 
+    def _filters_to_persist(self):
+        """Current filters with the live splitter size folded in (ADR-076)."""
+        return replace(
+            self._current_filters,
+            body_split=tuple(self._body_splitter.sizes()),
+        )
+
     def _on_save(self) -> None:
         if self._report_id is None:
             self._on_save_as()
             return
         self._repo.update_report(
-            self._report_id, filters_json=self._current_filters.to_json(),
+            self._report_id, filters_json=self._filters_to_persist().to_json(),
         )
         self._dirty = False
         self._update_name_label()
@@ -562,14 +574,19 @@ class SankeyReportWindow(QMainWindow):
         choice = dlg.values()
         if choice is None:
             return
-        new_id = self._repo.create_report(
-            name=choice.name, type_key=TYPE_SANKEY,
-            folder_id=choice.folder_id,
-            filters_json=self._current_filters.to_json(),
-        )
-        self._report_id = new_id
-        self._loaded_name = choice.name
-        self._loaded_folder_id = choice.folder_id
+        try:
+            row = resolve_save_as(
+                self, self._repo, self._report_id, TYPE_SANKEY,
+                choice.name, choice.folder_id, self._filters_to_persist().to_json(),
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not save report", str(e))
+            return
+        if row is None:
+            return
+        self._report_id = row.id
+        self._loaded_name = row.name
+        self._loaded_folder_id = row.folder_id
         self._dirty = False
         self._update_name_label()
         self._update_save_buttons()

@@ -54,6 +54,7 @@ from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter,
 )
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.report_save import resolve_save_as
 
 _PERIOD_LABELS: dict[str, str] = {
     "quarter": "Last Quarter",
@@ -192,21 +193,27 @@ class CategoryPayeeWindow(QMainWindow):
         self._table = self._build_table()
         self._table.cellDoubleClicked.connect(self._on_table_double_clicked)
 
-        left_splitter = QSplitter(Qt.Vertical)
-        left_splitter.addWidget(self._chart)
-        left_splitter.addWidget(self._table)
-        left_splitter.setStretchFactor(0, 3)
-        left_splitter.setStretchFactor(1, 2)
-        left_splitter.setSizes([450, 290])
+        self._left_splitter = QSplitter(Qt.Vertical)
+        self._left_splitter.addWidget(self._chart)
+        self._left_splitter.addWidget(self._table)
+        self._left_splitter.setStretchFactor(0, 3)
+        self._left_splitter.setStretchFactor(1, 2)
 
         self._summary_panel = self._build_summary_panel()
 
-        body_splitter = QSplitter(Qt.Horizontal)
-        body_splitter.addWidget(left_splitter)
-        body_splitter.addWidget(self._summary_panel)
-        body_splitter.setStretchFactor(0, 1)
-        body_splitter.setStretchFactor(1, 0)
-        body_splitter.setSizes([900, 280])
+        self._body_splitter = QSplitter(Qt.Horizontal)
+        self._body_splitter.addWidget(self._left_splitter)
+        self._body_splitter.addWidget(self._summary_panel)
+        self._body_splitter.setStretchFactor(0, 1)
+        self._body_splitter.setStretchFactor(1, 0)
+
+        _f = self._current_filters
+        self._left_splitter.setSizes(list(_f.chart_split) if _f.chart_split else [450, 290])
+        self._body_splitter.setSizes(list(_f.body_split) if _f.body_split else [900, 280])
+        self._left_splitter.splitterMoved.connect(lambda *_: self._mark_dirty())
+        self._body_splitter.splitterMoved.connect(lambda *_: self._mark_dirty())
+        left_splitter = self._left_splitter
+        body_splitter = self._body_splitter
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -631,13 +638,21 @@ class CategoryPayeeWindow(QMainWindow):
         self._dirty = True
         self._update_save_buttons()
 
+    def _filters_to_persist(self):
+        """Current filters with the live splitter sizes folded in (ADR-076)."""
+        return replace(
+            self._current_filters,
+            chart_split=tuple(self._left_splitter.sizes()),
+            body_split=tuple(self._body_splitter.sizes()),
+        )
+
     def _on_save(self) -> None:
         if self._report_id is None:
             self._on_save_as()
             return
         try:
             row = self._repo.update_report(
-                self._report_id, filters_json=self._current_filters.to_json(),
+                self._report_id, filters_json=self._filters_to_persist().to_json(),
             )
         except Exception as e:
             QMessageBox.critical(self, "Could not save report",
@@ -663,10 +678,9 @@ class CategoryPayeeWindow(QMainWindow):
         if choice is None:
             return
         try:
-            row = self._repo.create_report(
-                name=choice.name, type_key=TYPE_CATEGORY_PAYEE,
-                folder_id=choice.folder_id,
-                filters_json=self._current_filters.to_json(),
+            row = resolve_save_as(
+                self, self._repo, self._report_id, TYPE_CATEGORY_PAYEE,
+                choice.name, choice.folder_id, self._filters_to_persist().to_json(),
             )
         except ValueError as e:
             QMessageBox.warning(self, "Could not save report", str(e))
@@ -674,6 +688,8 @@ class CategoryPayeeWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Could not save report",
                                  f"The report was not saved:\n\n{e}")
+            return
+        if row is None:
             return
         self._report_id = row.id
         self._loaded_name = row.name

@@ -57,6 +57,8 @@ from mfl_desktop.ui.spending_filter_dialog import (
     SpendingFilterDialog, UNCATEGORISED_ID,
 )
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.report_save import resolve_save_as
+from dataclasses import replace
 
 # Granularity dataclass keys → SQL bucket keys (the SQL side speaks
 # "week" / "month" / ...; the dataclass speaks "weekly" / "monthly").
@@ -193,12 +195,15 @@ class SpendingReportWindow(QMainWindow):
 
         self._summary_panel = self._build_summary_panel()
 
-        body_splitter = QSplitter(Qt.Horizontal)
-        body_splitter.addWidget(self._chart)
-        body_splitter.addWidget(self._summary_panel)
-        body_splitter.setStretchFactor(0, 1)
-        body_splitter.setStretchFactor(1, 0)
-        body_splitter.setSizes([960, 280])
+        self._body_splitter = QSplitter(Qt.Horizontal)
+        self._body_splitter.addWidget(self._chart)
+        self._body_splitter.addWidget(self._summary_panel)
+        self._body_splitter.setStretchFactor(0, 1)
+        self._body_splitter.setStretchFactor(1, 0)
+        _bs = self._current_filters.body_split
+        self._body_splitter.setSizes(list(_bs) if _bs else [960, 280])
+        self._body_splitter.splitterMoved.connect(lambda *_: self._mark_dirty())
+        body_splitter = self._body_splitter
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -652,9 +657,9 @@ class SpendingReportWindow(QMainWindow):
         if the user has drilled in, otherwise the active filters. Drill-
         downs are view-only; the saved report keeps the user's chosen
         top-level filters."""
-        if self._drill_stack:
-            return self._drill_stack[0]
-        return self._current_filters
+        base = self._drill_stack[0] if self._drill_stack else self._current_filters
+        # Fold the live splitter size in so a tuned layout is saved (ADR-076).
+        return replace(base, body_split=tuple(self._body_splitter.sizes()))
 
     def _on_save(self) -> None:
         if self._report_id is None:
@@ -696,11 +701,9 @@ class SpendingReportWindow(QMainWindow):
         if choice is None:
             return
         try:
-            row = self._repo.create_report(
-                name=choice.name,
-                type_key=TYPE_SPENDING_OVER_TIME,
-                folder_id=choice.folder_id,
-                filters_json=filters.to_json(),
+            row = resolve_save_as(
+                self, self._repo, self._report_id, TYPE_SPENDING_OVER_TIME,
+                choice.name, choice.folder_id, filters.to_json(),
             )
         except ValueError as e:
             QMessageBox.warning(self, "Could not save report", str(e))
@@ -710,6 +713,8 @@ class SpendingReportWindow(QMainWindow):
                 self, "Could not save report",
                 f"The report was not saved:\n\n{e}",
             )
+            return
+        if row is None:
             return
         self._report_id = row.id
         self._loaded_name = row.name

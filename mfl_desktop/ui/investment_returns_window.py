@@ -57,6 +57,8 @@ from mfl_desktop.ui.investment_returns_filter_dialog import (
 from mfl_desktop.ui.returns_chart import ReturnsChart
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.report_save import resolve_save_as
+from dataclasses import replace
 
 _CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 
@@ -207,21 +209,27 @@ class InvestmentReturnsWindow(QMainWindow):
         for col in range(2, len(_TABLE_HEADERS)):
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
 
-        left_splitter = QSplitter(Qt.Vertical)
-        left_splitter.addWidget(self._chart)
-        left_splitter.addWidget(self._table)
-        left_splitter.setStretchFactor(0, 1)
-        left_splitter.setStretchFactor(1, 0)
-        left_splitter.setSizes([460, 280])
+        self._left_splitter = QSplitter(Qt.Vertical)
+        self._left_splitter.addWidget(self._chart)
+        self._left_splitter.addWidget(self._table)
+        self._left_splitter.setStretchFactor(0, 1)
+        self._left_splitter.setStretchFactor(1, 0)
 
         self._summary_panel = self._build_summary_panel()
 
-        body_splitter = QSplitter(Qt.Horizontal)
-        body_splitter.addWidget(left_splitter)
-        body_splitter.addWidget(self._summary_panel)
-        body_splitter.setStretchFactor(0, 1)
-        body_splitter.setStretchFactor(1, 0)
-        body_splitter.setSizes([940, 300])
+        self._body_splitter = QSplitter(Qt.Horizontal)
+        self._body_splitter.addWidget(self._left_splitter)
+        self._body_splitter.addWidget(self._summary_panel)
+        self._body_splitter.setStretchFactor(0, 1)
+        self._body_splitter.setStretchFactor(1, 0)
+
+        _f = self._current_filters
+        self._left_splitter.setSizes(list(_f.chart_split) if _f.chart_split else [460, 280])
+        self._body_splitter.setSizes(list(_f.body_split) if _f.body_split else [940, 300])
+        self._left_splitter.splitterMoved.connect(lambda *_: self._mark_dirty())
+        self._body_splitter.splitterMoved.connect(lambda *_: self._mark_dirty())
+        left_splitter = self._left_splitter
+        body_splitter = self._body_splitter
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -927,6 +935,14 @@ class InvestmentReturnsWindow(QMainWindow):
         self._dirty = True
         self._update_save_buttons()
 
+    def _filters_to_persist(self):
+        """Current filters with the live splitter sizes folded in (ADR-076)."""
+        return replace(
+            self._current_filters,
+            chart_split=tuple(self._left_splitter.sizes()),
+            body_split=tuple(self._body_splitter.sizes()),
+        )
+
     def _on_save(self) -> None:
         if self._report_id is None:
             self._on_save_as()
@@ -934,7 +950,7 @@ class InvestmentReturnsWindow(QMainWindow):
         try:
             row = self._repo.update_report(
                 self._report_id,
-                filters_json=self._current_filters.to_json(),
+                filters_json=self._filters_to_persist().to_json(),
             )
         except Exception as e:
             QMessageBox.critical(
@@ -963,11 +979,9 @@ class InvestmentReturnsWindow(QMainWindow):
         if choice is None:
             return
         try:
-            row = self._repo.create_report(
-                name=choice.name,
-                type_key=TYPE_INVESTMENT_RETURNS,
-                folder_id=choice.folder_id,
-                filters_json=self._current_filters.to_json(),
+            row = resolve_save_as(
+                self, self._repo, self._report_id, TYPE_INVESTMENT_RETURNS,
+                choice.name, choice.folder_id, self._filters_to_persist().to_json(),
             )
         except ValueError as e:
             QMessageBox.warning(self, "Could not save report", str(e))
@@ -977,6 +991,8 @@ class InvestmentReturnsWindow(QMainWindow):
                 self, "Could not save report",
                 f"The report was not saved:\n\n{e}",
             )
+            return
+        if row is None:
             return
         self._report_id = row.id
         self._loaded_name = row.name

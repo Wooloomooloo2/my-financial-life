@@ -96,6 +96,9 @@ class SpendingOverTimeFilters:
     account_ids: tuple[int, ...] = field(default_factory=tuple)
     include_transfers: bool = False        # ADR-018 strict-outflow default
 
+    # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
+    chart_split: tuple[int, ...] = field(default_factory=tuple)
+    body_split: tuple[int, ...] = field(default_factory=tuple)
     # ── round-trip helpers ──
 
     @classmethod
@@ -148,6 +151,9 @@ class IncomeExpenseFilters:
     # under. Default False = exclude (the cash-flow-correct default).
     include_transfers: bool = False
 
+    # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
+    chart_split: tuple[int, ...] = field(default_factory=tuple)
+    body_split: tuple[int, ...] = field(default_factory=tuple)
     # ── round-trip helpers ──
 
     @classmethod
@@ -195,6 +201,9 @@ class InvestmentReturnsFilters:
     account_ids: tuple[int, ...] = field(default_factory=tuple)
     security_ids: tuple[int, ...] = field(default_factory=tuple)
 
+    # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
+    chart_split: tuple[int, ...] = field(default_factory=tuple)
+    body_split: tuple[int, ...] = field(default_factory=tuple)
     # ── round-trip helpers ──
 
     @classmethod
@@ -250,6 +259,9 @@ class SankeyFilters:
     account_ids: tuple[int, ...] = field(default_factory=tuple)
     category_ids: tuple[int, ...] = field(default_factory=tuple)
 
+    # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
+    chart_split: tuple[int, ...] = field(default_factory=tuple)
+    body_split: tuple[int, ...] = field(default_factory=tuple)
     # ── round-trip helpers ──
 
     @classmethod
@@ -362,6 +374,9 @@ class CategoryPayeeFilters:
     top_n: int = 15
     include_transfers: bool = False
 
+    # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
+    chart_split: tuple[int, ...] = field(default_factory=tuple)
+    body_split: tuple[int, ...] = field(default_factory=tuple)
     # ── round-trip helpers ──
 
     @classmethod

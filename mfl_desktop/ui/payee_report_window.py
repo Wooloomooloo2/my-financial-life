@@ -50,6 +50,7 @@ from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter,
 )
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.report_save import resolve_save_as
 
 _PERIOD_LABELS: dict[str, str] = {
     "quarter": "Last Quarter",
@@ -602,60 +603,10 @@ class PayeeReportWindow(QMainWindow):
         choice = dialog.values()
         if choice is None:
             return
-        # Saving As over an existing name+folder should *replace* that report,
-        # not silently make a second copy. (A no-folder report has folder_id
-        # NULL, which SQLite's UNIQUE(name, folder_id) treats as distinct, so
-        # duplicates slipped through.)
-        existing = next(
-            (r for r in self._repo.list_reports()
-             if r.name == choice.name and r.folder_id == choice.folder_id),
-            None,
-        )
-        if existing is not None:
-            is_self = existing.id == self._report_id
-            if existing.type != TYPE_PAYEE and not is_self:
-                QMessageBox.warning(
-                    self, "Name already in use",
-                    f"A different report named “{choice.name}” already exists "
-                    f"{'in that folder' if choice.folder_id else 'here'}. "
-                    f"Choose another name.",
-                )
-                return
-            # Overwrite an existing report rather than duplicate it. Saving As
-            # onto the *current* report is just a Save (no prompt); onto a
-            # different one asks first.
-            if not is_self and QMessageBox.question(
-                self, "Replace report?",
-                f"A report named “{choice.name}” already exists here. "
-                f"Replace it?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            ) != QMessageBox.Yes:
-                return
-            try:
-                row = self._repo.update_report(
-                    existing.id, name=choice.name, folder_id=choice.folder_id,
-                    filters_json=self._filters_to_persist().to_json(),
-                )
-            except Exception as e:
-                QMessageBox.critical(
-                    self, "Could not save report",
-                    f"The report was not saved:\n\n{e}",
-                )
-                return
-            self._report_id = row.id
-            self._loaded_name = row.name
-            self._loaded_folder_id = row.folder_id
-            self._dirty = False
-            self._update_name_label()
-            self._update_save_buttons()
-            self.reports_changed.emit()
-            return
         try:
-            row = self._repo.create_report(
-                name=choice.name,
-                type_key=TYPE_PAYEE,
-                folder_id=choice.folder_id,
-                filters_json=self._filters_to_persist().to_json(),
+            row = resolve_save_as(
+                self, self._repo, self._report_id, TYPE_PAYEE,
+                choice.name, choice.folder_id, self._filters_to_persist().to_json(),
             )
         except ValueError as e:
             QMessageBox.warning(self, "Could not save report", str(e))
@@ -665,6 +616,8 @@ class PayeeReportWindow(QMainWindow):
                 self, "Could not save report",
                 f"The report was not saved:\n\n{e}",
             )
+            return
+        if row is None:
             return
         self._report_id = row.id
         self._loaded_name = row.name
