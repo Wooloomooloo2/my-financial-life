@@ -144,6 +144,48 @@ def normalize_simplefin(transactions: list[dict]) -> list[dict]:
     return rows
 
 
+def _plaid_row(t: dict) -> dict | None:
+    """One Plaid transaction → a raw-txn dict, or None if unusable."""
+    try:
+        amount = Decimal(str(t.get("amount")))
+    except (InvalidOperation, TypeError):
+        return None
+    date_iso = t.get("date") or t.get("authorized_date")
+    if not date_iso:
+        return None
+    # Plaid's sign is inverted vs OFX: POSITIVE = money out (debit).
+    tx_type = "debit" if amount > 0 else "credit"
+    payee = str(t.get("merchant_name") or t.get("name") or "")
+    memo = str(t.get("name") or "")
+    return {
+        "date": str(date_iso)[:10],
+        "amount": abs(amount),
+        "tx_type": tx_type,
+        "payee_raw": payee,
+        "memo": memo,
+        "fitid": str(t.get("transaction_id") or ""),
+    }
+
+
+def normalize_plaid(transactions: list[dict], *, account_id: str | None = None) -> list[dict]:
+    """Plaid transaction rows → raw-txn dicts (booked only).
+
+    Pending rows (``pending`` true) are skipped — they re-post with a new
+    ``transaction_id`` once settled, which the FITID dedup would otherwise
+    double-count. Pass ``account_id`` to keep only one account's rows (a Plaid
+    Item can span several accounts; each MFL feed links to one)."""
+    rows: list[dict] = []
+    for t in transactions or []:
+        if t.get("pending"):
+            continue
+        if account_id is not None and t.get("account_id") != account_id:
+            continue
+        row = _plaid_row(t)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
 def normalize_gocardless(transactions: dict) -> list[dict]:
     """GoCardless ``{'booked': [...], 'pending': [...]}`` → raw-txn dicts.
 

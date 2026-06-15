@@ -320,6 +320,23 @@ def cmd_simplefin_check(args) -> int:
     return 0
 
 
+def cmd_plaid_check(args) -> int:
+    """Verify Plaid credentials (ADR-077 Amendment 2) by listing institutions
+    for a country. No Item / no Link needed — proves client_id + secret are
+    valid against the chosen environment before any UI."""
+    from mfl_desktop.feeds.plaid import PlaidClient, PlaidError
+    client = PlaidClient(args.client_id, args.secret, environment=args.env)
+    try:
+        insts = client.list_institutions(country_codes=(args.country,), count=args.count)
+    except PlaidError as e:
+        print(f"Plaid check FAILED: {e}", file=sys.stderr)
+        return 1
+    print(f"OK — Plaid reachable ({args.env}); sample of {len(insts)} {args.country} institutions:")
+    for i in insts:
+        print(f"  {i.get('name','')}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows console defaults to cp1252; force UTF-8 so £ and tree markers
     # render correctly. Harmless on macOS/Linux which are already UTF-8.
@@ -419,6 +436,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--setup-token", help="One-time SimpleFIN setup token (claimed → access URL)")
     p.add_argument("--access-url", help="A previously-claimed SimpleFIN access URL")
     p.set_defaults(func=cmd_simplefin_check)
+
+    p = sub.add_parser(
+        "plaid-check",
+        help="Verify Plaid client_id/secret + list institutions (ADR-077)",
+    )
+    p.add_argument("--client-id", required=True, help="Plaid client_id")
+    p.add_argument("--secret", required=True, help="Plaid secret (for the chosen env)")
+    p.add_argument("--env", default="production", choices=["production", "sandbox"],
+                   help="Plaid environment (default: production)")
+    p.add_argument("--country", default="US", help="ISO country (default: US)")
+    p.add_argument("--count", type=int, default=10, help="How many institutions to sample")
+    p.set_defaults(func=cmd_plaid_check)
 
     args = parser.parse_args(argv)
     return args.func(args)

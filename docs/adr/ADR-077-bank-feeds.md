@@ -123,6 +123,13 @@ Also corrected: **HSBC "Direct Access 2" / Automated File Delivery is an HSBCnet
 
 **Owner decision (`AskUserQuestion`):** build **three** more providers on the (unchanged) framework — **Enable Banking** (UK/EU, incl. HSBC), **SimpleFIN** (US), **Plaid** (US/CA) — all BYO-credentials. Build order: **Enable Banking first** (solves the owner's HSBC need, mirrors the GoCardless consent→fetch→normalize client), then **SimpleFIN** (simplest), then **Plaid** (heaviest). Each ships the same way as the GoCardless/OFX cores: a Qt-free client + a `normalize_*` into the existing `stage_feed` path + a headless probe + offscreen tests, with UI wiring after.
 
+**All three provider cores shipped (2026-06-15)** — Qt-free clients, `normalize_*` into the existing `stage_feed` dedup/commit, headless `*-check` probes, offscreen-tested (request building, normalize, idempotent re-fetch):
+- **Enable Banking** (`feeds/enablebanking.py`, `cli enablebanking-check`) — RS256-JWT auth (new `cryptography` dep); `list_aspsps` → `start_authorization` (browser consent) → `create_session(code)` → `fetch_transactions` (continuation_key paging). `normalize_enablebanking`: booked-only, magnitude + CRDT/DBIT → signed, counterparty payee, `entry_reference` → fitid.
+- **SimpleFIN** (`feeds/simplefin.py`, `cli simplefin-check`) — `claim_access_url(setup_token)` → durable access URL; one `GET /accounts` returns accounts + inline transactions; embedded creds sent as Basic auth (kept out of the URL). `normalize_simplefin`: signed amount, epoch `posted` → date.
+- **Plaid** (`feeds/plaid.py`, `cli plaid-check`) — `client_id`+`secret` in each body; `create_link_token` → `exchange_public_token` → `accounts_get` + incremental `sync_transactions` (cursor paging, persists `next_cursor`). `normalize_plaid`: **inverted sign** (positive = debit), pending dropped, per-account filter (an Item spans accounts).
+
+Next: UI wiring for the three on **Manage ▸ Bank Feeds…** (the OFX dialog generalises to a provider picker), incl. the browser-consent round-trips (Enable Banking auth code, Plaid Link) and per-Item cursor/access-token persistence in `setting`.
+
 ## Verification
 
 Round 1 (offscreen, no live network): the normalizer maps GoCardless booked/pending rows to the parser raw-txn shape (sign→tx_type, transactionId→fitid, names/remittance→payee/memo); `stage_feed` runs them through `_classify_and_stage` and `commit_import` with correct dedup on re-fetch (idempotent) and manual-match behaviour; `feed_account` CRUD round-trips and cascades on account delete; the GoCardless client builds correct requests (URLs, headers, bodies) against a stubbed transport. Live bank connectivity is verified by the owner against their own GoCardless secret (a headless check precedes the UI).
