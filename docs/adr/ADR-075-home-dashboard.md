@@ -63,6 +63,16 @@ A new `mfl_desktop/home_dashboard.py` exposes a `HomeData` dataclass and `gather
 
 ---
 
+## Amendment (2026-06-15, first-use feedback)
+
+Three fixes after the owner ran it:
+
+1. **Didn't launch to Home.** `__main__.py` always resolved the first account and passed it as the initial selection, so the default-landing branch never fired. It now keeps the account-existence/seed check but leaves `account_iri` as `None`, so the window opens on Home; an explicit `--account-iri` still deep-links.
+2. **Big blank space on the right.** The two-card-per-row `QGridLayout` gave both cards a row a shared height, so the short right-column cards left a large gap beside the very tall Accounts card. Replaced with **two independently-packed `QVBoxLayout` columns**, greedy-balanced by a per-card height weight (`card._weight`), so each column packs to its own height.
+3. **Accounts card too long.** The Accounts card now uses a **collapsible accordion** — one row per family (label + subtotal, a ▸/▾ chevron), collapsed by default, expanding to the individual accounts on click. Keeps the card concise and its balancer weight small.
+
+Closed accounts are already excluded (`include_closed=False`); an account merely *named* "(Closed) …" but not archived still shows — closing it via ADR-069 drops it.
+
 ## Verification
 
 Offscreen: `gather_home_data` on a seeded multi-account file returns the right net-worth total (FX-excluded accounts noted), the current-month budget planned/spent, top-5 payees/categories for the month, the latest-N recent rows, upcoming/overdue bills, and per-security top gains/losses aggregated across investment accounts; empty-file and no-budget/no-investment paths degrade to hidden cards. Offscreen Qt: the Home view builds from `HomeData`, the sidebar exposes a Home row emitting `("home", None)`, the register window defaults to the Home page on launch and switches to the register page on account/report selection, and card click signals reach the existing navigation handlers.

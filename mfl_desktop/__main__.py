@@ -185,7 +185,10 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        account_iri = row["iri"]
+        # ADR-075: the existence/seed check above stays, but we deliberately
+        # leave account_iri as None so the window opens on the Home dashboard
+        # (the default landing view) rather than the first account's register.
+        # An explicit --account-iri on the CLI still deep-links to that account.
 
     win = RegisterWindow(repo, account_iri)
     win.show()

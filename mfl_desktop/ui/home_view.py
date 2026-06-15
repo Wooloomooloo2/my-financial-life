@@ -14,7 +14,6 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -108,6 +107,37 @@ class _Row(QFrame):
         super().mousePressEvent(e)
 
 
+class _AccordionHeader(QFrame):
+    """A clickable family header (chevron + label + subtotal) that toggles its
+    account rows. Starts collapsed so the Accounts card stays concise."""
+    toggled = Signal(bool)
+
+    def __init__(self, title: str, value: str, parent=None) -> None:
+        super().__init__(parent)
+        self._expanded = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet(":hover { background: #f1f5f9; border-radius: 6px; }")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 4, 2, 4)
+        lay.setSpacing(6)
+        self._chev = QLabel("▸")
+        self._chev.setStyleSheet("color: #64748b;")
+        self._chev.setFixedWidth(12)
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("font-weight: 600; color: #334155;")
+        value_lbl = QLabel(value)
+        value_lbl.setStyleSheet("font-weight: 600; color: #334155;")
+        lay.addWidget(self._chev)
+        lay.addWidget(title_lbl, stretch=1)
+        lay.addWidget(value_lbl)
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        self._expanded = not self._expanded
+        self._chev.setText("▾" if self._expanded else "▸")
+        self.toggled.emit(self._expanded)
+        super().mousePressEvent(e)
+
+
 class HomeView(QWidget):
     net_worth_requested = Signal()
     budget_requested = Signal()
@@ -139,17 +169,37 @@ class HomeView(QWidget):
             return
         container = QWidget()
         container.setStyleSheet("background: #f8fafc;")
-        grid = QGridLayout(container)
-        grid.setContentsMargins(16, 16, 16, 16)
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(16)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
+        outer = QHBoxLayout(container)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(16)
 
-        cards = [c for c in self._build_cards(data) if c is not None]
-        for i, card in enumerate(cards):
-            grid.addWidget(card, i // 2, i % 2, Qt.AlignTop)
-        grid.setRowStretch((len(cards) + 1) // 2, 1)
+        # Two independently-packed columns (greedy-balanced by an approximate
+        # per-card height weight) so a tall card never leaves the other column
+        # with a big blank gap — the QGridLayout's shared row heights did.
+        left = QVBoxLayout()
+        right = QVBoxLayout()
+        left.setSpacing(16)
+        right.setSpacing(16)
+        left_w = right_w = 0
+        for card in self._build_cards(data):
+            if card is None:
+                continue
+            weight = getattr(card, "_weight", 4)
+            if left_w <= right_w:
+                left.addWidget(card)
+                left_w += weight
+            else:
+                right.addWidget(card)
+                right_w += weight
+        left.addStretch(1)
+        right.addStretch(1)
+
+        left_wrap = QWidget()
+        left_wrap.setLayout(left)
+        right_wrap = QWidget()
+        right_wrap.setLayout(right)
+        outer.addWidget(left_wrap, 1)
+        outer.addWidget(right_wrap, 1)
 
         self._scroll.setWidget(container)
         self._container = container
@@ -170,6 +220,7 @@ class HomeView(QWidget):
 
     def _net_worth_card(self, data) -> _Card:
         card = _Card("NET WORTH")
+        card._weight = 3 if data.net_worth_excluded else 2
         big = QLabel(_fmt(data.net_worth, data.display_ccy, decimals=0))
         big.setStyleSheet("font-size: 30px; font-weight: 700; color: #0f172a;")
         card.body().addWidget(big)
@@ -190,6 +241,7 @@ class HomeView(QWidget):
         if b is None:
             return None
         card = _Card(f"BUDGET · {b.month_label.upper()}")
+        card._weight = 4
         line = QLabel(
             f"{_fmt(b.spent, b.currency)} of {_fmt(b.planned, b.currency)} spent"
         )
@@ -220,23 +272,32 @@ class HomeView(QWidget):
 
     def _accounts_card(self, data) -> _Card:
         card = _Card("ACCOUNTS")
+        # Collapsed, this card is just the family headers — keep its weight
+        # small so the column balancer doesn't treat it as a giant block.
+        card._weight = len(data.account_groups) + 1
         if not data.account_groups:
             card.body().addWidget(_muted("No accounts yet."))
             return card
         for g in data.account_groups:
-            hdr = _Row(g.label, _fmt(g.subtotal, data.display_ccy))
-            hdr.setStyleSheet("font-weight: 600; color: #334155;")  # slate-700
-            card.body().addWidget(hdr)
+            header = _AccordionHeader(g.label, _fmt(g.subtotal, data.display_ccy))
+            card.body().addWidget(header)
+            child = QWidget()
+            child_lay = QVBoxLayout(child)
+            child_lay.setContentsMargins(0, 0, 0, 0)
+            child_lay.setSpacing(0)
             for a in g.accounts:
                 val = (
                     _fmt(a.value, data.display_ccy) if a.value is not None
                     else f"— ({a.currency})"
                 )
-                row = _Row("    " + a.name, val, clickable=True)
+                row = _Row("      " + a.name, val, clickable=True)
                 row.clicked.connect(
                     lambda iri=a.iri: self.account_requested.emit(iri)
                 )
-                card.body().addWidget(row)
+                child_lay.addWidget(row)
+            child.setVisible(False)
+            header.toggled.connect(child.setVisible)
+            card.body().addWidget(child)
         return card
 
     def _bills_card(self, data) -> _Card:
@@ -244,6 +305,7 @@ class HomeView(QWidget):
         if data.bills_overdue:
             title += f"  ·  {data.bills_overdue} OVERDUE"
         card = _Card(title)
+        card._weight = len(data.bills) + 1
         if not data.bills:
             card.body().addWidget(_muted("Nothing scheduled."))
         else:
@@ -266,6 +328,7 @@ class HomeView(QWidget):
 
     def _recent_card(self, data) -> _Card:
         card = _Card("RECENT ACTIVITY")
+        card._weight = len(data.recent) + 1
         if not data.recent:
             card.body().addWidget(_muted("No transactions yet."))
             return card
@@ -285,6 +348,7 @@ class HomeView(QWidget):
 
     def _top_payees_card(self, data) -> _Card:
         card = _Card("TOP PAYEES · THIS MONTH")
+        card._weight = len(data.top_payees) + 1
         if not data.top_payees:
             card.body().addWidget(_muted("No spending yet this month."))
         else:
@@ -298,6 +362,7 @@ class HomeView(QWidget):
 
     def _top_categories_card(self, data) -> _Card:
         card = _Card("TOP CATEGORIES · THIS MONTH")
+        card._weight = len(data.top_categories) + 1
         if not data.top_categories:
             card.body().addWidget(_muted("No spending yet this month."))
         else:
@@ -313,6 +378,7 @@ class HomeView(QWidget):
         if not data.invest_gains and not data.invest_losses:
             return None
         card = _Card("INVESTMENT PERFORMANCE · UNREALISED")
+        card._weight = len(data.invest_gains) + len(data.invest_losses) + 2
         if data.invest_gains:
             card.body().addWidget(_section_label("Top gains"))
             for h in data.invest_gains:
