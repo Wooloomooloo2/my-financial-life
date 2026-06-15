@@ -8,12 +8,12 @@ Balance column hidden — see project-all-transactions-view in memory).
 from __future__ import annotations
 
 import calendar
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, QStandardPaths
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
@@ -525,6 +525,7 @@ class RegisterWindow(QMainWindow):
         ))
         self._import_action.setEnabled(True)
         self._import_action.setToolTip("Import OFX / QFX / QIF / CSV into this account")
+        self._import_latest_action.setEnabled(True)
         self._set_account_action_state(account_selected=True)
 
     def _show_all_transactions(self) -> None:
@@ -535,6 +536,7 @@ class RegisterWindow(QMainWindow):
             self._repo, account_id=None, since=self._effective_since(),
         ))
         self._import_action.setEnabled(False)
+        self._import_latest_action.setEnabled(False)
         self._import_action.setToolTip(
             "Select an account in the sidebar to import into it"
         )
@@ -767,6 +769,15 @@ class RegisterWindow(QMainWindow):
         self._import_action.setShortcut(QKeySequence("Ctrl+I"))
         self._import_action.triggered.connect(self._on_import)
         file_menu.addAction(self._import_action)
+
+        self._import_latest_action = QAction("Import &Latest", self)
+        self._import_latest_action.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        self._import_latest_action.setToolTip(
+            "Import the newest statement file from this account's import folder"
+        )
+        self._import_latest_action.triggered.connect(self._on_import_latest)
+        file_menu.addAction(self._import_latest_action)
+        self.addAction(self._import_latest_action)
 
         file_menu.addSeparator()
 
@@ -2106,6 +2117,75 @@ class RegisterWindow(QMainWindow):
 
     # ── import ──
 
+    # ── per-account import memory + Import latest (ADR-077 Track 1) ──
+
+    _IMPORT_EXTS = (".ofx", ".qfx", ".qif", ".csv")
+
+    def _import_dir_for_account(self) -> str:
+        """The folder to open the import picker in for the current account:
+        the one last imported from (remembered per account), else the OS
+        Downloads folder, else home."""
+        if self._account is not None:
+            saved = self._repo.get_setting(f"import_dir:{self._account.id}")
+            if saved and Path(saved).is_dir():
+                return saved
+        downloads = QStandardPaths.writableLocation(
+            QStandardPaths.DownloadLocation
+        )
+        if downloads and Path(downloads).is_dir():
+            return downloads
+        return str(Path.home())
+
+    def _remember_import_dir(self, path: str) -> None:
+        if self._account is not None:
+            try:
+                self._repo.set_setting(
+                    f"import_dir:{self._account.id}", str(Path(path).parent),
+                )
+            except Exception:
+                pass
+
+    def _newest_import_file(self, folder: str) -> Optional[Path]:
+        """Newest file with a recognised statement extension in ``folder``."""
+        try:
+            candidates = [
+                p for p in Path(folder).iterdir()
+                if p.is_file() and p.suffix.lower() in self._IMPORT_EXTS
+            ]
+        except OSError:
+            return None
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    def _on_import_latest(self) -> None:
+        if self._account is None:
+            QMessageBox.information(
+                self, "Pick an account",
+                "Select an account in the sidebar first — imports always "
+                "target a specific account.",
+            )
+            return
+        folder = self._import_dir_for_account()
+        newest = self._newest_import_file(folder)
+        if newest is None:
+            QMessageBox.information(
+                self, "Nothing to import",
+                f"No OFX / QFX / QIF / CSV file found in:\n{folder}\n\n"
+                f"Download a statement there (or use Import… to pick one "
+                f"elsewhere — that folder is then remembered for this account).",
+            )
+            return
+        when = datetime.fromtimestamp(newest.stat().st_mtime)
+        if QMessageBox.question(
+            self, "Import latest",
+            f"Import the newest statement into {self._account.name}?\n\n"
+            f"{newest.name}\n({folder} · {when:%-d %b %Y %H:%M})",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        ) != QMessageBox.Yes:
+            return
+        self._import_file(str(newest))
+
     def _on_import(self) -> None:
         if self._account is None:
             QMessageBox.information(
@@ -2115,11 +2195,15 @@ class RegisterWindow(QMainWindow):
             )
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import transactions", "",
+            self, "Import transactions", self._import_dir_for_account(),
             "Bank statements (*.ofx *.qfx *.qif *.csv);;All files (*)",
         )
         if not path:
             return
+        self._remember_import_dir(path)
+        self._import_file(path)
+
+    def _import_file(self, path: str) -> None:
         try:
             file_bytes = Path(path).read_bytes()
             token, next_step = self._service.parse_and_stage(
