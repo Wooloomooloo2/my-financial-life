@@ -53,6 +53,7 @@ from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.home_view import HomeView
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
+from mfl_desktop.ui.ofx_feeds_dialog import OfxFeedsDialog
 from mfl_desktop.ui.securities_dialog import SecuritiesDialog
 from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
@@ -898,6 +899,13 @@ class RegisterWindow(QMainWindow):
         )
         self._manage_securities_action.triggered.connect(self._on_manage_securities)
         manage_menu.addAction(self._manage_securities_action)
+
+        self._manage_feeds_action = QAction("&Bank Feeds…", self)
+        self._manage_feeds_action.setToolTip(
+            "OFX Direct Connect — free auto-feed for US banks that support it"
+        )
+        self._manage_feeds_action.triggered.connect(self._on_manage_feeds)
+        manage_menu.addAction(self._manage_feeds_action)
 
         self._reconcile_transfers_action = QAction(
             "&Reconcile Transfers…", self,
@@ -2817,6 +2825,21 @@ class RegisterWindow(QMainWindow):
         afterward in case prices changed an investment account's market value."""
         dialog = SecuritiesDialog(self._repo, parent=self)
         dialog.exec()
+        self._refresh_sidebar_balances()
+
+    def _on_manage_feeds(self) -> None:
+        """Open Manage → Bank Feeds… (ADR-077). The dialog manages OFX Direct
+        Connect connections and runs Update, which stages fetched transactions
+        through the same import path (dedup/match/commit) as a file. We refresh
+        the register + sidebar afterward if anything was actually imported."""
+        dialog = OfxFeedsDialog(
+            self._repo, self._service,
+            on_updated=self._refresh_after_feed_update, parent=self,
+        )
+        dialog.exec()
+
+    def _refresh_after_feed_update(self) -> None:
+        self._refresh_categories_view()
         self._refresh_sidebar_balances()
 
     def _on_reconcile_transfers(self) -> None:
