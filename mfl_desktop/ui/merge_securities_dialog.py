@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import Repository, SecurityRow
+from mfl_desktop.ui import tokens
 
 _SYMBOL = "$"
 
@@ -98,7 +99,7 @@ class MergeSecuritiesDialog(QDialog):
             "is deleted. This can't be undone."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(intro, "QLabel { color: {muted_strong}; }")
         outer.addWidget(intro)
 
         # ── pick the other record ──
@@ -139,7 +140,7 @@ class MergeSecuritiesDialog(QDialog):
 
         self._confirm = QLabel("")
         self._confirm.setWordWrap(True)
-        self._confirm.setStyleSheet("QLabel { color: #b45309; }")
+        tokens.themed(self._confirm, "QLabel { color: {warning}; }")
         outer.addWidget(self._confirm)
 
         # ── buttons ──
@@ -232,7 +233,7 @@ class MergeSecuritiesDialog(QDialog):
 
         def cap(text: str) -> QLabel:
             lab = QLabel(text)
-            lab.setStyleSheet("QLabel { color: #64748B; }")
+            tokens.themed(lab, "QLabel { color: {muted}; }")
             return lab
 
         def head(text: str) -> QLabel:

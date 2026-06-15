@@ -18,6 +18,7 @@ ancestor, or any descendant matches, so a matched leaf is always reachable from
 its root.
 """
 from __future__ import annotations
+from mfl_desktop.ui import tokens
 
 from typing import Iterable, Optional
 
@@ -60,9 +61,7 @@ class CategoryTreePanel(QWidget):
         self._items: dict[int, QTreeWidgetItem] = {}
 
         title_label = QLabel(title)
-        title_label.setStyleSheet(
-            "font-weight: bold; color: #334155; padding-top: 4px;"
-        )
+        tokens.themed(title_label, "font-weight: bold; color: {heading}; padding-top: 4px;")
 
         self._search = QLineEdit()
         self._search.setPlaceholderText(placeholder)
@@ -74,10 +73,7 @@ class CategoryTreePanel(QWidget):
         for btn in (self._select_all_btn, self._deselect_all_btn):
             btn.setFlat(True)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton { color: #2563eb; padding: 0 4px; }"
-                "QPushButton:hover { text-decoration: underline; }"
-            )
+            tokens.themed(btn, "QPushButton { color: {accent}; padding: 0 4px; }QPushButton:hover { text-decoration: underline; }")
             btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self._select_all_btn.clicked.connect(lambda: self._set_all(Qt.Checked))
         self._deselect_all_btn.clicked.connect(

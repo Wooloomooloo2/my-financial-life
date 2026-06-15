@@ -51,6 +51,8 @@ from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.home_view import HomeView
+from mfl_desktop.ui import tokens
+from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
 from mfl_desktop.ui.securities_dialog import SecuritiesDialog
 from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
@@ -935,6 +937,25 @@ class RegisterWindow(QMainWindow):
         budget_menu.addAction(self._budget_action)
         # Expose on the window so the shortcut fires while the table has focus.
         self.addAction(self._budget_action)
+
+        # ── View ▸ Appearance (ADR-076) ──
+        view_menu = self.menuBar().addMenu("&View")
+        self._dark_mode_action = QAction("&Dark Mode", self)
+        self._dark_mode_action.setCheckable(True)
+        self._dark_mode_action.setChecked(tokens.current_theme() == "dark")
+        self._dark_mode_action.toggled.connect(self._on_toggle_dark_mode)
+        view_menu.addAction(self._dark_mode_action)
+
+    def _on_toggle_dark_mode(self, on: bool) -> None:
+        """ADR-076: switch the app theme live and persist the choice."""
+        theme = "dark" if on else "light"
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, theme)
+        try:
+            self._repo.set_setting(THEME_SETTING_KEY, theme)
+        except Exception:
+            pass
 
     # ── new / delete transaction ──
 
@@ -2763,17 +2784,13 @@ class RegisterWindow(QMainWindow):
             self._schedules_btn.setText(
                 f"⚠ {self._SCHEDULES_LABEL} ({summary.total})"
             )
-            self._schedules_btn.setStyleSheet(
-                "QPushButton { color: #b91c1c; font-weight: 600; }"
-            )
+            tokens.themed(self._schedules_btn, "QPushButton { color: {negative_strong}; font-weight: 600; }")
         else:
             # Amber — nothing overdue yet, just a heads-up for the next 3 days.
             self._schedules_btn.setText(
                 f"{self._SCHEDULES_LABEL} ● {summary.due_soon}"
             )
-            self._schedules_btn.setStyleSheet(
-                "QPushButton { color: #b45309; font-weight: 600; }"
-            )
+            tokens.themed(self._schedules_btn, "QPushButton { color: {warning}; font-weight: 600; }")
 
         bits: list[str] = []
         if summary.overdue:

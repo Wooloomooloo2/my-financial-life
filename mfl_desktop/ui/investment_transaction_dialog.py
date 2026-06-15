@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import AccountSummary, Repository, TransactionRow
 from mfl_desktop.import_engine.qif_actions import is_income, is_reinvest
 from mfl_desktop.prices import lookup_symbol_name
+from mfl_desktop.ui import tokens
 
 # Curated action list for manual entry (label, canonical QIF action stored in
 # txn.action — must match the strings the holdings/returns engines classify via
@@ -117,7 +118,7 @@ class InvestmentTransactionDialog(QDialog):
         outer.addLayout(self._form)
 
         acct_label = QLabel(f"{account.name}  ·  {account.currency}")
-        acct_label.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(acct_label, "QLabel { color: {muted_strong}; }")
         self._form.addRow("Account:", acct_label)
 
         self._date = QDateEdit()
@@ -183,7 +184,7 @@ class InvestmentTransactionDialog(QDialog):
 
         self._hint = QLabel("")
         self._hint.setWordWrap(True)
-        self._hint.setStyleSheet("QLabel { color: #64748B; font-size: 11px; }")
+        tokens.themed(self._hint, "QLabel { color: {muted}; font-size: 11px; }")
         outer.addWidget(self._hint)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)

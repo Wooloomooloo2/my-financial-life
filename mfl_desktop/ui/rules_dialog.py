@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import Repository, RuleRow
 from mfl_desktop.rules_engine import MATCH_FIELDS, MATCHER_KINDS
 from mfl_desktop.ui.rule_edit_dialog import RuleEditDialog
+from mfl_desktop.ui import tokens
 
 
 def _when_text(r: RuleRow) -> str:
@@ -103,7 +104,7 @@ class RulesDialog(QDialog):
             "Payee aliases — implicit “is exactly → payee” rules "
             "(manage in Payees…)"
         )
-        alias_hdr.setStyleSheet("color: #64748b; margin-top: 8px;")  # slate-500
+        tokens.themed(alias_hdr, "color: {muted}; margin-top: 8px;")  # slate-500
         layout.addWidget(alias_hdr)
         layout.addWidget(self._alias_table, stretch=2)
         layout.addWidget(buttons)

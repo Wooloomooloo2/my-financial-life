@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import AccountSummary, Repository
+from mfl_desktop.ui import tokens
 
 
 _SYMBOL = {"GBP": "£", "USD": "$", "EUR": "€"}
@@ -156,7 +157,7 @@ class TransferDestinationDialog(QDialog):
         )
         this_lbl = QLabel(this_html)
         this_lbl.setTextFormat(Qt.RichText)
-        this_lbl.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(this_lbl, "QLabel { color: {muted_strong}; }")
         outer.addWidget(this_lbl)
 
         # Other-account combo row.
@@ -188,15 +189,11 @@ class TransferDestinationDialog(QDialog):
         fx_layout.addLayout(amt_row)
 
         self._rate_label = QLabel(" ")
-        self._rate_label.setStyleSheet(
-            "QLabel { color: #475569; font-size: 11px; }"
-        )
+        tokens.themed(self._rate_label, "QLabel { color: {muted_strong}; font-size: 11px; }")
         fx_layout.addWidget(self._rate_label)
 
         self._hint_label = QLabel(" ")
-        self._hint_label.setStyleSheet(
-            "QLabel { color: #94A3B8; font-size: 11px; }"
-        )
+        tokens.themed(self._hint_label, "QLabel { color: {subtle}; font-size: 11px; }")
         self._hint_label.setWordWrap(True)
         fx_layout.addWidget(self._hint_label)
 

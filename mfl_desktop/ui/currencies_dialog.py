@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.fx import FxFetchError, refresh_latest_into
+from mfl_desktop.ui import tokens
 
 
 _OXR_SIGNUP_URL = "https://openexchangerates.org/signup/free"
@@ -101,14 +102,14 @@ class CurrenciesDialog(QDialog):
         disclaimer = QLabel(
             "Stored inside this .mfl file. Remove before sharing snapshots."
         )
-        disclaimer.setStyleSheet("QLabel { color: #64748B; font-size: 11px; }")
+        tokens.themed(disclaimer, "QLabel { color: {muted}; font-size: 11px; }")
         prov_layout.addWidget(disclaimer)
 
         action_row = QHBoxLayout()
         self._refresh_status = QLabel(
             f"Last refresh: {_fmt_refresh_time(self._repo.get_setting('oxr_last_refresh_at'))}"
         )
-        self._refresh_status.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(self._refresh_status, "QLabel { color: {muted_strong}; }")
         action_row.addWidget(self._refresh_status, 1)
         self._refresh_btn = QPushButton("Refresh now")
         self._refresh_btn.clicked.connect(self._on_refresh_now)
@@ -206,7 +207,7 @@ class CurrenciesDialog(QDialog):
             "rate must be within the tolerance of the FX rate for that day."
         )
         match_hint.setWordWrap(True)
-        match_hint.setStyleSheet("QLabel { color: #64748B; font-size: 11px; }")
+        tokens.themed(match_hint, "QLabel { color: {muted}; font-size: 11px; }")
         match_form.addRow(match_hint)
 
         outer.addWidget(match_box)

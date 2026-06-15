@@ -64,6 +64,7 @@ from mfl_desktop.ui.budget_drilldown_window import BudgetDrillDownWindow
 from mfl_desktop.ui.budget_monthly_view import BudgetMonthlyView
 from mfl_desktop.ui.budget_setup_dialog import BudgetSetupDialog
 from mfl_desktop.ui.goal_dialog import GoalDialog
+from mfl_desktop.ui import tokens
 
 _MONTH_ABBR = [
     "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -512,11 +513,7 @@ class _GoalCard(QFrame):
         self._on_edit = on_edit
         self.setFrameShape(QFrame.StyledPanel)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(
-            "_GoalCard { border: 1px solid #e2e8f0; border-radius: 8px; "
-            "background: #ffffff; } "
-            "_GoalCard:hover { border-color: #94a3b8; }"
-        )
+        tokens.themed(self, "_GoalCard { border: 1px solid {border}; border-radius: 8px; background: {surface}; } _GoalCard:hover { border-color: {subtle}; }")
         self.setFixedWidth(208)
 
         lay = QVBoxLayout(self)
@@ -534,7 +531,7 @@ class _GoalCard(QFrame):
         if prog.rate_missing:
             meta += "  *"
         sub_meta = QLabel(meta)
-        sub_meta.setStyleSheet("color: #94a3b8; font-size: 11px;")  # slate-400
+        tokens.themed(sub_meta, "color: {subtle}; font-size: 11px;")  # slate-400
         if prog.rate_missing:
             sub_meta.setToolTip(
                 "An account couldn't be converted to the goal currency "
@@ -563,14 +560,14 @@ class _GoalCard(QFrame):
             need = QLabel(
                 f"Need {prog.currency} {_fmt(prog.required_monthly)}/mo"
             )
-            need.setStyleSheet("color: #475569;")  # slate-600
+            tokens.themed(need, "color: {muted_strong};")  # slate-600
             lay.addWidget(need)
 
         lay.addWidget(_GoalBar(prog.progress_pct, colour))
         pct = QLabel(f"{prog.progress_pct:.0f}% paid"
                      if prog.kind == "paydown"
                      else f"{prog.progress_pct:.0f}% saved")
-        pct.setStyleSheet("color: #64748b; font-size: 11px;")  # slate-500
+        tokens.themed(pct, "color: {muted}; font-size: 11px;")  # slate-500
         lay.addWidget(pct)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -671,7 +668,7 @@ class BudgetWindow(QMainWindow):
             "accounts and categories."
         )
         self._empty_label.setAlignment(Qt.AlignCenter)
-        self._empty_label.setStyleSheet("color: #64748b;")
+        tokens.themed(self._empty_label, "color: {muted};")
         root.addWidget(self._empty_label)
 
         self.setCentralWidget(central)

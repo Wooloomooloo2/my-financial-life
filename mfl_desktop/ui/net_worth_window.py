@@ -53,6 +53,7 @@ from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui.account_dialog import AccountDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.donut_chart import DonutChart, DonutChild, DonutSegment
+from mfl_desktop.ui import tokens
 
 
 # Family → (display label, color, kind) where kind ∈ {"asset","debt"}.
@@ -144,7 +145,7 @@ class NetWorthWindow(QMainWindow):
         banner_layout.setContentsMargins(12, 8, 12, 8)
         self._banner_label = QLabel("")
         self._banner_label.setWordWrap(True)
-        self._banner_label.setStyleSheet("color: #92400e; border: none;")
+        tokens.themed(self._banner_label, "color: {warning}; border: none;")
         banner_layout.addWidget(self._banner_label, 1)
         self._banner_btn = QPushButton("Set exchange rate…")
         self._banner_btn.clicked.connect(self._on_set_rate)
@@ -214,7 +215,7 @@ class NetWorthWindow(QMainWindow):
         layout.setSpacing(8)
 
         title = QLabel("Net Worth")
-        title.setStyleSheet("color: #6b7280;")
+        tokens.themed(title, "color: {muted};")
         title_font = title.font()
         title_font.setPointSize(title_font.pointSize() + 2)
         title.setFont(title_font)
@@ -231,9 +232,7 @@ class NetWorthWindow(QMainWindow):
 
         # Debts donut (smaller) sits beside the legend in a row below.
         debts_donut_title = QLabel("DEBTS")
-        debts_donut_title.setStyleSheet(
-            "color: #6b7280; letter-spacing: 1px; margin-top: 6px;"
-        )
+        tokens.themed(debts_donut_title, "color: {muted}; letter-spacing: 1px; margin-top: 6px;")
         debts_donut = DonutChart()
         debts_donut.setFixedSize(190, 190)
 
@@ -298,7 +297,7 @@ class NetWorthWindow(QMainWindow):
         header_row.addWidget(total_lbl)
 
         subhead = QLabel("WHAT I OWN" if is_asset else "WHAT I OWE")
-        subhead.setStyleSheet("color: #6b7280; letter-spacing: 1px;")
+        tokens.themed(subhead, "color: {muted}; letter-spacing: 1px;")
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -595,9 +594,7 @@ class NetWorthWindow(QMainWindow):
 
     def _heading_row(self, text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet(
-            "color: #6b7280; letter-spacing: 1px; margin-top: 8px;"
-        )
+        tokens.themed(lbl, "color: {muted}; letter-spacing: 1px; margin-top: 8px;")
         return lbl
 
     def _legend_row(self, ft: _FamilyTotal) -> QWidget:
@@ -613,10 +610,10 @@ class NetWorthWindow(QMainWindow):
         )
 
         label = QLabel(ft.label)
-        label.setStyleSheet("color: #111827;")
+        tokens.themed(label, "color: {text};")
 
         amount = QLabel(self._format(ft.total))
-        amount.setStyleSheet("color: #111827; font-weight: bold;")
+        tokens.themed(amount, "color: {text}; font-weight: bold;")
         amount.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         layout.addWidget(swatch)

@@ -46,6 +46,7 @@ from mfl_desktop.db.repository import (
     LinkExisting,
     TransferCandidate,
 )
+from mfl_desktop.ui import tokens
 
 
 # Strength chip colours — match the slate / blue palette established by
@@ -105,7 +106,7 @@ def _source_summary_label(
     )
     lbl = QLabel(text)
     lbl.setTextFormat(Qt.RichText)
-    lbl.setStyleSheet("QLabel { color: #475569; }")
+    tokens.themed(lbl, "QLabel { color: {muted_strong}; }")
     return lbl
 
 
@@ -158,10 +159,7 @@ class TransferMatchConfirmDialog(QDialog):
         # introduced by ADR-034.
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
-        card.setStyleSheet(
-            "QFrame { background: white; "
-            "border: 1px solid #E2E8F0; border-radius: 10px; padding: 10px; }"
-        )
+        tokens.themed(card, "QFrame { background: white; border: 1px solid {border}; border-radius: 10px; padding: 10px; }")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(12, 10, 12, 10)
         card_layout.setSpacing(6)
@@ -195,7 +193,7 @@ class TransferMatchConfirmDialog(QDialog):
                     f"{_fmt_amount(candidate.expected_amount, candidate.account_currency)}"
                 )
         meta_lbl = QLabel(" · ".join(meta))
-        meta_lbl.setStyleSheet("QLabel { color: #475569; font-size: 12px; }")
+        tokens.themed(meta_lbl, "QLabel { color: {muted_strong}; font-size: 12px; }")
         card_layout.addWidget(meta_lbl)
         layout.addWidget(card)
 
@@ -514,7 +512,7 @@ class BulkTransferReviewDialog(QDialog):
                 "scoring option; change them as needed."
             )
             hint.setWordWrap(True)
-            hint.setStyleSheet("QLabel { color: #64748B; font-size: 11px; }")
+            tokens.themed(hint, "QLabel { color: {muted}; font-size: 11px; }")
             outer.addWidget(hint)
 
         buttons = QDialogButtonBox(
@@ -564,7 +562,7 @@ class BulkTransferReviewDialog(QDialog):
     def _populate_decision_cell(self, row: int, a: BulkRowAnalysis) -> None:
         if len(a.candidates) == 0:
             label = QLabel(f"Create new partner in {self._other_account_name}")
-            label.setStyleSheet("QLabel { color: #2563EB; padding: 2px 6px; }")
+            tokens.themed(label, "QLabel { color: {accent}; padding: 2px 6px; }")
             self._table.setCellWidget(row, 4, label)
             self._row_combos[row] = None
             return
@@ -574,7 +572,7 @@ class BulkTransferReviewDialog(QDialog):
                 f"{c.posted_date} · {c.payee_name or '(no payee)'} · "
                 f"{_fmt_amount(c.amount, c.account_currency)}"
             )
-            label.setStyleSheet("QLabel { color: #16A34A; padding: 2px 6px; }")
+            tokens.themed(label, "QLabel { color: {positive}; padding: 2px 6px; }")
             self._table.setCellWidget(row, 4, label)
             self._row_combos[row] = None
             return

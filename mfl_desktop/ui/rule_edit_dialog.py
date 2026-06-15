@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import CategoryChoice, Repository, RuleRow
 from mfl_desktop.rules_engine import MATCH_FIELDS, MATCHER_KINDS
 from mfl_desktop.ui.category_picker import make_category_picker, selected_category_id
+from mfl_desktop.ui import tokens
 
 _NO_PAYEE = "— none —"
 _NO_CATEGORY = "— none —"
@@ -98,7 +99,7 @@ class RuleEditDialog(QDialog):
             "category, or both."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #64748b;")  # slate-500
+        tokens.themed(hint, "color: {muted};")  # slate-500
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel

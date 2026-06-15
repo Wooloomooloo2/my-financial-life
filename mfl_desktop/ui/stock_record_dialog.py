@@ -56,6 +56,7 @@ from mfl_desktop.holdings import compute_holdings_view
 from mfl_desktop.prices import PriceFetchError, backfill_security_history_into
 from mfl_desktop.ui.merge_securities_dialog import MergeSecuritiesDialog
 from mfl_desktop.ui.price_history_chart import PriceHistoryChart
+from mfl_desktop.ui import tokens
 
 # Display currency for quotes / cash on this screen. The owner's portfolio is
 # single-currency USD and prices are USD quotes; a per-account currency lookup
@@ -148,7 +149,7 @@ class StockRecordDialog(QDialog):
         btn_row.addWidget(self._merge_btn)
         btn_row.addStretch(1)
         self._header_status = QLabel("")
-        self._header_status.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(self._header_status, "QLabel { color: {muted_strong}; }")
         btn_row.addWidget(self._header_status)
         form.addRow("", self._wrap(btn_row))
         return box
@@ -204,7 +205,7 @@ class StockRecordDialog(QDialog):
             "trade-derived ones."
         )
         manual_note.setWordWrap(True)
-        manual_note.setStyleSheet("QLabel { color: #64748B; font-size: 11px; }")
+        tokens.themed(manual_note, "QLabel { color: {muted}; font-size: 11px; }")
         pv.addWidget(manual_note)
         v.addWidget(prices_box, 1)
         return pane
@@ -232,7 +233,7 @@ class StockRecordDialog(QDialog):
                 continue
             r, c = divmod(i, 2)
             cap = QLabel(label + ":")
-            cap.setStyleSheet("QLabel { color: #64748B; }")
+            tokens.themed(cap, "QLabel { color: {muted}; }")
             val = QLabel("—")
             val.setStyleSheet("QLabel { font-weight: 600; }")
             grid.addWidget(cap, r, c * 2)
@@ -240,7 +241,7 @@ class StockRecordDialog(QDialog):
             self._pos_labels[key] = val
         self._pos_note = QLabel("")
         self._pos_note.setWordWrap(True)
-        self._pos_note.setStyleSheet("QLabel { color: #b45309; font-size: 11px; }")
+        tokens.themed(self._pos_note, "QLabel { color: {warning}; font-size: 11px; }")
         grid.addWidget(self._pos_note, (len(fields) + 1) // 2, 0, 1, 4)
         v.addWidget(pos_box)
 

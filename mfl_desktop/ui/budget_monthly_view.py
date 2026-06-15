@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop import budget_calc as bc
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.ui import tokens
 
 _MONTH_ABBR = [
     "", "January", "February", "March", "April", "May", "June",
@@ -298,9 +299,7 @@ class BudgetMonthlyView(QWidget):
         f.setBold(True)
         f.setPointSize(9)
         lbl.setFont(f)
-        lbl.setStyleSheet(
-            "color:#475569; background:#f1f5f9; padding:4px 6px;"
-        )
+        tokens.themed(lbl, "color:{muted_strong}; background:{surface_alt}; padding:4px 6px;")
         return lbl
 
     def _envelope_row(self, row: bc.MatrixRow, mi: int) -> QWidget:

@@ -15,6 +15,7 @@ Per ADR-026, hex strings here are the same Tailwind v3 vocabulary as the
 app palette in ``mfl_desktop/ui/theme.py``.
 """
 from __future__ import annotations
+from mfl_desktop.ui import tokens
 
 import math
 
@@ -81,7 +82,7 @@ def legend_chip(name: str, colour: QColor) -> QWidget:
         f"background-color: {colour.name()}; border-radius: 2px;"
     )
     label = QLabel(name)
-    label.setStyleSheet("color: #374151; font-size: 9pt;")
+    tokens.themed(label, "color: {heading}; font-size: 9pt;")
     h.addWidget(swatch)
     h.addWidget(label)
     return chip

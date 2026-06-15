@@ -11,6 +11,7 @@ caller decides what to do on Rejected (typically: restore the previous
 preset selection without changing the visible range).
 """
 from __future__ import annotations
+from mfl_desktop.ui import tokens
 
 from datetime import date
 from typing import Optional
@@ -49,7 +50,7 @@ class CustomPeriodDialog(QDialog):
             "Both ends are inclusive."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #475569;")
+        tokens.themed(intro, "color: {muted_strong};")
 
         self._from_edit = QDateEdit(QDate(initial_from.year,
                                           initial_from.month,

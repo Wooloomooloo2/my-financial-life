@@ -40,6 +40,7 @@ from mfl_desktop.db.repository import (
     TransferPair,
 )
 from mfl_desktop.ui.category_picker import make_category_picker
+from mfl_desktop.ui import tokens
 
 
 _CHIP_COLOURS: dict[str, str] = {
@@ -129,7 +130,7 @@ class TransferReconcileDialog(QDialog):
             f"<span style='color:#64748B'>(change in Manage ▸ Currencies)</span>"
         )
         tunables.setTextFormat(Qt.RichText)
-        tunables.setStyleSheet("QLabel { color: #475569; font-size: 11px; }")
+        tokens.themed(tunables, "QLabel { color: {muted_strong}; font-size: 11px; }")
         outer.addWidget(tunables)
 
         # ── Proposed pairs table ──────────────────────────────────────────
@@ -198,9 +199,7 @@ class TransferReconcileDialog(QDialog):
 
         # ── Buttons ───────────────────────────────────────────────────────
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet(
-            "QLabel { color: #475569; font-size: 11px; }"
-        )
+        tokens.themed(self._status_label, "QLabel { color: {muted_strong}; font-size: 11px; }")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Apply | QDialogButtonBox.Close

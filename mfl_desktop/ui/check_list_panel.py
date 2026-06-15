@@ -16,6 +16,7 @@ currently-visible subset, matching how most apps handle search-scoped
 bulk-toggle (the user filters, then bulks).
 """
 from __future__ import annotations
+from mfl_desktop.ui import tokens
 
 from typing import Iterable, Optional
 
@@ -59,9 +60,7 @@ class CheckListPanel(QWidget):
         self._all_rows: list[tuple[int, str]] = list(rows)
 
         title_label = QLabel(title)
-        title_label.setStyleSheet(
-            "font-weight: bold; color: #334155; padding-top: 4px;"
-        )
+        tokens.themed(title_label, "font-weight: bold; color: {heading}; padding-top: 4px;")
 
         self._search = QLineEdit()
         self._search.setPlaceholderText(placeholder)
@@ -75,10 +74,7 @@ class CheckListPanel(QWidget):
         for btn in (self._select_all_btn, self._deselect_all_btn):
             btn.setFlat(True)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton { color: #2563eb; padding: 0 4px; }"
-                "QPushButton:hover { text-decoration: underline; }"
-            )
+            tokens.themed(btn, "QPushButton { color: {accent}; padding: 0 4px; }QPushButton:hover { text-decoration: underline; }")
             btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self._select_all_btn.clicked.connect(self._on_select_all_visible)
         self._deselect_all_btn.clicked.connect(self._on_deselect_all_visible)

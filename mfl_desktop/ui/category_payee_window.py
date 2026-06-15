@@ -53,6 +53,7 @@ from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter,
 )
+from mfl_desktop.ui import tokens
 
 _PERIOD_LABELS: dict[str, str] = {
     "quarter": "Last Quarter",
@@ -145,9 +146,7 @@ class CategoryPayeeWindow(QMainWindow):
         self._back_button.setVisible(False)
 
         self._name_label = QLabel()
-        self._name_label.setStyleSheet(
-            "color: #334155; font-weight: bold; padding: 4px 8px;"
-        )
+        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
 
         self._group_combo = QComboBox()
         self._group_combo.addItem("Category", "category")
@@ -182,12 +181,10 @@ class CategoryPayeeWindow(QMainWindow):
         top_rule = QFrame()
         top_rule.setFrameShape(QFrame.HLine)
         top_rule.setFrameShadow(QFrame.Sunken)
-        top_rule.setStyleSheet("color: #e2e8f0;")
+        tokens.themed(top_rule, "color: {border};")
 
         self._breadcrumb = QLabel()
-        self._breadcrumb.setStyleSheet(
-            "color: #475569; padding: 6px 12px; background: #f8fafc;"
-        )
+        tokens.themed(self._breadcrumb, "color: {muted_strong}; padding: 6px 12px; background: {canvas};")
 
         # ── chart over table (left) + summary (right) ──
         self._chart = PayeeChart()
@@ -319,28 +316,23 @@ class CategoryPayeeWindow(QMainWindow):
     def _build_summary_panel(self) -> QWidget:
         panel = QFrame()
         panel.setFrameShape(QFrame.NoFrame)
-        panel.setStyleSheet(
-            "QFrame { background: #f8fafc; border-left: 1px solid #e2e8f0; }"
-            "QLabel { background: transparent; }"
-        )
+        tokens.themed(panel, "QFrame { background: {canvas}; border-left: 1px solid {border}; }QLabel { background: transparent; }")
         panel.setMinimumWidth(250)
 
         self._period_value = QLabel()
         self._period_value.setWordWrap(True)
-        self._period_value.setStyleSheet("color: #0f172a;")
+        tokens.themed(self._period_value, "color: {text};")
         self._filters_value = QLabel()
         self._filters_value.setWordWrap(True)
-        self._filters_value.setStyleSheet("color: #475569;")
+        tokens.themed(self._filters_value, "color: {muted_strong};")
         self._total_value = QLabel()
-        self._total_value.setStyleSheet(
-            "color: #0f172a; font-size: 22px; font-weight: bold;"
-        )
+        tokens.themed(self._total_value, "color: {text}; font-size: 22px; font-weight: bold;")
         self._rows_value = QLabel()
         self._rows_value.setWordWrap(True)
-        self._rows_value.setStyleSheet("color: #475569;")
+        tokens.themed(self._rows_value, "color: {muted_strong};")
         self._note_value = QLabel()
         self._note_value.setWordWrap(True)
-        self._note_value.setStyleSheet("color: #b45309; font-style: italic;")
+        tokens.themed(self._note_value, "color: {warning}; font-style: italic;")
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -362,10 +354,7 @@ class CategoryPayeeWindow(QMainWindow):
     @staticmethod
     def _mini_section_title(text: str) -> QLabel:
         lab = QLabel(text.upper())
-        lab.setStyleSheet(
-            "color: #94a3b8; font-size: 10px; font-weight: bold; "
-            "letter-spacing: 1px;"
-        )
+        tokens.themed(lab, "color: {subtle}; font-size: 10px; font-weight: bold; letter-spacing: 1px;")
         return lab
 
     # ── refresh / pivot / render ──
@@ -697,10 +686,7 @@ class CategoryPayeeWindow(QMainWindow):
     def _update_name_label(self) -> None:
         if self._loaded_name is None:
             self._name_label.setText("Untitled Category & Payee")
-            self._name_label.setStyleSheet(
-                "color: #64748b; font-style: italic; "
-                "font-weight: bold; padding: 4px 8px;"
-            )
+            tokens.themed(self._name_label, "color: {muted}; font-style: italic; font-weight: bold; padding: 4px 8px;")
             self.setWindowTitle("Category & Payee — Untitled")
             return
         prefix = ""
@@ -711,9 +697,7 @@ class CategoryPayeeWindow(QMainWindow):
                     break
         dirty_mark = "*" if self._dirty else ""
         self._name_label.setText(f"{prefix}{self._loaded_name}{dirty_mark}")
-        self._name_label.setStyleSheet(
-            "color: #334155; font-weight: bold; padding: 4px 8px;"
-        )
+        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
         self.setWindowTitle(f"Category & Payee — {prefix}{self._loaded_name}{dirty_mark}")
 
     def _update_save_buttons(self) -> None:

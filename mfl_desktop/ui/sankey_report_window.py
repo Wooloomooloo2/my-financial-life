@@ -42,6 +42,7 @@ from mfl_desktop.ui.custom_period_dialog import CustomPeriodDialog
 from mfl_desktop.ui.sankey_chart import SankeyChart, SankeyNode
 from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
+from mfl_desktop.ui import tokens
 
 _PERIOD_LABELS = [
     ("Year to date", "ytd"),
@@ -104,7 +105,7 @@ class SankeyReportWindow(QMainWindow):
         outer.addWidget(self._build_controls())
         rule = QFrame()
         rule.setFrameShape(QFrame.HLine)
-        rule.setStyleSheet("color: #e2e8f0;")
+        tokens.themed(rule, "color: {border};")
         outer.addWidget(rule)
 
         self._chart = SankeyChart()
@@ -145,7 +146,7 @@ class SankeyReportWindow(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(12, 8, 12, 8)
         self._name_label = QLabel()
-        self._name_label.setStyleSheet("color: #334155; font-weight: bold;")
+        tokens.themed(self._name_label, "color: {heading}; font-weight: bold;")
         row.addWidget(self._name_label)
         row.addStretch(1)
         row.addWidget(QLabel("Display in:"))
@@ -205,21 +206,18 @@ class SankeyReportWindow(QMainWindow):
         self._filter_button.clicked.connect(self._on_filter)
         row.addWidget(self._filter_button)
         self._filter_note = QLabel("")
-        self._filter_note.setStyleSheet("color: #2563eb;")
+        tokens.themed(self._filter_note, "color: {accent};")
         row.addWidget(self._filter_note)
 
         row.addStretch(1)
         self._period_note = QLabel("")
-        self._period_note.setStyleSheet("color: #64748b;")
+        tokens.themed(self._period_note, "color: {muted};")
         row.addWidget(self._period_note)
         return bar
 
     def _build_summary_panel(self) -> QWidget:
         panel = QFrame()
-        panel.setStyleSheet(
-            "QFrame { background: #f8fafc; border-left: 1px solid #e2e8f0; }"
-            "QLabel { background: transparent; }"
-        )
+        tokens.themed(panel, "QFrame { background: {canvas}; border-left: 1px solid {border}; }QLabel { background: transparent; }")
         panel.setMinimumWidth(260)
         v = QVBoxLayout(panel)
         v.setContentsMargins(16, 16, 16, 16)
@@ -227,42 +225,33 @@ class SankeyReportWindow(QMainWindow):
 
         def title(t: str) -> QLabel:
             lab = QLabel(t.upper())
-            lab.setStyleSheet(
-                "color: #94a3b8; font-size: 10px; font-weight: bold; "
-                "letter-spacing: 1px;"
-            )
+            tokens.themed(lab, "color: {subtle}; font-size: 10px; font-weight: bold; letter-spacing: 1px;")
             return lab
 
         v.addWidget(title("Income"))
         self._income_value = QLabel("—")
-        self._income_value.setStyleSheet(
-            "color: #16a34a; font-size: 20px; font-weight: bold;"
-        )
+        tokens.themed(self._income_value, "color: {positive}; font-size: 20px; font-weight: bold;")
         v.addWidget(self._income_value)
         v.addSpacing(4)
 
         v.addWidget(title("Expenditure"))
         self._expense_value = QLabel("—")
-        self._expense_value.setStyleSheet(
-            "color: #dc2626; font-size: 20px; font-weight: bold;"
-        )
+        tokens.themed(self._expense_value, "color: {negative}; font-size: 20px; font-weight: bold;")
         v.addWidget(self._expense_value)
         v.addSpacing(4)
 
         v.addWidget(title("Amount saved"))
         self._saved_value = QLabel("—")
-        self._saved_value.setStyleSheet(
-            "color: #0f172a; font-size: 20px; font-weight: bold;"
-        )
+        tokens.themed(self._saved_value, "color: {text}; font-size: 20px; font-weight: bold;")
         v.addWidget(self._saved_value)
         self._saving_rate = QLabel("")
-        self._saving_rate.setStyleSheet("color: #475569;")
+        tokens.themed(self._saving_rate, "color: {muted_strong};")
         v.addWidget(self._saving_rate)
 
         v.addSpacing(10)
         self._note = QLabel("")
         self._note.setWordWrap(True)
-        self._note.setStyleSheet("color: #b45309; font-style: italic;")
+        tokens.themed(self._note, "color: {warning}; font-style: italic;")
         v.addWidget(self._note)
         v.addStretch(1)
         return panel

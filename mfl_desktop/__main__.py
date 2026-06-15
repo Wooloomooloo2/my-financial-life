@@ -23,7 +23,7 @@ from mfl_desktop.prices import (
     refresh_latest_prices_into,
 )
 from mfl_desktop.ui.register_window import RegisterWindow
-from mfl_desktop.ui.theme import apply_theme
+from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
 
 
 class _FxRefreshRunnable(QRunnable):
@@ -138,7 +138,6 @@ def main(argv: list[str] | None = None) -> int:
     # Set before any QStandardPaths lookup — it is what makes AppDataLocation
     # resolve to the trailing "MFL" folder (ADR-050 rule 2).
     app.setApplicationName(APP_NAME)
-    apply_theme(app)
 
     # Resolve which database to open (ADR-050 rule 2 + ADR-016).
     seed_if_empty = False
@@ -167,6 +166,10 @@ def main(argv: list[str] | None = None) -> int:
         seed_if_empty = True
 
     repo = Repository(db_path)
+
+    # ADR-076: apply the persisted light/dark theme now the DB is open (before
+    # any window is shown, so there's no flash). Default light.
+    apply_theme(app, repo.get_setting(THEME_SETTING_KEY, "light") or "light")
 
     account_iri = args.account_iri
     if account_iri is None:

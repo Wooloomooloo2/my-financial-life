@@ -56,6 +56,7 @@ from mfl_desktop.ui.investment_returns_filter_dialog import (
 )
 from mfl_desktop.ui.returns_chart import ReturnsChart
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
+from mfl_desktop.ui import tokens
 
 _CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 
@@ -161,9 +162,7 @@ class InvestmentReturnsWindow(QMainWindow):
 
         # ── top bar ──
         self._name_label = QLabel()
-        self._name_label.setStyleSheet(
-            "color: #334155; font-weight: bold; padding: 4px 8px;"
-        )
+        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
         self._filter_button = QPushButton("Filter…")
         self._filter_button.clicked.connect(self._on_open_filter)
         self._save_button = QPushButton("Save")
@@ -183,7 +182,7 @@ class InvestmentReturnsWindow(QMainWindow):
         top_rule = QFrame()
         top_rule.setFrameShape(QFrame.HLine)
         top_rule.setFrameShadow(QFrame.Sunken)
-        top_rule.setStyleSheet("color: #e2e8f0;")
+        tokens.themed(top_rule, "color: {border};")
 
         # ── body: (chart over table) | summary ──
         self._chart = ReturnsChart()
@@ -257,18 +256,15 @@ class InvestmentReturnsWindow(QMainWindow):
     def _build_summary_panel(self) -> QWidget:
         panel = QFrame()
         panel.setFrameShape(QFrame.NoFrame)
-        panel.setStyleSheet(
-            "QFrame { background: #f8fafc; border-left: 1px solid #e2e8f0; }"
-            "QLabel { background: transparent; }"
-        )
+        tokens.themed(panel, "QFrame { background: {canvas}; border-left: 1px solid {border}; }QLabel { background: transparent; }")
         panel.setMinimumWidth(260)
 
         self._period_value = QLabel()
         self._period_value.setWordWrap(True)
-        self._period_value.setStyleSheet("color: #0f172a;")
+        tokens.themed(self._period_value, "color: {text};")
         self._filters_value = QLabel()
         self._filters_value.setWordWrap(True)
-        self._filters_value.setStyleSheet("color: #475569;")
+        tokens.themed(self._filters_value, "color: {muted_strong};")
 
         self._cost_value = QLabel()
         self._market_value = QLabel()
@@ -277,25 +273,23 @@ class InvestmentReturnsWindow(QMainWindow):
         self._dividends_value = QLabel()
         for lab in (self._cost_value, self._market_value, self._unrealized_value,
                     self._realized_value, self._dividends_value):
-            lab.setStyleSheet("color: #0f172a;")
+            tokens.themed(lab, "color: {text};")
 
         self._total_value = QLabel()
-        self._total_value.setStyleSheet(
-            "color: #0f172a; font-size: 22px; font-weight: bold;"
-        )
+        tokens.themed(self._total_value, "color: {text}; font-size: 22px; font-weight: bold;")
         self._roi_value = QLabel()
-        self._roi_value.setStyleSheet("color: #475569;")
+        tokens.themed(self._roi_value, "color: {muted_strong};")
         self._irr_value = QLabel()
-        self._irr_value.setStyleSheet("color: #475569;")
+        tokens.themed(self._irr_value, "color: {muted_strong};")
         self._irr_caption = QLabel(
             "Money-weighted, annualized — accounts for the timing & size of "
             "buys, sells and distributions."
         )
         self._irr_caption.setWordWrap(True)
-        self._irr_caption.setStyleSheet("color: #94a3b8; font-size: 10px;")
+        tokens.themed(self._irr_caption, "color: {subtle}; font-size: 10px;")
         self._note_value = QLabel()
         self._note_value.setWordWrap(True)
-        self._note_value.setStyleSheet("color: #b45309; font-style: italic;")
+        tokens.themed(self._note_value, "color: {warning}; font-style: italic;")
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -338,7 +332,7 @@ class InvestmentReturnsWindow(QMainWindow):
         layout.addWidget(self._perf_combo)
         perf_note = QLabel("Price change over the period (held, priced holdings).")
         perf_note.setWordWrap(True)
-        perf_note.setStyleSheet("color: #94a3b8; font-size: 10px;")
+        tokens.themed(perf_note, "color: {subtle}; font-size: 10px;")
         layout.addWidget(perf_note)
         self._perf_container = QWidget()
         self._perf_layout = QVBoxLayout(self._perf_container)
@@ -352,10 +346,7 @@ class InvestmentReturnsWindow(QMainWindow):
     @staticmethod
     def _mini_section_title(text: str) -> QLabel:
         lab = QLabel(text.upper())
-        lab.setStyleSheet(
-            "color: #94a3b8; font-size: 10px; font-weight: bold; "
-            "letter-spacing: 1px;"
-        )
+        tokens.themed(lab, "color: {subtle}; font-size: 10px; font-weight: bold; letter-spacing: 1px;")
         return lab
 
     # ── best / worst performers ──
@@ -378,7 +369,7 @@ class InvestmentReturnsWindow(QMainWindow):
         h.setSpacing(6)
         label = (symbol or "").strip() or (name[:18] + ("…" if len(name) > 18 else ""))
         left = QLabel(label)
-        left.setStyleSheet("color: #0f172a;")
+        tokens.themed(left, "color: {text};")
         left.setToolTip(name)
         pct = QLabel(f"{perf:+.1f}%")
         pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -391,7 +382,7 @@ class InvestmentReturnsWindow(QMainWindow):
 
     def _perf_subhead(self, text: str) -> QLabel:
         lab = QLabel(text)
-        lab.setStyleSheet("color: #475569; font-weight: 600; margin-top: 4px;")
+        tokens.themed(lab, "color: {muted_strong}; font-weight: 600; margin-top: 4px;")
         return lab
 
     def _update_performance(self) -> None:
@@ -408,7 +399,7 @@ class InvestmentReturnsWindow(QMainWindow):
         def note(text: str) -> None:
             lab = QLabel(text)
             lab.setWordWrap(True)
-            lab.setStyleSheet("color: #94a3b8; font-style: italic;")
+            tokens.themed(lab, "color: {subtle}; font-style: italic;")
             self._perf_layout.addWidget(lab)
 
         if not self._perf_candidates:
@@ -865,12 +856,14 @@ class InvestmentReturnsWindow(QMainWindow):
         self._unrealized_value.setText(
             f"Unrealized: {self._signed(unreal)}{self._pct(float(unreal), float(cost))}"
         )
-        self._unrealized_value.setStyleSheet(f"color: {self._colour(unreal) or '#0f172a'};")
+        self._unrealized_value.setStyleSheet(
+            f"color: {self._colour(unreal) or tokens.c('text')};"
+        )
         self._realized_value.setText(f"Realized (in period): {self._signed(realized)}")
         self._dividends_value.setText(f"Dividends (in period): {self._money(div)}")
         self._total_value.setText(self._signed(total))
         self._total_value.setStyleSheet(
-            f"color: {self._colour(total) or '#0f172a'}; "
+            f"color: {self._colour(total) or tokens.c('text')}; "
             "font-size: 22px; font-weight: bold;"
         )
         self._roi_value.setText(
@@ -878,7 +871,7 @@ class InvestmentReturnsWindow(QMainWindow):
         )
         self._irr_value.setText(f"Money-weighted (IRR): {self._irr_text(irr)}")
         irr_colour = self._colour(irr * 100) if irr is not None else None
-        self._irr_value.setStyleSheet(f"color: {irr_colour or '#475569'};")
+        self._irr_value.setStyleSheet(f"color: {irr_colour or tokens.c('muted_strong')};")
 
         notes: list[str] = []
         if unpriced:
@@ -996,10 +989,7 @@ class InvestmentReturnsWindow(QMainWindow):
     def _update_name_label(self) -> None:
         if self._loaded_name is None:
             self._name_label.setText("Untitled Investment Returns")
-            self._name_label.setStyleSheet(
-                "color: #64748b; font-style: italic; "
-                "font-weight: bold; padding: 4px 8px;"
-            )
+            tokens.themed(self._name_label, "color: {muted}; font-style: italic; font-weight: bold; padding: 4px 8px;")
             self.setWindowTitle("Investment Returns — Untitled")
             return
         prefix = ""
@@ -1010,9 +1000,7 @@ class InvestmentReturnsWindow(QMainWindow):
                     break
         dirty_mark = "*" if self._dirty else ""
         self._name_label.setText(f"{prefix}{self._loaded_name}{dirty_mark}")
-        self._name_label.setStyleSheet(
-            "color: #334155; font-weight: bold; padding: 4px 8px;"
-        )
+        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
         self.setWindowTitle(
             f"Investment Returns — {prefix}{self._loaded_name}{dirty_mark}"
         )

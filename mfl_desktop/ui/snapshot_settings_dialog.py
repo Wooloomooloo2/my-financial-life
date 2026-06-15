@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop import snapshots
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.ui import tokens
 
 
 def _plural(n: int, unit: str) -> str:
@@ -68,7 +69,7 @@ class SnapshotSettingsDialog(QDialog):
 
         self._summary = QLabel()
         self._summary.setWordWrap(True)
-        self._summary.setStyleSheet("color: #475569;")  # slate-600
+        tokens.themed(self._summary, "color: {muted_strong};")  # slate-600
         root.addWidget(self._summary)
 
         for spin in (self._interval, self._subdaily, self._daily, self._monthly):

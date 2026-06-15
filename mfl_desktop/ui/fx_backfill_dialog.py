@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop import fx
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.ui import tokens
 
 _GRANULARITY_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Monthly (~12 / year)",  "monthly"),
@@ -77,7 +78,7 @@ class FxBackfillDialog(QDialog):
 
         self._estimate = QLabel()
         self._estimate.setWordWrap(True)
-        self._estimate.setStyleSheet("color: #475569;")
+        tokens.themed(self._estimate, "color: {muted_strong};")
 
         form = QFormLayout()
         form.addRow("From:", self._from)
@@ -90,7 +91,7 @@ class FxBackfillDialog(QDialog):
             "nearest-prior lookup fills the gaps between samples."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #64748b;")
+        tokens.themed(intro, "color: {muted};")
 
         self._buttons = QDialogButtonBox()
         self._backfill_btn = self._buttons.addButton(

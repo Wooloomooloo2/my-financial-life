@@ -55,6 +55,7 @@ from mfl_desktop.db.repository import (
     TransactionRow,
 )
 from mfl_desktop.ui.category_picker import make_category_picker, selected_category_id
+from mfl_desktop.ui import tokens
 
 STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
@@ -110,7 +111,7 @@ class SplitTransactionDialog(QDialog):
         outer.addLayout(form)
 
         acct_label = QLabel(f"{account.name}  ·  {account.currency}")
-        acct_label.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(acct_label, "QLabel { color: {muted_strong}; }")
         form.addRow("Account:", acct_label)
 
         self._date = QDateEdit()
@@ -160,7 +161,7 @@ class SplitTransactionDialog(QDialog):
         row_buttons.addWidget(remove_btn)
         row_buttons.addStretch(1)
         self._summary = QLabel("")
-        self._summary.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(self._summary, "QLabel { color: {muted_strong}; }")
         row_buttons.addWidget(self._summary)
         outer.addLayout(row_buttons)
 

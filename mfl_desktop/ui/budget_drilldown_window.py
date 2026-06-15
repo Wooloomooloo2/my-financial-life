@@ -38,6 +38,7 @@ from mfl_desktop.ui.delegates import (
 )
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.register_model import TransactionTableModel
+from mfl_desktop.ui import tokens
 
 _COLUMN_WIDTHS = {
     "posted_date": 110, "account_name": 170, "payee_name": 210,
@@ -104,7 +105,7 @@ class BudgetDrillDownWindow(QMainWindow):
             f"{count} transaction" + ("s" if count != 1 else "")
             + f"  ·  net {display_ccy} {net:,.2f}"
         )
-        footer.setStyleSheet("color: #475569; padding: 8px 4px;")
+        tokens.themed(footer, "color: {muted_strong}; padding: 8px 4px;")
 
         container = QWidget()
         v = QVBoxLayout(container)

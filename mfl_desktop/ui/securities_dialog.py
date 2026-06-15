@@ -47,6 +47,7 @@ from mfl_desktop.db.repository import Repository, SecurityRow
 from mfl_desktop.prices import backfill_historical_into, refresh_latest_prices_into
 from mfl_desktop.ui.merge_securities_dialog import MergeSecuritiesDialog
 from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
+from mfl_desktop.ui import tokens
 
 
 def _fmt_refresh_time(iso_ts: Optional[str]) -> str:
@@ -93,7 +94,7 @@ class SecuritiesDialog(QDialog):
             "rest manually below."
         )
         disclaimer.setWordWrap(True)
-        disclaimer.setStyleSheet("QLabel { color: #64748B; font-size: 11px; }")
+        tokens.themed(disclaimer, "QLabel { color: {muted}; font-size: 11px; }")
         prov_layout.addWidget(disclaimer)
 
         action_row = QHBoxLayout()
@@ -101,7 +102,7 @@ class SecuritiesDialog(QDialog):
             f"Last refresh: "
             f"{_fmt_refresh_time(self._repo.get_setting('tiingo_last_refresh_at'))}"
         )
-        self._refresh_status.setStyleSheet("QLabel { color: #475569; }")
+        tokens.themed(self._refresh_status, "QLabel { color: {muted_strong}; }")
         action_row.addWidget(self._refresh_status, 1)
         self._refresh_btn = QPushButton("Refresh now")
         self._refresh_btn.clicked.connect(self._on_refresh_now)
@@ -136,7 +137,7 @@ class SecuritiesDialog(QDialog):
         )
         self._held_only.toggled.connect(lambda _c: self._apply_filter())
         self._count_label = QLabel("")
-        self._count_label.setStyleSheet("QLabel { color: #64748B; }")
+        tokens.themed(self._count_label, "QLabel { color: {muted}; }")
         filter_row.addWidget(QLabel("Filter:"))
         filter_row.addWidget(self._search_edit, 1)
         filter_row.addWidget(self._held_only)

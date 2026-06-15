@@ -82,6 +82,7 @@ from mfl_desktop.ui.delegates import (
 )
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.register_model import TransactionTableModel
+from mfl_desktop.ui import tokens
 
 
 STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
@@ -344,7 +345,7 @@ class TransactionsListWindow(QMainWindow):
 
         # ── footer ──
         self._footer = QLabel("")
-        self._footer.setStyleSheet("color: #475569; padding: 8px 4px;")
+        tokens.themed(self._footer, "color: {muted_strong}; padding: 8px 4px;")
 
         # ── layout ──
         container = QWidget()
@@ -375,14 +376,7 @@ class TransactionsListWindow(QMainWindow):
             btn = QPushButton(PERIOD_LABELS[key])
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton { padding: 5px 12px; border: 1px solid #cbd5e1; "
-                "border-radius: 14px; background-color: #ffffff; "
-                "color: #334155; font-size: 9pt; }"
-                "QPushButton:checked { background-color: #2563eb; "
-                "color: #ffffff; border-color: #2563eb; font-weight: bold; }"
-                "QPushButton:hover:!checked { background-color: #f1f5f9; }"
-            )
+            tokens.themed(btn, "QPushButton { padding: 5px 12px; border: 1px solid {border_strong}; border-radius: 14px; background-color: {surface}; color: {heading}; font-size: 9pt; }QPushButton:checked { background-color: {accent}; color: {surface}; border-color: {accent}; font-weight: bold; }QPushButton:hover:!checked { background-color: {surface_alt}; }")
             btn.clicked.connect(
                 lambda _checked=False, k=key: self._on_period_selected(k)
             )

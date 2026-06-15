@@ -14,6 +14,7 @@ container makes the container self-dismiss. The owning window positions it under
 the button and toggles it; the active-filter indicator lives on the button.
 """
 from __future__ import annotations
+from mfl_desktop.ui import tokens
 
 from datetime import date
 from decimal import Decimal
@@ -74,7 +75,7 @@ class RegisterFiltersPopover(QDialog):
 
         hint = QLabel("Amounts are signed — e.g. Max −500 finds outflows over 500.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        tokens.themed(hint, "color: {muted}; font-size: 11px;")
 
         clear_btn = QPushButton("Clear filters")
         clear_btn.clicked.connect(self.clear)

@@ -56,6 +56,7 @@ from mfl_desktop.ui.spending_chart import SpendingChart
 from mfl_desktop.ui.spending_filter_dialog import (
     SpendingFilterDialog, UNCATEGORISED_ID,
 )
+from mfl_desktop.ui import tokens
 
 # Granularity dataclass keys → SQL bucket keys (the SQL side speaks
 # "week" / "month" / ...; the dataclass speaks "weekly" / "monthly").
@@ -157,9 +158,7 @@ class SpendingReportWindow(QMainWindow):
         self._back_button.setVisible(False)
 
         self._name_label = QLabel()
-        self._name_label.setStyleSheet(
-            "color: #334155; font-weight: bold; padding: 4px 8px;"
-        )
+        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
 
         self._filter_button = QPushButton("Filter…")
         self._filter_button.clicked.connect(self._on_open_filter)
@@ -182,7 +181,7 @@ class SpendingReportWindow(QMainWindow):
         top_rule = QFrame()
         top_rule.setFrameShape(QFrame.HLine)
         top_rule.setFrameShadow(QFrame.Sunken)
-        top_rule.setStyleSheet("color: #e2e8f0;")
+        tokens.themed(top_rule, "color: {border};")
 
         # ── chart + right summary panel ──
         self._chart = SpendingChart()
@@ -234,34 +233,29 @@ class SpendingReportWindow(QMainWindow):
     def _build_summary_panel(self) -> QWidget:
         panel = QFrame()
         panel.setFrameShape(QFrame.NoFrame)
-        panel.setStyleSheet(
-            "QFrame { background: #f8fafc; border-left: 1px solid #e2e8f0; }"
-            "QLabel { background: transparent; }"
-        )
+        tokens.themed(panel, "QFrame { background: {canvas}; border-left: 1px solid {border}; }QLabel { background: transparent; }")
         panel.setMinimumWidth(240)
 
         self._period_value = QLabel()
         self._period_value.setWordWrap(True)
-        self._period_value.setStyleSheet("color: #0f172a;")
+        tokens.themed(self._period_value, "color: {text};")
 
         self._granularity_value = QLabel()
-        self._granularity_value.setStyleSheet("color: #0f172a;")
+        tokens.themed(self._granularity_value, "color: {text};")
 
         self._rollup_value = QLabel()
-        self._rollup_value.setStyleSheet("color: #0f172a;")
+        tokens.themed(self._rollup_value, "color: {text};")
 
         self._filters_value = QLabel()
         self._filters_value.setWordWrap(True)
-        self._filters_value.setStyleSheet("color: #475569;")
+        tokens.themed(self._filters_value, "color: {muted_strong};")
 
         self._total_value = QLabel()
-        self._total_value.setStyleSheet(
-            "color: #0f172a; font-size: 22px; font-weight: bold;"
-        )
+        tokens.themed(self._total_value, "color: {text}; font-size: 22px; font-weight: bold;")
         self._average_value = QLabel()
-        self._average_value.setStyleSheet("color: #475569;")
+        tokens.themed(self._average_value, "color: {muted_strong};")
         self._buckets_value = QLabel()
-        self._buckets_value.setStyleSheet("color: #475569; font-style: italic;")
+        tokens.themed(self._buckets_value, "color: {muted_strong}; font-style: italic;")
 
         # Vertical categories legend — scrollable so long lists don't
         # blow out the panel height. Rebuilt on every render to match
@@ -333,10 +327,7 @@ class SpendingReportWindow(QMainWindow):
     @staticmethod
     def _mini_section_title(text: str) -> QLabel:
         lab = QLabel(text.upper())
-        lab.setStyleSheet(
-            "color: #94a3b8; font-size: 10px; font-weight: bold; "
-            "letter-spacing: 1px;"
-        )
+        tokens.themed(lab, "color: {subtle}; font-size: 10px; font-weight: bold; letter-spacing: 1px;")
         return lab
 
     # ── refresh / render ──
@@ -731,10 +722,7 @@ class SpendingReportWindow(QMainWindow):
     def _update_name_label(self) -> None:
         if self._loaded_name is None:
             self._name_label.setText("Untitled Spending Over Time")
-            self._name_label.setStyleSheet(
-                "color: #64748b; font-style: italic; "
-                "font-weight: bold; padding: 4px 8px;"
-            )
+            tokens.themed(self._name_label, "color: {muted}; font-style: italic; font-weight: bold; padding: 4px 8px;")
             self.setWindowTitle("Spending Over Time — Untitled")
             return
         prefix = ""
@@ -745,9 +733,7 @@ class SpendingReportWindow(QMainWindow):
                     break
         dirty_mark = "*" if self._dirty else ""
         self._name_label.setText(f"{prefix}{self._loaded_name}{dirty_mark}")
-        self._name_label.setStyleSheet(
-            "color: #334155; font-weight: bold; padding: 4px 8px;"
-        )
+        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
         self.setWindowTitle(
             f"Spending Over Time — {prefix}{self._loaded_name}{dirty_mark}"
         )
