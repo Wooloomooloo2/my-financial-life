@@ -149,6 +149,7 @@ QListWidget, QTreeWidget, QTreeView {{
     background: {t("surface")};
     border: 1px solid {t("border")};
     border-radius: 4px;
+    outline: 0;   /* no focus rectangle around the current item */
 }}
 QListWidget::item:selected, QTreeWidget::item:selected, QTreeView::item:selected {{
     background: {t("accent_subtle")};

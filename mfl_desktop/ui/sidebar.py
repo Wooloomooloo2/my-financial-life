@@ -32,6 +32,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import QHeaderView, QTreeWidget, QTreeWidgetItem
 
+from mfl_desktop.ui import tokens
 from mfl_desktop.db.repository import (
     AccountSummary, FolderSummary, ReportFolderRow, Repository, ReportRow,
 )
@@ -53,12 +54,19 @@ KIND_ROLE = Qt.UserRole + 1
 # window's context menu) can offer Reopen instead of Edit/Delete (ADR-069).
 CLOSED_ROLE = Qt.UserRole + 2
 
-# Section header palette — slate-700 text on a slate-50 background. The
-# REPORTS header gets a thin slate-200 top border via paintEvent (set on
-# the item's data role and consumed by a small delegate hook below).
-_HEADER_FG = QColor("#334155")    # slate-700
-_HEADER_BG = QColor("#f8fafc")    # slate-50
-_CLOSED_FG = QColor("#94a3b8")    # slate-400 — muted text for closed accounts
+# Section header + closed-account colours come from the design tokens
+# (ADR-076) so the sidebar follows the light/dark theme. Resolved at build
+# time and re-applied by ``_restyle`` on a theme change.
+def _header_fg() -> QBrush:
+    return QBrush(QColor(tokens.c("heading")))
+
+
+def _header_bg() -> QBrush:
+    return QBrush(QColor(tokens.c("surface_alt")))
+
+
+def _closed_fg() -> QBrush:
+    return QBrush(QColor(tokens.c("subtle")))
 
 _CURRENCY_SYMBOLS: dict[str, str] = {
     "GBP": "£",
@@ -116,6 +124,28 @@ class Sidebar(QTreeWidget):
         self._populate(accounts, folders, balances, reports or [], report_folders or [])
         self.itemSelectionChanged.connect(self._on_selection_changed)
         self.itemClicked.connect(self._on_item_clicked)
+        # ADR-076: re-apply header/closed colours when the theme switches
+        # (these are set on items as brushes, not via QSS, so the global
+        # re-style doesn't reach them).
+        tokens.notifier.changed.connect(self._restyle)
+
+    def _restyle(self) -> None:
+        """Re-apply the token-derived header/closed-row brushes to the live
+        items after a theme change."""
+        def walk(item) -> None:
+            kind = item.data(0, KIND_ROLE)
+            if kind in ("section_accounts", "section_reports"):
+                item.setForeground(0, _header_fg())
+                item.setBackground(0, _header_bg())
+                item.setBackground(1, _header_bg())
+            elif kind == "closed_group" or item.data(0, CLOSED_ROLE):
+                item.setForeground(0, _closed_fg())
+                item.setForeground(1, _closed_fg())
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.topLevelItemCount()):
+            walk(self.topLevelItem(i))
 
     def reload(
         self,
@@ -218,7 +248,7 @@ class Sidebar(QTreeWidget):
             font = closed_group.font(0)
             font.setBold(True)
             closed_group.setFont(0, font)
-            closed_group.setForeground(0, QBrush(_CLOSED_FG))
+            closed_group.setForeground(0, _closed_fg())
             closed_group.setToolTip(
                 0,
                 "Closed accounts are kept for history but excluded from Net "
@@ -292,9 +322,9 @@ class Sidebar(QTreeWidget):
         font.setCapitalization(QFont.AllUppercase)
         font.setPointSizeF(font.pointSizeF() * 0.85)
         item.setFont(0, font)
-        item.setForeground(0, QBrush(_HEADER_FG))
-        item.setBackground(0, QBrush(_HEADER_BG))
-        item.setBackground(1, QBrush(_HEADER_BG))
+        item.setForeground(0, _header_fg())
+        item.setBackground(0, _header_bg())
+        item.setBackground(1, _header_bg())
         if with_top_rule:
             # Visual separator between sections — a slate-200 single-line
             # frame on the header itself. Implemented as the header's
@@ -327,8 +357,8 @@ class Sidebar(QTreeWidget):
             # Muted text + a marker role so the register context menu offers
             # Reopen (ADR-069); still selectable so its register is viewable.
             item.setData(0, CLOSED_ROLE, True)
-            item.setForeground(0, QBrush(_CLOSED_FG))
-            item.setForeground(1, QBrush(_CLOSED_FG))
+            item.setForeground(0, _closed_fg())
+            item.setForeground(1, _closed_fg())
             tooltip += "\n(closed)"
         item.setToolTip(0, tooltip)
         return item
