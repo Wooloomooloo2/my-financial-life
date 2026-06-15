@@ -85,6 +85,11 @@ def chart_tooltip_ink() -> str:
     return tokens.c("surface")
 
 
+def chart_track() -> str:
+    """Faint full-width track behind a bar (e.g. the payee chart)."""
+    return tokens.c("surface_alt")
+
+
 def nice_ticks(vmax: float, target_count: int = 5) -> tuple[float, float]:
     """Return (axis_max, step) so the axis lands on round numbers.
 

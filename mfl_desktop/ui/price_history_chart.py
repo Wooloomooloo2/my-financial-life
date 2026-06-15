@@ -31,9 +31,6 @@ from mfl_desktop.ui.chart_helpers import nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_LINE = QColor("#2563eb")    # blue-600
-_COLOR_GRID = QColor(_ch.chart_grid())
-_COLOR_AXIS = QColor(_ch.chart_faint())
-_COLOR_LABEL = QColor(_ch.chart_axis_ink())
 _COLOR_DOT = QColor("#2563eb")
 
 
@@ -134,7 +131,7 @@ class PriceHistoryChart(QWidget):
         return chart.bottom() - (v / ymax) * chart.height() if ymax > 0 else chart.bottom()
 
     def _paint_gridlines(self, painter, chart, ymax, step) -> None:
-        pen = QPen(_COLOR_GRID)
+        pen = QPen(QColor(_ch.chart_grid()))
         pen.setWidth(1)
         painter.setPen(pen)
         n = int(round(ymax / step)) if step > 0 else 0
@@ -146,7 +143,7 @@ class PriceHistoryChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = int(round(ymax / step)) if step > 0 else 0
         for i in range(n + 1):
@@ -161,7 +158,7 @@ class PriceHistoryChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = len(self._points)
         if n == 0:
@@ -191,7 +188,7 @@ class PriceHistoryChart(QWidget):
         painter.drawPolyline(QPolygonF(pts))
 
     def _paint_axis_baseline(self, painter, chart) -> None:
-        pen = QPen(_COLOR_AXIS)
+        pen = QPen(QColor(_ch.chart_faint()))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(int(chart.left()), int(chart.bottom()),
@@ -209,14 +206,14 @@ class PriceHistoryChart(QWidget):
         painter.drawEllipse(QPointF(cx, cy), 4, 4)
         text = f"{self._date_label(iso)}  {self._fmt(price)}"
         tw = fm.horizontalAdvance(text)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         painter.drawText(int(cx - tw / 2), int(cy - 12), text)
 
     def _paint_empty(self, painter, message: str) -> None:
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(int((self.width() - tw) / 2), int(self.height() / 2), message)

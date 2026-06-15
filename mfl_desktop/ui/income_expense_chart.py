@@ -36,10 +36,6 @@ import mfl_desktop.ui.chart_helpers as _ch
 _COLOR_INCOME  = "#10b981"   # emerald-500 — income (matches BalanceFlowChart)
 _COLOR_EXPENSE = "#ef4444"   # red-500 — expense
 _COLOR_NET     = "#2563eb"   # blue-600 — app accent, net line
-_COLOR_ZERO    = "#6b7280"   # slate-500 — zero baseline
-_COLOR_GRID    = "#e5e7eb"
-_COLOR_AXIS    = "#9ca3af"
-_COLOR_LABEL   = "#6b7280"
 
 
 class _AxisRange:
@@ -212,7 +208,7 @@ class IncomeExpenseChart(QWidget):
     ) -> None:
         if axis.step <= 0:
             return
-        pen = QPen(QColor(_COLOR_GRID))
+        pen = QPen(QColor(QColor(_ch.chart_grid())))
         pen.setWidth(1)
         painter.setPen(pen)
         n_top = int(round(axis.top / axis.step))
@@ -234,7 +230,7 @@ class IncomeExpenseChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
 
         def draw(value: float) -> None:
@@ -261,7 +257,7 @@ class IncomeExpenseChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
 
         n = len(self._buckets)
@@ -362,7 +358,7 @@ class IncomeExpenseChart(QWidget):
     def _paint_zero_baseline(
         self, painter: QPainter, chart: QRectF, axis: _AxisRange,
     ) -> None:
-        pen = QPen(QColor(_COLOR_ZERO))
+        pen = QPen(QColor(QColor(_ch.chart_axis_ink())))
         pen.setWidth(1)
         painter.setPen(pen)
         y = axis.zero_y(chart)
@@ -448,7 +444,7 @@ class IncomeExpenseChart(QWidget):
         painter.drawText(int(x + 24), int(y_text), "Net (income − expense)")
 
     def _paint_axis_baseline(self, painter: QPainter, chart: QRectF) -> None:
-        pen = QPen(QColor(_COLOR_AXIS))
+        pen = QPen(QColor(QColor(_ch.chart_faint())))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(int(chart.left()), int(chart.bottom()),
@@ -458,7 +454,7 @@ class IncomeExpenseChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(

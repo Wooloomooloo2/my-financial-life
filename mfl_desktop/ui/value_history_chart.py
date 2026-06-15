@@ -31,12 +31,8 @@ from mfl_desktop.ui.chart_helpers import nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_INVESTED = QColor("#2563eb")   # blue-600
-_COLOR_VALUE = QColor("#16a34a")      # green-600
 _COLOR_GAIN_FILL = QColor(22, 163, 74, 40)   # green, translucent
 _COLOR_LOSS_FILL = QColor(220, 38, 38, 40)   # red, translucent
-_COLOR_GRID = QColor(_ch.chart_grid())
-_COLOR_AXIS = QColor(_ch.chart_faint())
-_COLOR_LABEL = QColor(_ch.chart_axis_ink())
 
 
 class ValueHistoryChart(QWidget):
@@ -143,7 +139,7 @@ class ValueHistoryChart(QWidget):
         return chart.bottom() - (v / ymax) * chart.height() if ymax > 0 else chart.bottom()
 
     def _paint_gridlines(self, painter, chart, ymax, step) -> None:
-        pen = QPen(_COLOR_GRID)
+        pen = QPen(QColor(_ch.chart_grid()))
         pen.setWidth(1)
         painter.setPen(pen)
         n = int(round(ymax / step)) if step > 0 else 0
@@ -155,7 +151,7 @@ class ValueHistoryChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = int(round(ymax / step)) if step > 0 else 0
         for i in range(n + 1):
@@ -170,7 +166,7 @@ class ValueHistoryChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = len(self._points)
         if n == 0:
@@ -208,7 +204,7 @@ class ValueHistoryChart(QWidget):
             painter.drawPolygon(poly)
 
         self._draw_polyline(painter, invested_pts, _COLOR_INVESTED)
-        self._draw_polyline(painter, value_pts, _COLOR_VALUE)
+        self._draw_polyline(painter, value_pts, QColor(_ch.chart_axis_ink()))
 
     def _draw_polyline(self, painter, pts: list[QPointF], colour: QColor) -> None:
         pen = QPen(colour)
@@ -219,7 +215,7 @@ class ValueHistoryChart(QWidget):
         painter.drawPolyline(QPolygonF(pts))
 
     def _paint_axis_baseline(self, painter, chart) -> None:
-        pen = QPen(_COLOR_AXIS)
+        pen = QPen(QColor(_ch.chart_faint()))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(int(chart.left()), int(chart.bottom()),
@@ -230,7 +226,7 @@ class ValueHistoryChart(QWidget):
         font.setPointSize(9)
         painter.setFont(font)
         fm = QFontMetrics(font)
-        items = [("Invested", _COLOR_INVESTED), ("Market value", _COLOR_VALUE)]
+        items = [("Invested", _COLOR_INVESTED), ("Market value", QColor(_ch.chart_axis_ink()))]
         x = legend.left()
         y_text = legend.top() + (legend.height() - fm.height()) / 2 + fm.ascent()
         y_line = legend.top() + legend.height() / 2
@@ -243,7 +239,7 @@ class ValueHistoryChart(QWidget):
             painter.drawText(int(x + 22), int(y_text), name)
             x += 22 + fm.horizontalAdvance(name) + 22
         if self._any_fallback:
-            painter.setPen(QPen(_COLOR_LABEL))
+            painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
             note = "· early periods use cost where prices are unavailable"
             painter.drawText(int(x), int(y_text), note)
 
@@ -251,7 +247,7 @@ class ValueHistoryChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(int((self.width() - tw) / 2), int(self.height() / 2), message)

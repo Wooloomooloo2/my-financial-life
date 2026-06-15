@@ -42,8 +42,6 @@ _COLOR_IDEAL = "#6b7280"    # slate-500 — ideal pacing
 _COLOR_PROJECT = "#f59e0b"  # amber-500 — forward projection
 _COLOR_BUDGET = "#94a3b8"   # slate-400 — budget reference line
 _COLOR_TODAY = "#2563eb"    # blue-600 — the app accent
-_COLOR_GRID = "#e5e7eb"
-_COLOR_LABEL = "#6b7280"
 
 
 class BurnDownChart(QWidget):
@@ -98,7 +96,7 @@ class BurnDownChart(QWidget):
         painter.end()
 
     def _paint_empty(self, painter: QPainter, msg: str) -> None:
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         font = QFont(painter.font())
         font.setPointSize(10)
         painter.setFont(font)
@@ -143,7 +141,7 @@ class BurnDownChart(QWidget):
     # ── paint sub-routines ──
 
     def _paint_gridlines(self, painter, chart, ymax, step) -> None:
-        pen = QPen(QColor(_COLOR_GRID))
+        pen = QPen(QColor(QColor(_ch.chart_grid())))
         pen.setWidth(1)
         painter.setPen(pen)
         n = int(round(ymax / step)) if step > 0 else 0
@@ -156,7 +154,7 @@ class BurnDownChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
         n = int(round(ymax / step)) if step > 0 else 0
         for i in range(n + 1):
@@ -171,7 +169,7 @@ class BurnDownChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
         n = len(data.x_days)
         step = max(1, (n - 1) // 6)
@@ -283,7 +281,7 @@ class BurnDownChart(QWidget):
             x += fm.horizontalAdvance(label) + 18
 
     def _paint_axis_baseline(self, painter, chart) -> None:
-        pen = QPen(QColor(_COLOR_LABEL))
+        pen = QPen(QColor(QColor(_ch.chart_axis_ink())))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(int(chart.left()), int(chart.bottom()),

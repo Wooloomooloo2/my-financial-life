@@ -50,11 +50,6 @@ class DonutChart(QWidget):
     """Stateless widget — call :meth:`set_data` to draw, :meth:`show_empty`
     for the no-data state."""
 
-    _COLOR_BG    = "#ffffff"
-    _COLOR_SEP   = "#ffffff"   # thin separator between slices
-    _COLOR_LABEL = "#6b7280"
-    _COLOR_TOTAL = "#111827"
-    _COLOR_EMPTY = "#9ca3af"
 
     # Ring geometry as fractions of the outer radius.
     _R_HOLE = 0.40             # centre hole

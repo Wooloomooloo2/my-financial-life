@@ -31,10 +31,6 @@ from mfl_desktop.ui.chart_helpers import fmt_currency
 import mfl_desktop.ui.chart_helpers as _ch
 
 _COLOR_BAR     = "#2563eb"   # blue-600 — app accent
-_COLOR_TRACK   = "#f1f5f9"   # slate-100 — faint full-width bar track
-_COLOR_NAME    = "#334155"   # slate-700 — payee name labels
-_COLOR_VALUE   = "#475569"   # slate-600 — value labels
-_COLOR_EMPTY   = "#6b7280"
 
 
 class PayeeChart(QWidget):
@@ -138,7 +134,7 @@ class PayeeChart(QWidget):
 
             # Faint full-width track so short bars still read as a row.
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(_COLOR_TRACK)))
+            painter.setBrush(QBrush(QColor(QColor(_ch.chart_track()))))
             painter.drawRoundedRect(
                 QRectF(bar_left, bar_top, track_w, bar_h),
                 self._BAR_RADIUS, self._BAR_RADIUS,
@@ -156,7 +152,7 @@ class PayeeChart(QWidget):
 
             # Payee name — left band, vertically centred, elided to fit.
             painter.setFont(name_font)
-            painter.setPen(QPen(QColor(_COLOR_NAME)))
+            painter.setPen(QPen(QColor(QColor(_ch.chart_ink()))))
             name = name_fm.elidedText(
                 row.name, Qt.ElideRight, self._NAME_BAND - 8,
             )
@@ -165,7 +161,7 @@ class PayeeChart(QWidget):
 
             # Value — right band, right-aligned.
             painter.setFont(value_font)
-            painter.setPen(QPen(QColor(_COLOR_VALUE)))
+            painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
             value = fmt_currency(float(row.amount), 0, symbol=self._symbol)
             vw = value_fm.horizontalAdvance(value)
             painter.drawText(
@@ -176,7 +172,7 @@ class PayeeChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_EMPTY)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(

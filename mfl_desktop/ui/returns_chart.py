@@ -44,9 +44,6 @@ _COLOR_REALIZED = QColor("#0d9488")    # teal-600 — realized gains
 _COLOR_REALIZED_NEG = QColor("#f87171")  # red-400 — realized loss (downward)
 _COLOR_DIVIDEND = QColor("#d97706")    # amber-600 — dividends / income
 _COLOR_COST_LINE = QColor("#1e3a8a")   # blue-900 — cost reference line
-_COLOR_GRID = QColor(_ch.chart_grid())
-_COLOR_AXIS = QColor(_ch.chart_faint())
-_COLOR_LABEL = QColor(_ch.chart_axis_ink())
 
 
 class ReturnsChart(QWidget):
@@ -189,7 +186,7 @@ class ReturnsChart(QWidget):
         return chart.bottom() - ((v - ymin) / span) * chart.height()
 
     def _paint_gridlines(self, painter, chart, ymin, ymax, step) -> None:
-        pen = QPen(_COLOR_GRID)
+        pen = QPen(QColor(_ch.chart_grid()))
         pen.setWidth(1)
         painter.setPen(pen)
         if step <= 0:
@@ -204,7 +201,7 @@ class ReturnsChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         if step <= 0:
             return
@@ -221,7 +218,7 @@ class ReturnsChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = len(self._points)
         if n == 0:
@@ -297,7 +294,7 @@ class ReturnsChart(QWidget):
         painter.drawPolyline(QPolygonF(pts))
 
     def _paint_zero_baseline(self, painter, chart, ymin, ymax) -> None:
-        pen = QPen(_COLOR_AXIS)
+        pen = QPen(QColor(_ch.chart_faint()))
         pen.setWidth(1)
         painter.setPen(pen)
         y = self._y_for(0.0, ymin, ymax, chart)
@@ -325,7 +322,7 @@ class ReturnsChart(QWidget):
             painter.drawText(int(x + 18), int(y_text), name)
             x += 18 + fm.horizontalAdvance(name) + 20
         if self._any_fallback:
-            painter.setPen(QPen(_COLOR_LABEL))
+            painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
             note = "· early periods use cost where prices are unavailable"
             painter.drawText(int(x), int(y_text), note)
 
@@ -333,7 +330,7 @@ class ReturnsChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(int((self.width() - tw) / 2), int(self.height() / 2), message)

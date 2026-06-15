@@ -42,10 +42,6 @@ import mfl_desktop.ui.chart_helpers as _ch
 _COLOR_BASE = QColor("#93c5fd")   # blue-300 — cost-basis / invested tone
 _COLOR_GAIN = QColor("#16a34a")   # green-600 — appreciation tip
 _COLOR_LOSS = QColor("#dc2626")   # red-600 — loss tip
-_COLOR_GRID = QColor(_ch.chart_grid())
-_COLOR_AXIS = QColor(_ch.chart_faint())
-_COLOR_LABEL = QColor(_ch.chart_axis_ink())
-_COLOR_LEGEND_TEXT = QColor(_ch.chart_ink())
 
 
 @dataclass(frozen=True)
@@ -151,7 +147,7 @@ class ValueChart(QWidget):
         return nice_ticks(vmax * 1.12)
 
     def _paint_gridlines(self, painter, chart, ymax, step) -> None:
-        pen = QPen(_COLOR_GRID)
+        pen = QPen(QColor(_ch.chart_grid()))
         pen.setWidth(1)
         painter.setPen(pen)
         n = int(round(ymax / step)) if step > 0 else 0
@@ -163,7 +159,7 @@ class ValueChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = int(round(ymax / step)) if step > 0 else 0
         for i in range(n + 1):
@@ -178,7 +174,7 @@ class ValueChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = len(self._bars)
         if n == 0:
@@ -264,7 +260,7 @@ class ValueChart(QWidget):
             painter.fillRect(rect, colour)
 
     def _paint_axis_baseline(self, painter, chart) -> None:
-        pen = QPen(_COLOR_AXIS)
+        pen = QPen(QColor(_ch.chart_faint()))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(int(chart.left()), int(chart.bottom()),
@@ -284,7 +280,7 @@ class ValueChart(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(colour))
             painter.drawRoundedRect(QRectF(x, y_sw, sw, sw), 2, 2)
-            painter.setPen(QPen(_COLOR_LEGEND_TEXT))
+            painter.setPen(QPen(QColor(_ch.chart_ink())))
             painter.drawText(int(x + sw + 6), int(y_text), name)
             x += sw + 6 + fm.horizontalAdvance(name) + 18
 
@@ -293,7 +289,7 @@ class ValueChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(_COLOR_LABEL))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(int((self.width() - tw) / 2), int(self.height() / 2), message)

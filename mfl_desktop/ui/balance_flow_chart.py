@@ -43,10 +43,6 @@ import mfl_desktop.ui.chart_helpers as _ch
 _COLOR_INCOME   = "#10b981"   # emerald-500 — positive flow
 _COLOR_SPENDING = "#ef4444"   # red-500 — negative flow
 _COLOR_BALANCE  = "#2563eb"   # blue-600 — app accent
-_COLOR_ZERO     = "#6b7280"   # slate-500 — explicit zero baseline
-_COLOR_GRID     = "#e5e7eb"
-_COLOR_AXIS     = "#9ca3af"
-_COLOR_LABEL    = "#6b7280"
 
 
 class _AxisRange:
@@ -236,7 +232,7 @@ class BalanceFlowChart(QWidget):
     ) -> None:
         if axis.step <= 0:
             return
-        pen = QPen(QColor(_COLOR_GRID))
+        pen = QPen(QColor(QColor(_ch.chart_grid())))
         pen.setWidth(1)
         painter.setPen(pen)
         # Positive side — skip zero (the explicit baseline owns it).
@@ -259,7 +255,7 @@ class BalanceFlowChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
 
         def draw(value: float) -> None:
@@ -320,7 +316,7 @@ class BalanceFlowChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
 
         n = len(data.buckets)
@@ -434,7 +430,7 @@ class BalanceFlowChart(QWidget):
         """Bar-axis zero only (ADR-034) — that's the line bars cross
         between income and spending. The balance line uses its own scale
         and doesn't get a separate baseline drawn."""
-        pen = QPen(QColor(_COLOR_ZERO))
+        pen = QPen(QColor(QColor(_ch.chart_axis_ink())))
         pen.setWidth(1)
         painter.setPen(pen)
         y = axis.zero_y(chart)
@@ -521,7 +517,7 @@ class BalanceFlowChart(QWidget):
         painter.drawText(int(x + 24), int(y_text), "Balance (right axis)")
 
     def _paint_axis_baseline(self, painter: QPainter, chart: QRectF) -> None:
-        pen = QPen(QColor(_COLOR_AXIS))
+        pen = QPen(QColor(QColor(_ch.chart_faint())))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(
@@ -533,7 +529,7 @@ class BalanceFlowChart(QWidget):
         font = QFont(painter.font())
         font.setPointSize(11)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_LABEL)))
+        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(message)
         painter.drawText(
