@@ -53,7 +53,7 @@ from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.home_view import HomeView
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
-from mfl_desktop.ui.ofx_feeds_dialog import OfxFeedsDialog
+from mfl_desktop.ui.bank_feeds_dialog import BankFeedsDialog
 from mfl_desktop.ui.securities_dialog import SecuritiesDialog
 from mfl_desktop.ui.transfer_reconcile_dialog import TransferReconcileDialog
 from mfl_desktop.ui.delegates import (
@@ -2828,11 +2828,12 @@ class RegisterWindow(QMainWindow):
         self._refresh_sidebar_balances()
 
     def _on_manage_feeds(self) -> None:
-        """Open Manage → Bank Feeds… (ADR-077). The dialog manages OFX Direct
-        Connect connections and runs Update, which stages fetched transactions
+        """Open Manage → Bank Feeds… (ADR-077). The unified dialog manages
+        feeds across all providers (OFX Direct Connect, Enable Banking,
+        SimpleFIN, Plaid) and runs Update, which stages fetched transactions
         through the same import path (dedup/match/commit) as a file. We refresh
         the register + sidebar afterward if anything was actually imported."""
-        dialog = OfxFeedsDialog(
+        dialog = BankFeedsDialog(
             self._repo, self._service,
             on_updated=self._refresh_after_feed_update, parent=self,
         )
