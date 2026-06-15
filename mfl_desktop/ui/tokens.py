@@ -47,7 +47,7 @@ _TOKENS: dict[str, tuple[str, str]] = {
     # accent
     "accent":          ("#2563eb", "#3b82f6"),
     "accent_hover":    ("#1d4ed8", "#2563eb"),
-    "accent_subtle":   ("#dbeafe", "#1e3a8a"),  # selection background
+    "accent_subtle":   ("#dbeafe", "#2a3a55"),  # selection background (muted in dark)
     "on_accent":       ("#ffffff", "#ffffff"),
     # state
     "positive":        ("#16a34a", "#22c55e"),

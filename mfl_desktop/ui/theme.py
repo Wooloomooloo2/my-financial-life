@@ -150,6 +150,10 @@ QListWidget, QTreeWidget, QTreeView {{
     border: 1px solid {t("border")};
     border-radius: 4px;
     outline: 0;   /* no focus rectangle around the current item */
+    /* These two are the reliable way to recolour item-view selection —
+       more so than ::item:selected, which the native highlight can win. */
+    selection-background-color: {t("accent_subtle")};
+    selection-color: {t("text")};
 }}
 QListWidget::item:selected, QTreeWidget::item:selected, QTreeView::item:selected {{
     background: {t("accent_subtle")};
