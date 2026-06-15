@@ -140,6 +140,41 @@ class PlaidClient:
             raise PlaidError("Plaid /link/token/create returned no link_token.")
         return token
 
+    def create_hosted_link_token(
+        self, *, user_id: str, client_name: str,
+        products=("transactions",), country_codes=("US",), language: str = "en",
+    ) -> tuple[str, str]:
+        """Create a link token configured for **Hosted Link** (Plaid hosts the
+        bank-login page — no embedded JS, no local web server). Returns
+        ``(link_token, hosted_link_url)``; open the URL in the browser."""
+        data = self._request("/link/token/create", {
+            "user": {"client_user_id": user_id},
+            "client_name": client_name,
+            "products": list(products),
+            "country_codes": list(country_codes),
+            "language": language,
+            "hosted_link": {},
+        })
+        token, url = data.get("link_token"), data.get("hosted_link_url")
+        if not token or not url:
+            raise PlaidError("Plaid hosted-link create returned no link_token/url.")
+        return token, url
+
+    def get_link_public_token(self, link_token: str) -> str:
+        """Poll a (hosted) link session for its completed ``public_token``.
+
+        Returns "" while the user has not finished in the browser yet."""
+        data = self._request("/link/token/get", {"link_token": link_token})
+        for session in data.get("link_sessions", []) or []:
+            results = session.get("results") or {}
+            for r in results.get("item_add_results", []) or []:
+                if r.get("public_token"):
+                    return r["public_token"]
+            # Some responses surface it directly on the session.
+            if session.get("public_token"):
+                return session["public_token"]
+        return ""
+
     def exchange_public_token(self, public_token: str) -> tuple[str, str]:
         """public_token (from Plaid Link) → (access_token, item_id). Persist
         the access_token."""

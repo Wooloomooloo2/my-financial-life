@@ -1,16 +1,11 @@
-"""Manage ▸ Bank Feeds… — OFX Direct Connect setup + manual update (ADR-077).
+"""OFX Direct Connect connection editor (ADR-077).
 
-A free, fully-local auto-feed for US banks that still support OFX Direct
-Connect. The user links an MFL account to their bank's OFX server (URL / ORG /
-FID from ofxhome.com) with their online-banking credentials; **Update** then
-pulls recent transactions and runs them through the *same* import path as a
-file (FITID dedup, the manual-match heuristic, commit) — nothing here is a new
-posting route. Credentials are stored in this ``.mfl`` (per ADR-035); the
-disclaimer says so.
-
-Two dialogs: ``OfxConnectionDialog`` edits one connection (with a no-commit
-"Test connection" probe); ``OfxFeedsDialog`` lists the linked feeds and runs
-Update.
+``OfxConnectionDialog`` adds/edits one OFX Direct Connect connection — bank
+server (URL / ORG / FID from ofxhome.com), online-banking credentials, the
+account at the bank, and a no-commit "Test connection" probe. It is launched by
+the unified ``BankFeedsDialog`` (``ui/bank_feeds_dialog.py``) when adding an OFX
+feed. Credentials are stored in this ``.mfl`` (per ADR-035); the disclaimer
+says so.
 """
 from __future__ import annotations
 
@@ -19,7 +14,6 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
@@ -27,13 +21,10 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -41,7 +32,6 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.feeds import ofx_store
 from mfl_desktop.feeds.ofx_direct import OfxDirectError
-from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui import tokens
 
 # Bank account types address BANKACCTFROM and so need a routing/bank id;
@@ -256,214 +246,3 @@ class OfxConnectionDialog(QDialog):
             self.result_account_id = self._account_combo.currentData()
         self.result_cfg = cfg
         self.accept()
-
-
-class OfxFeedsDialog(QDialog):
-    """List the OFX feeds, add/edit/remove them, and run Update."""
-
-    def __init__(
-        self,
-        repo: Repository,
-        service: ImportService,
-        *,
-        on_updated=None,
-        parent: Optional[QWidget] = None,
-    ) -> None:
-        super().__init__(parent)
-        self._repo = repo
-        self._service = service
-        self._on_updated = on_updated
-        self.setWindowTitle("Bank Feeds — OFX Direct Connect")
-        self.setMinimumSize(620, 360)
-
-        outer = QVBoxLayout(self)
-        outer.setSpacing(10)
-
-        intro = QLabel(
-            "Free, fully-local auto-feed for US banks that support OFX Direct "
-            "Connect. Fetched transactions go through the same dedup and review "
-            "as a file import before they post."
-        )
-        intro.setWordWrap(True)
-        tokens.themed(intro, "QLabel { color: {muted}; font-size: 11px; }")
-        outer.addWidget(intro)
-
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(
-            ["Account", "Institution", "Last updated", "Status"]
-        )
-        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table.itemSelectionChanged.connect(self._sync_buttons)
-        self._table.doubleClicked.connect(lambda *_: self._on_edit())
-        outer.addWidget(self._table, 1)
-
-        row = QHBoxLayout()
-        self._add_btn = QPushButton("Add…")
-        self._edit_btn = QPushButton("Edit…")
-        self._remove_btn = QPushButton("Remove")
-        self._update_btn = QPushButton("Update selected")
-        self._update_all_btn = QPushButton("Update all")
-        self._add_btn.clicked.connect(self._on_add)
-        self._edit_btn.clicked.connect(self._on_edit)
-        self._remove_btn.clicked.connect(self._on_remove)
-        self._update_btn.clicked.connect(lambda: self._update([self._selected_account_id()]))
-        self._update_all_btn.clicked.connect(self._on_update_all)
-        for b in (self._add_btn, self._edit_btn, self._remove_btn):
-            row.addWidget(b)
-        row.addStretch(1)
-        row.addWidget(self._update_btn)
-        row.addWidget(self._update_all_btn)
-        outer.addLayout(row)
-
-        close = QDialogButtonBox(QDialogButtonBox.Close)
-        close.rejected.connect(self.reject)
-        outer.addWidget(close)
-
-        self._feeds: list = []
-        self._reload()
-
-    # ── data ──
-
-    def _reload(self) -> None:
-        self._feeds = [
-            f for f in self._repo.list_feed_accounts()
-            if f.provider == ofx_store.PROVIDER
-        ]
-        by_id = {a.id: a for a in self._repo.list_accounts()}
-        self._table.setRowCount(len(self._feeds))
-        for r, feed in enumerate(self._feeds):
-            acct = by_id.get(feed.account_id)
-            name = acct.name if acct else f"(account {feed.account_id})"
-            synced = (feed.last_synced_at or "—")[:16].replace("T", " ")
-            cells = [name, feed.institution_name or "—", synced, feed.status]
-            for c, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                item.setData(Qt.UserRole, feed.account_id)
-                self._table.setItem(r, c, item)
-        self._sync_buttons()
-
-    def _selected_account_id(self) -> Optional[int]:
-        rows = self._table.selectionModel().selectedRows()
-        if not rows:
-            return None
-        return self._table.item(rows[0].row(), 0).data(Qt.UserRole)
-
-    def _sync_buttons(self) -> None:
-        has_sel = self._selected_account_id() is not None
-        self._edit_btn.setEnabled(has_sel)
-        self._remove_btn.setEnabled(has_sel)
-        self._update_btn.setEnabled(has_sel)
-        self._update_all_btn.setEnabled(bool(self._feeds))
-
-    # ── add / edit / remove ──
-
-    def _on_add(self) -> None:
-        linked = {f.account_id for f in self._repo.list_feed_accounts()}
-        free = [a for a in self._repo.list_accounts()
-                if a.id not in linked and a.archived_at is None]
-        if not free:
-            QMessageBox.information(
-                self, "No accounts available",
-                "Every account already has a feed (or there are no accounts).",
-            )
-            return
-        dlg = OfxConnectionDialog(self._repo, free, parent=self)
-        if dlg.exec() != QDialog.Accepted or dlg.result_cfg is None:
-            return
-        cfg = ofx_store.save_config(self._repo, dlg.result_account_id, dlg.result_cfg)
-        self._repo.link_feed_account(
-            account_id=dlg.result_account_id, provider=ofx_store.PROVIDER,
-            external_account_id=cfg["acct_id"],
-            institution_name=cfg.get("institution_name") or None,
-        )
-        self._reload()
-
-    def _on_edit(self) -> None:
-        account_id = self._selected_account_id()
-        if account_id is None:
-            return
-        acct = self._repo.get_account_by_id(account_id)
-        cfg = ofx_store.load_config(self._repo, account_id) or ofx_store.empty_config()
-        dlg = OfxConnectionDialog(self._repo, [], account=acct, cfg=cfg, parent=self)
-        if dlg.exec() != QDialog.Accepted or dlg.result_cfg is None:
-            return
-        saved = ofx_store.save_config(self._repo, account_id, dlg.result_cfg)
-        self._repo.link_feed_account(
-            account_id=account_id, provider=ofx_store.PROVIDER,
-            external_account_id=saved["acct_id"],
-            institution_name=saved.get("institution_name") or None,
-        )
-        self._reload()
-
-    def _on_remove(self) -> None:
-        account_id = self._selected_account_id()
-        if account_id is None:
-            return
-        acct = self._repo.get_account_by_id(account_id)
-        name = acct.name if acct else "this account"
-        if QMessageBox.question(
-            self, "Remove feed",
-            f"Remove the OFX feed for {name}? Already-imported transactions "
-            "stay; only the connection and its stored credentials are removed.",
-        ) != QMessageBox.Yes:
-            return
-        self._repo.unlink_feed_account(account_id)
-        ofx_store.clear_config(self._repo, account_id)
-        self._reload()
-
-    # ── update (fetch → stage → commit, reusing the import pipeline) ──
-
-    def _on_update_all(self) -> None:
-        self._update([f.account_id for f in self._feeds])
-
-    def _update(self, account_ids: list) -> None:
-        account_ids = [a for a in account_ids if a is not None]
-        if not account_ids:
-            return
-        by_id = {a.id: a for a in self._repo.list_accounts()}
-        lines: list[str] = []
-        any_committed = False
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        try:
-            for account_id in account_ids:
-                acct = by_id.get(account_id)
-                name = acct.name if acct else f"account {account_id}"
-                cfg = ofx_store.load_config(self._repo, account_id)
-                if cfg is None or acct is None:
-                    lines.append(f"• {name}: no saved config — skipped.")
-                    continue
-                try:
-                    raw = ofx_store.fetch_transactions(cfg, days=90)
-                    token = self._service.stage_feed(
-                        acct.iri, raw, provider=ofx_store.PROVIDER,
-                    )
-                    pending = self._service.get_pending(token)
-                    accepted = {
-                        tx.fitid for tx in pending.transactions
-                        if tx.status == "potential_match"
-                    }
-                    result = self._service.commit_import(
-                        token, pending.suggested_status, accepted,
-                    )
-                    self._repo.mark_feed_synced(account_id)
-                    any_committed = any_committed or result.imported > 0
-                    lines.append(
-                        f"• {name}: {result.imported} new, "
-                        f"{result.skipped} skipped, {result.matched} matched."
-                    )
-                except OfxDirectError as e:
-                    self._repo.set_feed_status(account_id, "error")
-                    lines.append(f"• {name}: ✗ {e}")
-                except Exception as e:  # never leave the cursor stuck
-                    self._repo.set_feed_status(account_id, "error")
-                    lines.append(f"• {name}: ✗ unexpected error: {e}")
-        finally:
-            QApplication.restoreOverrideCursor()
-        self._reload()
-        if any_committed and self._on_updated is not None:
-            self._on_updated()
-        QMessageBox.information(self, "Bank feed update", "\n".join(lines))
