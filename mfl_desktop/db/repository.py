@@ -116,6 +116,10 @@ class TransactionRow:
     security_symbol: str = ""
     quantity: Optional[float] = None
     price: Optional[float] = None
+    # Brokerage fee (ADR-012/0012 `txn.commission`, stored as pence). Signed
+    # `amount` already includes it (cost basis uses abs(amount), holdings.py);
+    # surfaced here so the edit dialog can show + preserve it. Decimal or None.
+    commission: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -3544,7 +3548,7 @@ class Repository:
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
-            "       t.action, t.security_id, t.quantity, t.price, "
+            "       t.action, t.security_id, t.quantity, t.price, t.commission, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol, "
             "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
@@ -3583,6 +3587,10 @@ class Repository:
                 security_name=r["security_name"],
                 security_symbol=r["security_symbol"],
                 quantity=r["quantity"], price=r["price"],
+                commission=(
+                    pence_to_decimal(r["commission"])
+                    if r["commission"] is not None else None
+                ),
             ))
         return rows
 
@@ -3604,7 +3612,7 @@ class Repository:
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
-            "       t.action, t.security_id, t.quantity, t.price, "
+            "       t.action, t.security_id, t.quantity, t.price, t.commission, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol, "
             "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
@@ -3639,6 +3647,10 @@ class Repository:
                 security_name=r["security_name"],
                 security_symbol=r["security_symbol"],
                 quantity=r["quantity"], price=r["price"],
+                commission=(
+                    pence_to_decimal(r["commission"])
+                    if r["commission"] is not None else None
+                ),
             )
             for r in cur
         ]
@@ -3658,7 +3670,7 @@ class Repository:
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
-            "       t.action, t.security_id, t.quantity, t.price, "
+            "       t.action, t.security_id, t.quantity, t.price, t.commission, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol, "
             "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
@@ -3689,6 +3701,10 @@ class Repository:
                 security_name=r["security_name"],
                 security_symbol=r["security_symbol"],
                 quantity=r["quantity"], price=r["price"],
+                commission=(
+                    pence_to_decimal(r["commission"])
+                    if r["commission"] is not None else None
+                ),
             )
             for r in cur
         ]
@@ -3707,7 +3723,7 @@ class Repository:
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
-            "       t.action, t.security_id, t.quantity, t.price, "
+            "       t.action, t.security_id, t.quantity, t.price, t.commission, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol "
             "FROM txn t "
@@ -3733,6 +3749,10 @@ class Repository:
                 security_name=r["security_name"],
                 security_symbol=r["security_symbol"],
                 quantity=r["quantity"], price=r["price"],
+                commission=(
+                    pence_to_decimal(r["commission"])
+                    if r["commission"] is not None else None
+                ),
             )
             for r in cur
         ]

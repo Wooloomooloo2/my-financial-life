@@ -3,20 +3,24 @@
 The single edit surface for investment-account transactions — opened by
 **New Transaction** on an investment account (create) and by **double-clicking**
 an investment row (edit). Deliberately investment-shaped, not the cash form:
-the fields are **Date · Action · Symbol · Security · Qty · Price · Status ·
-Memo** (no Payee / Commission / standing cash-amount box). The visible fields
-adapt to the action so you only ever see what's relevant.
+the fields are **Date · Action · Symbol · Security · Qty · Price · Commission ·
+Total cost · Status · Memo** (no Payee / standing cash-amount box). The visible
+fields adapt to the action so you only ever see what's relevant.
 
 Field flow:
   * **Symbol drives Security.** Type a ticker and the Security name fills in —
     from an existing security with that symbol, or (when online with a Tiingo
     key) from a Tiingo metadata lookup. Picking an existing Security fills the
     Symbol the other way. A typed name with no match creates a new security.
-  * **Buy / Sell** — Qty + Price; the signed cash impact is computed
-    (`∓ qty·price`) silently. **Reinvested dividend / Shares in-out** — Qty
-    (+ optional Price for basis); cash impact 0. **Dividend / Interest /
-    Cap-gain** — an Amount-in field replaces Qty/Price. **Cash in/out** — an
-    Amount field only, no security.
+  * **Buy / Sell** — Quantity, Price and **Total cost** form a tri-field group:
+    enter any **two** and the dialog fills the third. An optional **Commission**
+    is the fourth term — Total = qty × price + commission (Buy) / − commission
+    (Sell) — and editing it re-solves the leg you left blank. The signed cash
+    impact is the total (`∓ total`), which already nets the fee in, so an
+    imported amount that carries commission survives a re-save unchanged.
+    **Reinvested dividend / Shares in-out** — Qty (+ optional Price for basis);
+    cash impact 0. **Dividend / Interest / Cap-gain** — an Amount-in field
+    replaces Qty/Price. **Cash in/out** — an Amount field only, no security.
 
 The stored ``txn.amount`` is always the SIGNED CASH IMPACT, so cash balance =
 SUM(amount) holds (ADR-043). When editing a trade whose Qty/Price are
@@ -108,6 +112,13 @@ class InvestmentTransactionDialog(QDialog):
         self._seed = seed                 # None = create mode
         self._loading = True              # suppress amount auto-calc while populating
         self._last_lookup_symbol = ""     # avoid repeat online lookups
+        # Tri-field solver state for Buy/Sell (qty ⇄ price ⇄ total cost): the
+        # user enters any two and the third fills in. `_recomputing` guards the
+        # programmatic setText from re-triggering the handler; `_trade_edit_order`
+        # tracks most-recently-edited first, so the field touched longest ago is
+        # the one we recompute (total is the default target).
+        self._recomputing = False
+        self._trade_edit_order: list[str] = ["price", "qty", "total"]
         self.setWindowTitle(
             "Edit investment transaction" if seed else "New investment transaction"
         )
@@ -157,13 +168,29 @@ class InvestmentTransactionDialog(QDialog):
 
         self._qty = QLineEdit()
         self._qty.setPlaceholderText("shares")
-        self._qty.textChanged.connect(self._recompute_hint)
+        self._qty.textChanged.connect(lambda *_: self._on_trade_field_changed("qty"))
         self._form.addRow("Quantity:", self._qty)
 
         self._price = QLineEdit()
         self._price.setPlaceholderText("per share")
-        self._price.textChanged.connect(self._recompute_hint)
+        self._price.textChanged.connect(lambda *_: self._on_trade_field_changed("price"))
         self._form.addRow("Price:", self._price)
+
+        # Commission / fee (Buy/Sell only) — capitalised into the total cash, so
+        # Total = quantity × price ± commission. Blank = no fee. Editing it
+        # re-solves whichever of qty/price/total the user left for the dialog.
+        self._commission = QLineEdit()
+        self._commission.setPlaceholderText("fee (optional)")
+        self._commission.textChanged.connect(self._on_commission_changed)
+        self._form.addRow("Commission:", self._commission)
+
+        # Total cost (Buy/Sell only) — the third leg of the qty × price = total
+        # relationship (net of commission). Enter any two of qty/price/total and
+        # the dialog fills the rest.
+        self._total = QLineEdit()
+        self._total.setPlaceholderText("total cash (incl. commission)")
+        self._total.textChanged.connect(lambda *_: self._on_trade_field_changed("total"))
+        self._form.addRow("Total cost:", self._total)
 
         self._amount = QLineEdit()
         self._amount.setPlaceholderText("cash amount")
@@ -236,6 +263,14 @@ class InvestmentTransactionDialog(QDialog):
                 self._qty.setText(_trim(seed.quantity))
         if seed.price is not None:
             self._price.setText(_trim(seed.price))
+        # For a Buy/Sell, the stored amount IS the total cash cost (incl. any
+        # imported commission); seed it + the commission straight in so a re-save
+        # never drifts. The Total = qty × price ± commission relationship holds
+        # for imported rows because that's how the amount was computed.
+        if _kind(seed.action or "") in ("buy", "sell"):
+            self._total.setText(f"{abs(seed.amount):.2f}")
+            if seed.commission is not None:
+                self._commission.setText(f"{seed.commission:.2f}")
         self._amount.setText(f"{seed.amount:.2f}")
         self._memo.setText(seed.memo or "")
         self._status.setCurrentText(seed.status or "Cleared")
@@ -250,6 +285,8 @@ class InvestmentTransactionDialog(QDialog):
         show_sec = kind != "cash"
         show_qty = kind in ("buy", "sell", "reinvest", "shares")
         show_price = kind in ("buy", "sell", "reinvest", "shares")
+        show_total = kind in ("buy", "sell")
+        show_commission = kind in ("buy", "sell")
         show_amount = kind in ("income", "cash")
         show_ratio = kind == "split"
 
@@ -257,19 +294,78 @@ class InvestmentTransactionDialog(QDialog):
         self._set_row_visible(self._security, show_sec)
         self._set_row_visible(self._qty, show_qty)
         self._set_row_visible(self._price, show_price)
+        self._set_row_visible(self._commission, show_commission)
+        self._set_row_visible(self._total, show_total)
         self._set_row_visible(self._amount, show_amount)
         self._set_row_visible(self._ratio, show_ratio)
+        # Entering Buy/Sell with a qty + price already typed → fill the total
+        # (unless the user/seed already supplied one).
+        if show_total and not self._total.text().strip() and not self._loading:
+            self._solve_trade_field("total")
         self._recompute_hint()
 
     def _current_action(self) -> str:
         return self._action.currentData() or ""
 
+    # ── tri-field solver (qty ⇄ price ⇄ total cost) ──
+
+    def _on_trade_field_changed(self, field: str) -> None:
+        """A user edit to quantity / price / total. For Buy/Sell, recompute the
+        third leg from the two most-recently-edited fields; always refresh the
+        hint (quantity + price are also used by reinvest / shares actions)."""
+        if (
+            not self._loading
+            and not self._recomputing
+            and _kind(self._current_action()) in ("buy", "sell")
+        ):
+            order = self._trade_edit_order
+            if field in order:
+                order.remove(field)
+            order.insert(0, field)
+            self._solve_trade_field(order[-1])   # least-recently edited = target
+        self._recompute_hint()
+
+    def _on_commission_changed(self, *_args) -> None:
+        """Commission is the fourth term (Total = qty × price ± commission). A
+        change re-solves whichever leg the user last left for the dialog."""
+        if (
+            not self._loading
+            and not self._recomputing
+            and _kind(self._current_action()) in ("buy", "sell")
+        ):
+            self._solve_trade_field(self._trade_edit_order[-1])
+        self._recompute_hint()
+
+    def _solve_trade_field(self, target: str) -> None:
+        """Fill `target` from the other two of {qty, price, total} plus the
+        commission, if both legs are present (and the divisor is non-zero).
+        Total = qty × price + s·commission, where s = +1 for a Buy (the fee adds
+        to the cash out) and −1 for a Sell (the fee nets off the proceeds).
+        No-op when a needed value is missing."""
+        qty = _to_decimal(self._qty.text())
+        price = _to_decimal(self._price.text())
+        total = _to_decimal(self._total.text())
+        comm = _to_decimal(self._commission.text()) or Decimal(0)
+        s = Decimal(1) if _kind(self._current_action()) == "buy" else Decimal(-1)
+        self._recomputing = True
+        try:
+            if target == "total" and qty is not None and price is not None:
+                self._total.setText(_money(qty * price + s * comm))
+            elif target == "price" and qty not in (None, Decimal(0)) and total is not None:
+                self._price.setText(_trim((total - s * comm) / qty))
+            elif target == "qty" and price not in (None, Decimal(0)) and total is not None:
+                self._qty.setText(_trim((total - s * comm) / price))
+        finally:
+            self._recomputing = False
+
     def _recompute_hint(self, *_args) -> None:
         kind = _kind(self._current_action())
         if kind == "buy":
-            base = "Cash impact = −(quantity × price), computed for you."
+            base = ("Buy — enter any two of quantity, price, total cost; the third "
+                    "fills in. Total = quantity × price + commission; cash out = −total.")
         elif kind == "sell":
-            base = "Cash impact = +(quantity × price), computed for you."
+            base = ("Sell — enter any two of quantity, price, total cost; the third "
+                    "fills in. Total = quantity × price − commission; cash in = +total.")
         elif kind == "reinvest":
             base = "Reinvested dividend — no cash moves; counts as income."
         elif kind == "shares":
@@ -285,10 +381,9 @@ class InvestmentTransactionDialog(QDialog):
         else:  # cash
             base = "Enter the signed cash amount (− for money out)."
         if kind in ("buy", "sell"):
-            qty = _to_decimal(self._qty.text())
-            price = _to_decimal(self._price.text())
-            if qty is not None and price is not None:
-                gross = qty * price
+            total = _to_decimal(self._total.text())
+            if total is not None:
+                gross = abs(total)
                 signed = -gross if kind == "buy" else gross
                 base += f"  →  {signed:,.2f}"
         if kind != "cash":
@@ -402,6 +497,11 @@ class InvestmentTransactionDialog(QDialog):
         posted_date = self._date.date().toString("yyyy-MM-dd")
         status = self._status.currentText()
         memo = self._memo.text().strip()
+        # Commission is a Buy/Sell-only field; already folded into `amount`, so
+        # it's stored purely as metadata (basis uses abs(amount)). None elsewhere.
+        commission = (
+            _to_decimal(self._commission.text()) if kind in ("buy", "sell") else None
+        )
 
         try:
             if self._seed is None:
@@ -419,7 +519,7 @@ class InvestmentTransactionDialog(QDialog):
                     security_id=security_id,
                     quantity=qty,
                     price=price,
-                    commission=None,
+                    commission=commission,
                 )
                 self._repo.commit()
             else:
@@ -435,7 +535,7 @@ class InvestmentTransactionDialog(QDialog):
                     security_id=security_id,
                     quantity=qty,
                     price=price,
-                    commission=None,
+                    commission=commission,
                 )
             if security_id is not None:
                 self._repo.seed_prices_from_transactions(security_ids=[security_id])
@@ -451,28 +551,26 @@ class InvestmentTransactionDialog(QDialog):
     def _compute_amount(
         self, kind: str, qty: Optional[Decimal], price: Optional[Decimal],
     ) -> Optional[Decimal]:
-        """The signed cash impact for this row. Trades derive from qty × price;
-        share transfers / reinvests are zero; income / cash are user-entered.
-        When editing a trade whose qty + price are unchanged, the seed's stored
-        amount is preserved so a re-save never drifts off the imported figure."""
+        """The signed cash impact for this row. For Buy/Sell it is the **total
+        cost** field (the authoritative leg of qty × price = total) — seeded from
+        the stored amount on edit, so a re-save never drifts off the imported
+        figure (incl. commission); share transfers / reinvests are zero; income /
+        cash are user-entered. Falls back to qty × price if total is left blank."""
         if kind in ("income", "cash"):
             return _to_decimal(self._amount.text())
         if kind in ("reinvest", "shares", "split"):
             return Decimal("0.00")
-        # buy / sell
-        if qty is None or price is None:
+        # buy / sell — total cost field drives the signed cash impact. It already
+        # nets commission in (Total = qty × price ± commission); fall back to that
+        # formula only if the user left Total blank.
+        total = _to_decimal(self._total.text())
+        if total is None and qty is not None and price is not None:
+            comm = _to_decimal(self._commission.text()) or Decimal(0)
+            s = Decimal(1) if kind == "buy" else Decimal(-1)
+            total = qty * price + s * comm
+        if total is None:
             return None
-        if (
-            self._seed is not None
-            and self._seed.action
-            and _kind(self._seed.action) == kind
-            and self._seed.quantity is not None
-            and self._seed.price is not None
-            and float(qty) == float(self._seed.quantity)
-            and float(price) == float(self._seed.price)
-        ):
-            return self._seed.amount
-        gross = qty * price
+        gross = abs(total)
         return (-gross if kind == "buy" else gross).quantize(Decimal("0.01"))
 
     def _resolve_security(self) -> tuple[Optional[int], str]:
@@ -507,3 +605,9 @@ def _trim(value) -> str:
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s
+
+
+def _money(value) -> str:
+    """Format a money total to 2 decimal places (no thousands separators, so it
+    re-parses cleanly through ``_to_decimal``)."""
+    return f"{Decimal(value):.2f}"

@@ -59,3 +59,25 @@ The stored `txn.amount` is always the **signed cash impact** (ADR-043 invariant)
 ### Ongoing responsibilities
 - Any new action added to the curated list must exist in the `qif_actions` classification sets, or the holdings/returns engines won't account for it.
 - The signed-cash-impact convention (ADR-043) is the contract `update_investment_transaction` and the dialog's amount logic both depend on — keep amount derivation in step with `qif_parser._cash_impact` if either changes.
+
+---
+
+## Amendment (2026-06-16) — Buy/Sell tri-field entry (Quantity ⇄ Price ⇄ Total cost) + Commission field
+
+**Status:** Accepted.
+
+The original dialog showed **Quantity** and **Price** for a Buy/Sell and computed the cash impact silently (`∓ qty·price`), with no way to type the **total cost** directly. Real entry often goes the other way — a confirmation says "you bought £600 of X (3 shares)" and the per-share price is the awkward third number — or the brokerage quotes a total that doesn't divide cleanly into qty × price (fractional shares, rounding, a bundled fee).
+
+**Change.** Buy/Sell now expose a third editable field, **Total cost**, forming a tri-field group with Quantity and Price. The user enters **any two** and the dialog fills the third (`qty × price = total`). Implementation in `investment_transaction_dialog.py`:
+
+- A new `_total` `QLineEdit` ("Total cost:") shown only for Buy/Sell (`_apply_action_rules`); hidden for every other action (reinvest/shares still use Qty + optional Price with cash impact 0; income/cash keep the single Amount field).
+- A **least-recently-edited solver**: `_trade_edit_order` tracks the three fields most-recent-first; on any user edit the field touched longest ago is recomputed from the other two (`_solve_trade_field`). Default order makes **Total** the computed leg, preserving the old "type qty + price" muscle memory. A `_recomputing` guard stops the programmatic `setText` from re-triggering the handler; divisor-zero and empty-field cases are no-ops.
+- **The Total cost field is now the authoritative cash leg.** `_compute_amount` for Buy/Sell returns `∓ |total|` (falling back to the formula only when Total is left blank). On **edit**, `_populate_from_seed` seeds Total from `abs(seed.amount)` — so an imported amount that carries **commission** (amount ≠ qty × price) shows as the real total and a re-save preserves it to the penny. This **replaces** the previous explicit seed-amount-preservation branch (the total-field round-trip now does the same job structurally).
+
+### Commission field (same amendment)
+
+A fourth Buy/Sell field, **Commission**, makes the fee explicit and **fully retires** the original "No commission field / no manual cash-amount override for trades" negative trade-off. The fee is the fourth term of the tri-field relationship: **Total = qty × price + s·commission**, where `s = +1` for a Buy (the fee adds to the cash out) and `−1` for a Sell (it nets off the proceeds). `_solve_trade_field` reads commission as a known constant when filling any of {qty, price, total}; a dedicated `_on_commission_changed` handler re-solves whichever leg the user left open. Commission is **metadata only** — the stored `txn.amount` already nets it in (cost basis is `abs(amount)`, `holdings.py:262`), matching the QIF `T`-total convention (`_cash_impact`), so the FIFO/returns engines need no change.
+
+Surfacing it on edit required a data-layer add: **`TransactionRow` gained a `commission: Optional[Decimal]` field**, and the four investment-aware `SELECT`s in `repository.py` now read `t.commission` (pence → Decimal). `_on_save` passes the field's value through to `insert_transaction` / `update_investment_transaction` (previously hard-coded `None`); blank → `None`, non-Buy/Sell actions → `None`.
+
+**Verified** offscreen (PySide6 6.11.1): qty+price→total, qty+total→price, edit-total→qty; Buy/Sell sign of the stored amount; Total + Commission visibility gated to Buy/Sell; commission folds in both directions (Buy qty 10 × £100 + £5 → total £1005, signed −1005.00; Sell same → £995, +995.00); editing commission re-solves the open leg; qty + total + commission → price = (total − fee)/qty; a saved Buy round-trips its £5.00 commission and re-seeds Total £1005.00 + Commission £5.00 with an unchanged re-save; blank commission stores `None`; a create entered as qty + total persists amount −600.00 / qty 3 / price 200.
