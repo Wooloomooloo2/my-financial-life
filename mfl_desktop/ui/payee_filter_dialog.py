@@ -32,21 +32,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from mfl_desktop.account_summary import period_bounds
+from mfl_desktop.account_summary import period_bounds, PERIOD_LABELS as _PERIOD_LABELS
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.reports.filters import (
     SPENDING_PERIOD_KEYS, PayeeReportFilters,
 )
 from mfl_desktop.ui.check_list_panel import CheckListPanel
 
-_PERIOD_LABELS: dict[str, str] = {
-    "quarter": "Last Quarter",
-    "6m":      "Last 6 months",
-    "ytd":     "Year to date",
-    "1y":      "Last 12 months",
-    "3y":      "Last 3 years",
-    "custom":  "Custom",
-}
+# Period labels reuse account_summary.PERIOD_LABELS (ADR-082, single source).
 
 
 class PayeeFilterDialog(QDialog):

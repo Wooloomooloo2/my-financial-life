@@ -188,10 +188,10 @@ class ReconcileWizard(QDialog):
         # Left: dates.
         self._start_date = QDateEdit()
         self._start_date.setCalendarPopup(True)
-        self._start_date.setDisplayFormat("d MMM yyyy")
+        self._start_date.setDisplayFormat("yyyy-MM-dd")
         self._end_date = QDateEdit()
         self._end_date.setCalendarPopup(True)
-        self._end_date.setDisplayFormat("d MMM yyyy")
+        self._end_date.setDisplayFormat("yyyy-MM-dd")
         self._end_date.setMaximumDate(QDate.currentDate())
         dates_form = QFormLayout()
         dates_form.addRow("Starting date:", self._start_date)

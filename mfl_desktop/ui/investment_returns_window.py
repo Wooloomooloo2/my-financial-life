@@ -58,18 +58,13 @@ from mfl_desktop.ui.returns_chart import ReturnsChart
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
+from mfl_desktop import periods
 from dataclasses import replace
 
 _CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 
-_PERIOD_LABELS: dict[str, str] = {
-    "ytd":    "Year to date",
-    "1y":     "Last 12 months",
-    "3y":     "Last 3 years",
-    "5y":     "Last 5 years",
-    "max":    "Max (all history)",
-    "custom": "Custom",
-}
+# Period labels are the shared registry (ADR-082, single source of truth).
+_PERIOD_LABELS = periods.PERIOD_LABELS
 
 _GAIN = "#16a34a"
 _LOSS = "#dc2626"
@@ -531,14 +526,9 @@ class InvestmentReturnsWindow(QMainWindow):
                 return (a, b) if a <= b else (b, a)
             except ValueError:
                 pass
-        if key == "ytd":
-            return date(today.year, 1, 1), today
-        if key == "1y":
-            return today - timedelta(days=365), today
-        if key == "3y":
-            return today - timedelta(days=3 * 365), today
-        if key == "5y":
-            return today - timedelta(days=5 * 365), today
+        if key in ("ytd", "1y", "3y", "5y"):
+            start, end = periods.period_bounds(key, today)
+            return start, end
         # "max" (and any fallback): first transaction → today.
         return (earliest or today), today
 

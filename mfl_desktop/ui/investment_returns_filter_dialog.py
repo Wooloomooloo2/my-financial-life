@@ -40,15 +40,10 @@ from mfl_desktop.reports.filters import (
     INVESTMENT_RETURNS_PERIOD_KEYS, InvestmentReturnsFilters,
 )
 from mfl_desktop.ui.check_list_panel import CheckListPanel
+from mfl_desktop import periods
 
-_PERIOD_LABELS: dict[str, str] = {
-    "ytd":    "Year to date",
-    "1y":     "Last 12 months",
-    "3y":     "Last 3 years",
-    "5y":     "Last 5 years",
-    "max":    "Max (all history)",
-    "custom": "Custom",
-}
+# Period labels are the shared registry (ADR-082, single source of truth).
+_PERIOD_LABELS = periods.PERIOD_LABELS
 
 
 def security_label(s: SecurityRow) -> str:

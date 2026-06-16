@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop import data_library, snapshots
 from mfl_desktop.account_summary import bills_due_summary
+from mfl_desktop import periods
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.import_engine.import_service import ImportService
 from mfl_desktop.ui.account_dialog import AccountDialog
@@ -113,26 +114,10 @@ STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 # restrictive for everyday scanning, so 6- and 12-month windows were added and
 # the default moved to 12 months. The default is still a *windowed* query, so
 # even a big account opens cheaply (and ADR-061 made in-view search fast).
-_WINDOW_PRESETS = [
-    ("Last 30 days",    "30d"),
-    ("Last 90 days",    "90d"),
-    ("Last 6 months",   "6m"),
-    ("Last 12 months",  "12m"),
-    ("Year to date",    "ytd"),
-    ("All",             "all"),
-]
-_DEFAULT_WINDOW_KEY = "12m"
-
-
-def _months_before(d: date, months: int) -> date:
-    """Calendar-accurate 'N months ago' (so 'Last 12 months' is the same day
-    last year, not today − 365 days). The day is clamped to the target month's
-    last valid day (e.g. 31 Mar − 1 month → 28/29 Feb)."""
-    total = d.year * 12 + (d.month - 1) - months
-    year, month = divmod(total, 12)
-    month += 1
-    last_day = calendar.monthrange(year, month)[1]
-    return date(year, month, min(d.day, last_day))
+# Register date-window presets (ADR-041) — now sourced from the shared period
+# vocabulary (ADR-082). `_months_before` moved to periods.months_before.
+_WINDOW_PRESETS = periods.options_for(periods.REGISTER_PRESETS)
+_DEFAULT_WINDOW_KEY = periods.DEFAULT_REGISTER_KEY
 
 # Mirror of the sidebar's currency-symbol table so the status-bar Net
 # matches the in-app convention. Unknown currencies fall back to no
@@ -545,18 +530,9 @@ class RegisterWindow(QMainWindow):
 
     def _current_since(self) -> Optional[str]:
         """Resolve the active window key (ADR-041) to an inclusive
-        'YYYY-MM-DD' lower bound on posted_date, or None for full history."""
-        key = self._window_key
-        if key == "all":
-            return None
-        today = date.today()
-        if key == "ytd":
-            return f"{today.year:04d}-01-01"
-        months = {"6m": 6, "12m": 12}.get(key)
-        if months is not None:
-            return _months_before(today, months).isoformat()
-        days = {"30d": 30, "90d": 90}.get(key, 90)
-        return (today - timedelta(days=days)).isoformat()
+        'YYYY-MM-DD' lower bound on posted_date, or None for full history.
+        Period maths lives in mfl_desktop.periods (ADR-082)."""
+        return periods.period_since(self._window_key, date.today())
 
     def _effective_since(self) -> Optional[str]:
         """The actual load lower bound (ADR-062): the Show preset's `since`,

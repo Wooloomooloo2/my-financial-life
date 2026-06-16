@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.account_summary import period_bounds
+from mfl_desktop.account_summary import period_bounds, PERIOD_LABELS as _PERIOD_LABELS
 from mfl_desktop.db.repository import Repository, ReportRow
 from mfl_desktop.reports import category_group_map
 from mfl_desktop.reports.filters import CategoryPayeeFilters, TYPE_CATEGORY_PAYEE
@@ -56,14 +56,7 @@ from mfl_desktop.ui.transactions_list_window import (
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
 
-_PERIOD_LABELS: dict[str, str] = {
-    "quarter": "Last Quarter",
-    "6m":      "Last 6 months",
-    "ytd":     "Year to date",
-    "1y":      "Last 12 months",
-    "3y":      "Last 3 years",
-    "custom":  "Custom",
-}
+# Period labels reuse account_summary.PERIOD_LABELS (ADR-082, single source).
 _CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
 
 

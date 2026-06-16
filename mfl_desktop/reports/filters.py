@@ -21,6 +21,15 @@ import json
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Optional
 
+# Period preset key sets are owned by mfl_desktop.periods (ADR-082, single
+# source of truth). Re-aliased to the historical names here so the report
+# dialogs/windows that import them keep working unchanged.
+from mfl_desktop.periods import (  # noqa: F401
+    REPORT_PRESETS as SPENDING_PERIOD_KEYS,
+    INVESTMENT_PRESETS as INVESTMENT_RETURNS_PERIOD_KEYS,
+    SANKEY_PRESETS as SANKEY_PERIOD_KEYS,
+)
+
 # Discriminator strings used as the ``report.type`` enum values and as the
 # keys in ``FILTER_DEFAULTS`` / ``filters_from_json``. Mirrors the CHECK
 # constraint in 0010_reports.sql.
@@ -55,12 +64,8 @@ REPORT_TYPE_LABELS: dict[str, str] = {
 
 # ── Spending Over Time ──────────────────────────────────────────────────────
 
-# Period preset keys (mirrors mfl_desktop.account_summary.PERIOD_KEYS so the
-# vocabulary is consistent across windows). "custom" is the escape hatch
-# that uses custom_start / custom_end.
-SPENDING_PERIOD_KEYS: tuple[str, ...] = (
-    "quarter", "6m", "ytd", "1y", "3y", "custom",
-)
+# SPENDING_PERIOD_KEYS is imported at the top from mfl_desktop.periods
+# (= REPORT_PRESETS). "custom" is the escape hatch using custom_start/custom_end.
 
 # Granularity values stored in the blob. "auto" picks a sensible bucket
 # size based on the date span — the window resolves it before calling the
@@ -176,12 +181,9 @@ class IncomeExpenseFilters:
 
 # ── Investment Returns (ADR-046) ────────────────────────────────────────────
 
-# Investment-native period presets. "max" = first transaction → today
-# (lifetime), which the spending presets don't offer; "custom" uses
-# custom_start / custom_end. Resolved to date bounds by the report window.
-INVESTMENT_RETURNS_PERIOD_KEYS: tuple[str, ...] = (
-    "ytd", "1y", "3y", "5y", "max", "custom",
-)
+# INVESTMENT_RETURNS_PERIOD_KEYS is imported at the top from mfl_desktop.periods
+# (= INVESTMENT_PRESETS). "max" = first transaction → today (lifetime), which the
+# spending presets don't offer; "custom" uses custom_start / custom_end.
 
 
 @dataclass(frozen=True)
@@ -226,10 +228,9 @@ class InvestmentReturnsFilters:
 
 # ── Sankey (ADR-056) ────────────────────────────────────────────────────────
 
-# Income → Total → Expenses flow. Period presets are finance-native and
-# distinct from the spending presets: month-to-date and last-month matter for a
-# cash-flow view. "custom" uses custom_start / custom_end.
-SANKEY_PERIOD_KEYS: tuple[str, ...] = ("ytd", "mtd", "last_month", "custom")
+# Income → Total → Expenses flow. SANKEY_PERIOD_KEYS is imported at the top from
+# mfl_desktop.periods (= SANKEY_PRESETS) — finance-native and distinct from the
+# spending presets: month-to-date and last-month matter for a cash-flow view.
 SANKEY_VALUE_MODES: tuple[str, ...] = ("amount", "percent")
 
 

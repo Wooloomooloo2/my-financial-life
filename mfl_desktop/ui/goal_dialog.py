@@ -130,7 +130,7 @@ class GoalDialog(QDialog):
         # ── target date ──
         self._date = QDateEdit()
         self._date.setCalendarPopup(True)
-        self._date.setDisplayFormat("d MMM yyyy")
+        self._date.setDisplayFormat("yyyy-MM-dd")
         if editing:
             y, m, d = (int(x) for x in goal.target_date.split("-"))
             self._date.setDate(QDate(y, m, d))

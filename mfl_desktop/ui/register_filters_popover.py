@@ -55,13 +55,13 @@ class RegisterFiltersPopover(QDialog):
         self._from_check = QCheckBox("From:")
         self._from_edit = QDateEdit(today)
         self._from_edit.setCalendarPopup(True)
-        self._from_edit.setDisplayFormat("d MMM yyyy")
+        self._from_edit.setDisplayFormat("yyyy-MM-dd")
         self._from_edit.setEnabled(False)
 
         self._to_check = QCheckBox("To:")
         self._to_edit = QDateEdit(today)
         self._to_edit.setCalendarPopup(True)
-        self._to_edit.setDisplayFormat("d MMM yyyy")
+        self._to_edit.setDisplayFormat("yyyy-MM-dd")
         self._to_edit.setEnabled(False)
 
         # ── amount range (signed) ──

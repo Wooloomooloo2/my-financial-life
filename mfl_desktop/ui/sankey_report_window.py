@@ -44,14 +44,9 @@ from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
+from mfl_desktop import periods
 from dataclasses import replace
 
-_PERIOD_LABELS = [
-    ("Year to date", "ytd"),
-    ("Month to date", "mtd"),
-    ("Last month", "last_month"),
-    ("Custom…", "custom"),
-]
 _DEPTH_LABELS = [
     ("Top level", 1),
     ("2 levels", 2),
@@ -173,9 +168,12 @@ class SankeyReportWindow(QMainWindow):
         row.setContentsMargins(12, 4, 12, 8)
         row.setSpacing(10)
 
+        # Timeframe presets sourced from the shared vocabulary (ADR-082); the
+        # Sankey set now includes Last 6/12 months alongside its cash-flow-native
+        # MTD / Last month. "Custom" keeps its … affordance (opens a dialog).
         self._period_combo = QComboBox()
-        for label, key in _PERIOD_LABELS:
-            self._period_combo.addItem(label, key)
+        for label, key in periods.options_for(periods.SANKEY_PRESETS):
+            self._period_combo.addItem(label + ("…" if key == "custom" else ""), key)
         self._period_combo.currentIndexChanged.connect(self._on_period_changed)
         row.addWidget(QLabel("Timeframe:"))
         row.addWidget(self._period_combo)
@@ -383,10 +381,12 @@ class SankeyReportWindow(QMainWindow):
             last_prev = first_this - timedelta(days=1)
             return date(last_prev.year, last_prev.month, 1), last_prev
         if f.period_key == "custom":
+            # Partial custom bounds fall back to YTD-start / today (unchanged).
             s = date.fromisoformat(f.custom_start) if f.custom_start else date(today.year, 1, 1)
             e = date.fromisoformat(f.custom_end) if f.custom_end else today
             return s, e
-        return date(today.year, 1, 1), today      # ytd (default)
+        start, end = periods.period_bounds(f.period_key, today)  # ytd / mtd / last_month
+        return start, end
 
     def _rolled_pence(self, cid: int, aggregate: dict[int, int]) -> int:
         """Category value rolled up its subtree: own line total + every

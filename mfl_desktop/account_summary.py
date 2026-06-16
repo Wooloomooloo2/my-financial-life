@@ -31,96 +31,25 @@ from decimal import Decimal
 from typing import Iterable, Optional
 
 from mfl_desktop.db.repository import ScheduledTxnRow, SplitLine, TransactionRow
-
-
-# ── period presets ─────────────────────────────────────────────────────────
-
-# Identifier used by the window's period selector. The labels are the
-# button text; the helper functions below derive (period_start, period_end)
-# from today + the selected key. The "custom" preset doesn't resolve to
-# a fixed window — the calling window prompts the user for explicit
-# from / to dates and bypasses ``period_bounds`` for that case.
-#
-# This set was updated in the ADR-033 amendment (2026-06-06) — previous
-# presets ("30d","90d","ytd","1y","5y","all") were swapped for finance-
-# native ranges plus a Custom escape hatch.
-PERIOD_KEYS: tuple[str, ...] = ("quarter", "6m", "ytd", "1y", "3y", "custom")
-
-PERIOD_LABELS: dict[str, str] = {
-    "quarter": "Last Quarter",
-    "6m":      "Last 6 months",
-    "ytd":     "Year to date",
-    "1y":      "Last 12 months",
-    "3y":      "Last 3 years",
-    "custom":  "Custom",
-}
-
-
-def period_bounds(
-    key: str, today: date, earliest_txn_date: Optional[date] = None,
-) -> tuple[date, date]:
-    """Return (period_start, period_end) for the given preset.
-
-    "Last Quarter" is a rolling 90-day window (consistent with "Last 6
-    months" and "Last 12 months" being rolling, not calendar-period —
-    if the owner wants previous-calendar-quarter semantics later, that's
-    a small follow-up). ``earliest_txn_date`` is no longer consulted —
-    the previous "All time" preset was retired in favour of "Custom"
-    (the owner picks the bounds explicitly when they need a long tail).
-    ``key == "custom"`` raises so a leaky caller doesn't silently use
-    today's-only bounds — the window must supply its own dates."""
-    if key == "quarter":
-        return today - timedelta(days=90), today
-    if key == "6m":
-        return today - timedelta(days=180), today
-    if key == "ytd":
-        return date(today.year, 1, 1), today
-    if key == "1y":
-        return today - timedelta(days=365), today
-    if key == "3y":
-        return today - timedelta(days=3 * 365), today
-    if key == "custom":
-        raise ValueError(
-            "period_bounds: 'custom' has no fixed window — "
-            "the calling window supplies its own dates."
-        )
-    raise ValueError(f"Unknown period key: {key!r}")
-
-
-_MONTH_ABBR_FOR_RANGE = (
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+from mfl_desktop import periods as _periods
+from mfl_desktop.periods import (  # back-compat re-exports (ADR-082)  # noqa: F401
+    fmt_date_range,
+    months_before,
+    period_bounds,
 )
 
 
-def fmt_date_range(start: date, end: date) -> str:
-    """Compact human range — ``1 Jun → 6 Jun`` when the years agree,
-    ``1 Jun 2025 → 6 Jun 2026`` otherwise. Avoids ``%-d`` (Windows
-    pitfall — see CLAUDE_CONTEXT). Used by the summary and drill-down
-    windows for the Custom-period chip + REPORT header label."""
-    smonth = _MONTH_ABBR_FOR_RANGE[start.month - 1]
-    emonth = _MONTH_ABBR_FOR_RANGE[end.month - 1]
-    if start.year == end.year:
-        return f"{start.day} {smonth} → {end.day} {emonth}"
-    return (
-        f"{start.day} {smonth} {start.year} "
-        f"→ {end.day} {emonth} {end.year}"
-    )
-
-
-def period_display_label(
-    key: str,
-    custom_start: Optional[date] = None,
-    custom_end: Optional[date] = None,
-) -> str:
-    """Human label for a period selection. For ``"custom"`` callers must
-    supply both bounds — falls back to the bare ``"Custom"`` string if
-    they're missing (defensive)."""
-    if key == "custom":
-        if custom_start is not None and custom_end is not None:
-            return f"Custom: {fmt_date_range(custom_start, custom_end)}"
-        return PERIOD_LABELS["custom"]
-    return PERIOD_LABELS.get(key, key)
+# ── period presets — single source of truth is mfl_desktop.periods (ADR-082) ─
+# The period vocabulary, bounds maths, and labels moved to mfl_desktop.periods
+# so the register, reports, and these account-summary computations all share
+# one definition. PERIOD_KEYS/PERIOD_LABELS below expose the *report* preset set
+# (the account-summary window's menu = periods.REPORT_PRESETS); period_bounds /
+# fmt_date_range / months_before are re-exported at the top of this module.
+# These aliases keep existing importers working — new code should import from
+# mfl_desktop.periods directly.
+PERIOD_KEYS: tuple[str, ...] = _periods.REPORT_PRESETS
+PERIOD_LABELS: dict[str, str] = _periods.labels_for(_periods.REPORT_PRESETS)
+period_display_label = _periods.period_label
 
 
 # ── granularity / bucketing ────────────────────────────────────────────────

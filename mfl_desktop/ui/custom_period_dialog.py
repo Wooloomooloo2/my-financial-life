@@ -56,7 +56,7 @@ class CustomPeriodDialog(QDialog):
                                           initial_from.month,
                                           initial_from.day))
         self._from_edit.setCalendarPopup(True)
-        self._from_edit.setDisplayFormat("d MMM yyyy")
+        self._from_edit.setDisplayFormat("yyyy-MM-dd")
         # Keep From ≤ today so the user can't pick a future start; the
         # chart only shows posted txns.
         self._from_edit.setMaximumDate(QDate.currentDate())
@@ -65,7 +65,7 @@ class CustomPeriodDialog(QDialog):
                                         initial_to.month,
                                         initial_to.day))
         self._to_edit.setCalendarPopup(True)
-        self._to_edit.setDisplayFormat("d MMM yyyy")
+        self._to_edit.setDisplayFormat("yyyy-MM-dd")
         self._to_edit.setMaximumDate(QDate.currentDate())
 
         form = QFormLayout()

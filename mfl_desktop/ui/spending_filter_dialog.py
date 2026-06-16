@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.account_summary import period_bounds
+from mfl_desktop.account_summary import period_bounds, PERIOD_LABELS as _PERIOD_LABELS
 from mfl_desktop.db.repository import (
     AccountSummary, CategoryNode, Repository,
 )
@@ -56,14 +56,7 @@ from mfl_desktop.ui.check_list_panel import CheckListPanel
 # Shared with the report window.
 UNCATEGORISED_ID = 1
 
-_PERIOD_LABELS: dict[str, str] = {
-    "quarter": "Last Quarter",
-    "6m":      "Last 6 months",
-    "ytd":     "Year to date",
-    "1y":      "Last 12 months",
-    "3y":      "Last 3 years",
-    "custom":  "Custom",
-}
+# Period labels reuse account_summary.PERIOD_LABELS (ADR-082, single source).
 _GRANULARITY_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Auto",       "auto"),
     ("Weekly",     "weekly"),
