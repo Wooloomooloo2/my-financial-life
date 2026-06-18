@@ -70,13 +70,13 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 ### P2 — Make every report clickable & cross-linked ⭐ (owner explicitly asked)
 **Problem (audited):** 5 surfaces drill, 4 are dead-ends. Drill-capable: Spending, Payee, Category & Payee, Account Summary (all → shared `TransactionsListWindow`), plus Home (navigation) and Budget (→ `BudgetDrillDownWindow`). **Dead-ends: Net Worth, Income & Expense, Sankey, Investment Returns.**
 
-**Tasks (all reuse the existing `TransactionsListWindow` drill target):**
-- [ ] **Sankey** — click an income/expense node → transactions for that category + period (`sankey_chart.py` needs a `node_clicked` signal + hit-test). _High value; Sankey is a headline report._
-- [ ] **Income & Expense** — click a month bar → that bucket's transactions (`income_expense_chart.py` needs `segment_clicked`, mirror Spending).
-- [ ] **Investment Returns** — click a security row → that security's buys/sells/dividends over the period.
-- [ ] **Net Worth** — click an outer-ring account slice → that account's register (or per-account Summary). _Lower priority; confirm it doesn't muddy the "at a glance" purpose._
-- [ ] **Budget drill-down → transactions** — add a "see transactions" link from `BudgetDrillDownWindow` to close the envelope→ledger gap.
-- [ ] Audit that **every** drill opens the *same* target with consistent breadcrumb behaviour (one `TransactionsListWindow`, not bespoke variants).
+**Status: shipped 2026-06-18 as ADR-083.** All five resolved; two new `TxnListFilter` dimensions (kind, security) reused the shared `TransactionsListWindow`.
+- [x] **Sankey** — `SankeyNode.category_id` + `node_clicked` hit-test → `for_category` (+descendants) over the report's period/account scope. _Headline report, done._
+- [x] **Income & Expense** — chart `segment_clicked(kind, bucket_key)` + new pure `income_expense.bucket_bounds` → `for_kind` (non-transfer, kind's category set, sign-by-kind — reconciles with the bar).
+- [x] **Investment Returns** — chart is portfolio-level, so the per-security **table** drills: sid stashed on the row, double-click → `for_security`.
+- [x] **Net Worth** — `DonutChild.account_id` + `account_clicked` → window `account_activated` → `register_window._open_account_summary` (owner fork: **Account Summary page**, not the flat register).
+- [x] **Budget drill-down → transactions** — **already satisfied**: the matrix double-click-drills an Actual cell into `BudgetDrillDownWindow` (editable txn-id-set register, reconciles exactly). Deliberately kept over the shared window (perimeter bucketing can't be expressed by the shared filters).
+- [x] Drill consistency audited — Sankey/I&E/Returns all open the one `TransactionsListWindow`; Net Worth opens the canonical Account Summary; Budget keeps its precise bespoke register (documented).
 
 ### P3 — Remove overlapping functionality ⭐ (owner explicitly asked)
 **Candidates (audited):**
@@ -280,7 +280,7 @@ K3 App Stores (sandbox work) → C3 store listings → F3 SimpleFIN/Plaid ship e
 
 1.0 ships when ALL of:
 - [ ] **P1** one date-format + one period helper; no duplicated preset/label code.
-- [ ] **P2** every report drills to the shared transactions view; no dead-end charts.
+- [x] **P2** every report drills to the shared transactions view; no dead-end charts. _(ADR-083, 2026-06-18 — Net Worth drills to the Account Summary page per owner fork; Budget keeps its precise bespoke register.)_
 - [ ] **P3** the four overlap candidates resolved (schedules entry points, filter-dialog base class, transfer-match unification, drill consistency).
 - [ ] **P4/P5** UI polished, dark-mode-complete, first-run + Help + About present.
 - [ ] **K1/K2** signed + notarised macOS DMG and signed Windows installer that pass Gatekeeper/SmartScreen, with working auto-update.

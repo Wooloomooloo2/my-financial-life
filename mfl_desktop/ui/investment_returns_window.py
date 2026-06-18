@@ -56,12 +56,20 @@ from mfl_desktop.ui.investment_returns_filter_dialog import (
 )
 from mfl_desktop.ui.returns_chart import ReturnsChart
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
+from mfl_desktop.ui.transactions_list_window import (
+    TransactionsListWindow, TxnListFilter,
+)
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
 from mfl_desktop import periods
 from dataclasses import replace
 
 _CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
+
+# Role on a security row's first cell carrying its security id for the
+# drill-down (ADR-083) — kept off Qt.UserRole, which _SortItem uses for the
+# numeric sort key.
+_SID_ROLE = Qt.UserRole + 1
 
 # Period labels are the shared registry (ADR-082, single source of truth).
 
@@ -195,6 +203,10 @@ class InvestmentReturnsWindow(QMainWindow):
         # order (held first, by total return); once the user clicks a header
         # the choice sticks across filter changes.
         self._table.setSortingEnabled(True)
+        # Double-click a security row → its transactions over the period
+        # (ADR-083). The chart is portfolio-level so the table is the drill
+        # source; each row's security id is stashed on its first cell.
+        self._table.cellDoubleClicked.connect(self._on_security_row_activated)
         hh = self._table.horizontalHeader()
         hh.setSortIndicatorShown(True)
         hh.setSortIndicator(-1, Qt.AscendingOrder)
@@ -531,6 +543,38 @@ class InvestmentReturnsWindow(QMainWindow):
         # "max" (and any fallback): first transaction → today.
         return (earliest or today), today
 
+    def _on_security_row_activated(self, row: int, _col: int) -> None:
+        """Double-click a security row → its buys / sells / dividends over the
+        report's period (ADR-083). A single selected account drills
+        per-account; the whole-portfolio / subset case opens cross-account."""
+        item = self._table.item(row, 0)
+        if item is None:
+            return
+        sid = item.data(_SID_ROLE)
+        if sid is None:
+            return
+        name_item = self._table.item(row, 1)
+        label = item.text() or (name_item.text() if name_item is not None else "")
+        d_from = getattr(self, "_last_d_from", None)
+        d_to = getattr(self, "_last_d_to", None)
+        if d_from is None or d_to is None:
+            return
+        acc_ids = list(self._current_filters.account_ids)
+        if len(acc_ids) == 1:
+            account_id: Optional[int] = acc_ids[0]
+            acct = self._accounts_by_id.get(account_id)
+            account_name = acct.name if acct is not None else ""
+        else:
+            account_id, account_name = None, ""
+        flt = TxnListFilter.for_security(
+            account_id=account_id, account_name=account_name,
+            security_id=int(sid), security_label=label,
+            period_key="custom", custom_start=d_from, custom_end=d_to,
+        )
+        win = TransactionsListWindow(self._repo, flt, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.show()
+
     def _conv(self, amount: Decimal, from_ccy: str, on_date: str) -> Decimal:
         if from_ccy == self._display_ccy:
             return amount
@@ -589,6 +633,8 @@ class InvestmentReturnsWindow(QMainWindow):
             )
 
         d_from, d_to = self._resolve_bounds(earliest)
+        # Remember the resolved window so a row drill-down can reuse it.
+        self._last_d_from, self._last_d_to = d_from, d_to
         samples = _month_end_samples(d_from, d_to)
         samples_iso = sorted({d.isoformat() for d in samples})
         window_start = d_from.isoformat()
@@ -803,6 +849,8 @@ class InvestmentReturnsWindow(QMainWindow):
                     item.setForeground(QColor(colour))
                 if sortkey is not None:
                     item.setData(Qt.UserRole, sortkey)
+                if c == 0:
+                    item.setData(_SID_ROLE, m["sid"])
                 self._table.setItem(r, c, item)
         self._table.setSortingEnabled(True)
 

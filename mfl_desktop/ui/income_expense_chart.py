@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -101,6 +101,10 @@ class IncomeExpenseChart(QWidget):
     _LEGEND_BAND   = 26
     _BAR_SLOT_FILL = 0.60
     _BAR_RADIUS_MAX = 5.0
+
+    # Left-click on an income / expense bar → (kind, bucket_key) for the
+    # drill-down (ADR-083). The window resolves the key to a date range.
+    segment_clicked = Signal(str, str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -489,10 +493,22 @@ class IncomeExpenseChart(QWidget):
                     text,
                     self,
                 )
+                self.setCursor(Qt.PointingHandCursor)
                 return
+        self.unsetCursor()
         QToolTip.hideText()
         super().mouseMoveEvent(event)
 
+    def mousePressEvent(self, event) -> None:  # noqa: D401 — Qt override
+        if event.button() == Qt.LeftButton and self._buckets:
+            pos = event.position() if hasattr(event, "position") else event.posF()
+            for rect, kind, idx in self._hitmap:
+                if rect.contains(pos):
+                    self.segment_clicked.emit(kind, self._buckets[idx].key)
+                    return
+        super().mousePressEvent(event)
+
     def leaveEvent(self, event) -> None:  # noqa: D401 — Qt override
+        self.unsetCursor()
         QToolTip.hideText()
         super().leaveEvent(event)

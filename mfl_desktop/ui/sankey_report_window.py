@@ -42,6 +42,9 @@ from mfl_desktop.ui.custom_period_dialog import CustomPeriodDialog
 from mfl_desktop.ui.sankey_chart import SankeyChart, SankeyNode
 from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
+from mfl_desktop.ui.transactions_list_window import (
+    TransactionsListWindow, TxnListFilter,
+)
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
 from mfl_desktop import periods
@@ -106,6 +109,7 @@ class SankeyReportWindow(QMainWindow):
         outer.addWidget(rule)
 
         self._chart = SankeyChart()
+        self._chart.node_clicked.connect(self._on_node_clicked)
         self._summary_panel = self._build_summary_panel()
         body = QSplitter(Qt.Horizontal)
         self._body_splitter = body
@@ -388,6 +392,30 @@ class SankeyReportWindow(QMainWindow):
         start, end = periods.period_bounds(f.period_key, today)  # ytd / mtd / last_month
         return start, end
 
+    def _on_node_clicked(self, category_id: int, label: str) -> None:
+        """Drill a Sankey category node to its transactions (ADR-083) — that
+        category and its descendants over the report's period and account
+        scope. A single selected account drills per-account; 0 / a subset
+        opens the cross-account view (mirrors the Payee report)."""
+        d_from, d_to = self._resolve_bounds()
+        acc_ids = list(self._current_filters.account_ids)
+        if len(acc_ids) == 1:
+            account_id: Optional[int] = acc_ids[0]
+            account_name = next(
+                (a.name for a in self._repo.list_accounts() if a.id == account_id),
+                "",
+            )
+        else:
+            account_id, account_name = None, ""
+        flt = TxnListFilter.for_category(
+            account_id=account_id, account_name=account_name,
+            category_id=category_id, category_label=label,
+            period_key="custom", custom_start=d_from, custom_end=d_to,
+        )
+        win = TransactionsListWindow(self._repo, flt, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.show()
+
     def _rolled_pence(self, cid: int, aggregate: dict[int, int]) -> int:
         """Category value rolled up its subtree: own line total + every
         descendant's. The aggregate only holds same-kind leaves, so transfer /
@@ -421,6 +449,7 @@ class SankeyReportWindow(QMainWindow):
                 col = colour(idx)
                 node = SankeyNode(
                     label=self._cat[c].name, value=v / 100.0, color=col,
+                    category_id=c,
                 )
                 if depth_remaining > 1:
                     kids = [

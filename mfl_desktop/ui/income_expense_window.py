@@ -43,7 +43,7 @@ from mfl_desktop.reports.filters import (
     IncomeExpenseFilters, TYPE_INCOME_EXPENSE,
 )
 from mfl_desktop.reports.income_expense import (
-    build_buckets, compute_summary, enumerate_buckets,
+    bucket_bounds, build_buckets, compute_summary, enumerate_buckets,
 )
 from mfl_desktop.ui.chart_helpers import fmt_currency
 from mfl_desktop.ui.income_expense_chart import IncomeExpenseChart
@@ -51,6 +51,9 @@ from mfl_desktop.ui.income_expense_filter_dialog import (
     IncomeExpenseFilterDialog,
 )
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
+from mfl_desktop.ui.transactions_list_window import (
+    TransactionsListWindow, TxnListFilter,
+)
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
 from dataclasses import replace
@@ -155,6 +158,10 @@ class IncomeExpenseWindow(QMainWindow):
 
         # ── chart + summary panel ──
         self._chart = IncomeExpenseChart()
+        self._chart.segment_clicked.connect(self._on_segment_clicked)
+        # Granularity of the last render — the drill resolves a clicked
+        # bucket key to its date span against this (ADR-083).
+        self._last_granularity: Optional[str] = None
         self._summary_panel = self._build_summary_panel()
 
         self._body_splitter = QSplitter(Qt.Horizontal)
@@ -317,6 +324,7 @@ class IncomeExpenseWindow(QMainWindow):
             include_transfers=filters.include_transfers,
         )
 
+        self._last_granularity = sql_granularity
         bucket_order = enumerate_buckets(d_from, d_to, sql_granularity)
         buckets = build_buckets(
             bucket_order, result["income"], result["expense"],
@@ -357,6 +365,37 @@ class IncomeExpenseWindow(QMainWindow):
             filters=self._current_filters, d_from=None, d_to=None,
             granularity=None, summary=None, unconverted={}, note=message,
         )
+
+    def _on_segment_clicked(self, kind: str, bucket_key: str) -> None:
+        """Drill a clicked income / expense bar to its transactions (ADR-083).
+        The bar's bucket key resolves to a date span; the drill scopes to that
+        span + the cash-flow kind (income inflows / expense outflows, transfers
+        excluded), matching the bar's value."""
+        if self._last_granularity is None:
+            return
+        try:
+            d_from, d_to = bucket_bounds(bucket_key, self._last_granularity)
+        except ValueError:
+            return
+        # Account scope: a single selected account drills per-account; 0 (all)
+        # or a subset opens the cross-account view (mirrors the Payee report).
+        acc_ids = list(self._current_filters.account_ids)
+        if len(acc_ids) == 1:
+            account_id: Optional[int] = acc_ids[0]
+            account_name = next(
+                (a.name for a in self._all_accounts if a.id == account_id), "",
+            )
+        else:
+            account_id, account_name = None, ""
+        kind_label = "Income" if kind == "income" else "Expense"
+        flt = TxnListFilter.for_kind(
+            account_id=account_id, account_name=account_name,
+            kind=kind, kind_label=kind_label,
+            period_key="custom", custom_start=d_from, custom_end=d_to,
+        )
+        win = TransactionsListWindow(self._repo, flt, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.show()
 
     def _fmt(self, value, decimals: int = 2) -> str:
         symbol = _symbol_for(self._display_ccy) or ""

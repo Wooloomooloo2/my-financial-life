@@ -3197,6 +3197,9 @@ class RegisterWindow(QMainWindow):
         win = NetWorthWindow(self._repo, parent=self)
         win.setAttribute(Qt.WA_DeleteOnClose)
         win.destroyed.connect(self._on_net_worth_closed)
+        # Clicking an account slice opens its Account Summary via the
+        # canonical single-instance path (ADR-083).
+        win.account_activated.connect(self._open_account_summary)
         self._net_worth_win = win
         win.show()
 

@@ -115,6 +115,15 @@ class TxnListFilter:
     # When True, match only transactions with NO payee (the report's
     # "(No payee)" group). Takes precedence over payee_id / payee_ids.
     payee_is_null: bool = False
+    # Cash-flow kind drill (ADR-083 — Income & Expense report): when set
+    # ('income' | 'expense') the window scopes to that kind's categories +
+    # matching sign + non-transfer, reconciling with the report's bars.
+    kind: Optional[str] = None
+    kind_label: str = ""
+    # Security drill (ADR-083 — Investment Returns report): when set, match
+    # only transactions on that security (its buys / sells / dividends).
+    security_id: Optional[int] = None
+    security_label: str = ""
 
     @classmethod
     def for_category(
@@ -167,6 +176,43 @@ class TxnListFilter:
             payee_ids=payee_ids, payee_is_null=payee_is_null,
         )
 
+    @classmethod
+    def for_kind(
+        cls, *, account_id: Optional[int], account_name: str,
+        kind: str, kind_label: str, period_key: str,
+        custom_start: Optional[date] = None,
+        custom_end: Optional[date] = None,
+    ) -> "TxnListFilter":
+        """Drill-down for an Income & Expense bar (ADR-083): every
+        ``kind``-category flow (income inflows / expense outflows, transfers
+        excluded) over the period — matches the report's kind-based totals."""
+        return cls(
+            account_id=account_id, account_name=account_name,
+            category_id=None, category_label="",
+            payee_id=None, payee_label="",
+            period_key=period_key, title_label=kind_label,
+            custom_start=custom_start, custom_end=custom_end,
+            kind=kind, kind_label=kind_label,
+        )
+
+    @classmethod
+    def for_security(
+        cls, *, account_id: Optional[int], account_name: str,
+        security_id: int, security_label: str, period_key: str,
+        custom_start: Optional[date] = None,
+        custom_end: Optional[date] = None,
+    ) -> "TxnListFilter":
+        """Drill-down for an Investment Returns security row (ADR-083): that
+        security's buys / sells / dividends over the period."""
+        return cls(
+            account_id=account_id, account_name=account_name,
+            category_id=None, category_label="",
+            payee_id=None, payee_label="",
+            period_key=period_key, title_label=security_label,
+            custom_start=custom_start, custom_end=custom_end,
+            security_id=security_id, security_label=security_label,
+        )
+
     def signature(self) -> tuple:
         """Hashable key for the single-instance-per-filter registry
         on the summary window (ADR-034 §3 window policy). Custom bounds
@@ -179,6 +225,8 @@ class TxnListFilter:
             self.payee_id,
             self.payee_ids,
             self.payee_is_null,
+            self.kind,
+            self.security_id,
             self.custom_start.isoformat() if self.custom_start else None,
             self.custom_end.isoformat() if self.custom_end else None,
         )
@@ -209,6 +257,9 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         self._category_descendant_ids: Optional[set[int]] = None
         self._date_from: Optional[str] = None
         self._date_to: Optional[str] = None
+        self._kind: Optional[str] = None
+        self._kind_cat_ids: Optional[frozenset[int]] = None
+        self._security_id: Optional[int] = None
 
     def set_payee_id(self, payee_id: Optional[int]) -> None:
         self._payee_id = payee_id
@@ -236,6 +287,23 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         self._date_to = date_to
         self.invalidateRowsFilter()
 
+    def set_kind_filter(
+        self, kind: Optional[str], category_ids: Optional[set[int]],
+    ) -> None:
+        """Income & Expense drill (ADR-083): ``kind`` is 'income' or
+        'expense'; ``category_ids`` is that kind's category id set. A row
+        passes only when it's on one of those categories, is non-transfer,
+        and its sign matches the kind (income inflows / expense outflows) —
+        the same definition as ``Repository.income_expense_series``."""
+        self._kind = kind
+        self._kind_cat_ids = frozenset(category_ids) if category_ids else None
+        self.invalidateRowsFilter()
+
+    def set_security_id(self, security_id: Optional[int]) -> None:
+        """Investment Returns drill (ADR-083): match only this security."""
+        self._security_id = security_id
+        self.invalidateRowsFilter()
+
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
         if not super().filterAcceptsRow(source_row, parent):
             return False
@@ -251,6 +319,18 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         if self._category_descendant_ids is not None:
             if row.category_id not in self._category_descendant_ids:
                 return False
+        if self._kind is not None:
+            if row.transfer_id is not None:
+                return False
+            if (self._kind_cat_ids is not None
+                    and row.category_id not in self._kind_cat_ids):
+                return False
+            if self._kind == "income" and row.amount <= 0:
+                return False
+            if self._kind == "expense" and row.amount >= 0:
+                return False
+        if self._security_id is not None and row.security_id != self._security_id:
+            return False
         if self._date_from and row.posted_date < self._date_from:
             return False
         if self._date_to and row.posted_date > self._date_to:
@@ -311,6 +391,10 @@ class TransactionsListWindow(QMainWindow):
         )
         self._payee_is_null: bool = txn_filter.payee_is_null
         self._payee_label: str = txn_filter.payee_label
+        self._kind: Optional[str] = txn_filter.kind
+        self._kind_label: str = txn_filter.kind_label
+        self._security_id: Optional[int] = txn_filter.security_id
+        self._security_label: str = txn_filter.security_label
         self._period_key: str = txn_filter.period_key
         self._title_label: str = txn_filter.title_label
         self._custom_start: Optional[date] = txn_filter.custom_start
@@ -526,6 +610,17 @@ class TransactionsListWindow(QMainWindow):
         self._proxy.set_payee_null(self._payee_is_null)
         self._proxy.set_payee_ids(self._payee_ids)
         self._proxy.set_payee_id(self._payee_id)
+        # Cash-flow kind — Income & Expense drill (ADR-083). Resolve the
+        # kind's category id set here (the proxy stays repo-free).
+        if self._kind is not None:
+            kind_ids = {
+                c.id for c in self._repo.list_categories_flat(kinds=(self._kind,))
+            }
+            self._proxy.set_kind_filter(self._kind, kind_ids)
+        else:
+            self._proxy.set_kind_filter(None, None)
+        # Security — Investment Returns drill (ADR-083).
+        self._proxy.set_security_id(self._security_id)
         # Date range — from period preset.
         start, end = self._resolve_period()
         self._proxy.set_date_range(start.isoformat(), end.isoformat())
@@ -583,6 +678,15 @@ class TransactionsListWindow(QMainWindow):
                     f"Payee: {self._payee_label}",
                     self._on_remove_payee,
                 )
+            )
+        # Cash-flow kind chip (ADR-083 Income & Expense drill) — non-removable
+        # (the kind is the drill's defining dimension, like the period).
+        if self._kind is not None and self._kind_label:
+            self._chips_layout.addWidget(self._make_chip(self._kind_label, None))
+        # Security chip (ADR-083 Investment Returns drill) — non-removable.
+        if self._security_id is not None and self._security_label:
+            self._chips_layout.addWidget(
+                self._make_chip(f"Security: {self._security_label}", None)
             )
         self._chips_layout.addStretch(1)
 

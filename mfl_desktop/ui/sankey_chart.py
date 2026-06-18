@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QToolTip, QWidget
 
@@ -38,6 +38,10 @@ class SankeyNode:
     children: list["SankeyNode"] = field(default_factory=list)
     is_other: bool = False
     is_balance: bool = False          # a Savings / Deficit balancing node
+    # The category this box represents (ADR-083 drill-down). None for the
+    # synthetic 'Other' fold and the Savings / Deficit balance nodes, which
+    # aren't a single category and so aren't clickable.
+    category_id: Optional[int] = None
     _rect: Optional[QRectF] = None
     _col: int = 0
     _parent: Optional["SankeyNode"] = None
@@ -57,6 +61,10 @@ _MUTED = "#6b7280"
 
 class SankeyChart(QWidget):
     """Renders the income/expense flow. Call ``render(...)`` to (re)draw."""
+
+    # Left-click on a category node → (category_id, label) for the
+    # drill-down (ADR-083). Not emitted for 'Other' / balance nodes.
+    node_clicked = Signal(int, str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -342,8 +350,24 @@ class SankeyChart(QWidget):
                     f"  ·  {pct:.1f}%",
                     self,
                 )
+                if node.category_id is not None:
+                    self.setCursor(Qt.PointingHandCursor)
+                else:
+                    self.unsetCursor()
                 return
+        self.unsetCursor()
         QToolTip.hideText()
 
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            pos = (event.position() if hasattr(event, "position")
+                   else QPointF(event.pos()))
+            for rect, node, _side_total in self._hitmap:
+                if rect.contains(pos) and node.category_id is not None:
+                    self.node_clicked.emit(node.category_id, node.label)
+                    return
+        super().mousePressEvent(event)
+
     def leaveEvent(self, _event) -> None:
+        self.unsetCursor()
         QToolTip.hideText()

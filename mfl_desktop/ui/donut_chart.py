@@ -20,7 +20,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
@@ -34,6 +34,9 @@ class DonutChild:
     label: str
     value: float            # >= 0, in the display currency's major units
     color: QColor
+    # The account this slice represents (ADR-083 drill-down → its Account
+    # Summary). None keeps the slice non-clickable (e.g. a synthetic child).
+    account_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,9 @@ class DonutChart(QWidget):
     """Stateless widget — call :meth:`set_data` to draw, :meth:`show_empty`
     for the no-data state."""
 
+    # Left-click on an outer-ring account slice → its account id (ADR-083).
+    # Not emitted for the inner-ring type slices.
+    account_clicked = Signal(int)
 
     # Ring geometry as fractions of the outer radius.
     _R_HOLE = 0.40             # centre hole
@@ -66,9 +72,12 @@ class DonutChart(QWidget):
         self._center_sub: str = ""
         self._symbol: str = "£"
         self._empty_message: Optional[str] = None
-        # (a_start, a_span, r_in, r_out, label, value, pct) — a in degrees
-        # clockwise from 12 o'clock.
-        self._hits: list[tuple[float, float, float, float, str, float, float]] = []
+        # (a_start, a_span, r_in, r_out, label, value, pct, account_id) — a in
+        # degrees clockwise from 12 o'clock; account_id is None for inner-ring
+        # (type) slices, the account id for outer-ring (account) slices.
+        self._hits: list[
+            tuple[float, float, float, float, str, float, float, Optional[int]]
+        ] = []
 
     # ── public interface ──
 
@@ -139,7 +148,8 @@ class DonutChart(QWidget):
                     cspan = cval / child_total * seg_span
                     self._draw_pie(p, outer_rect, ca, cspan, c.color, sep)
                     self._hits.append(
-                        (ca, cspan, r_mid, r_out, c.label, cval, cval / total)
+                        (ca, cspan, r_mid, r_out, c.label, cval, cval / total,
+                         c.account_id)
                     )
                     ca += cspan
             else:
@@ -153,7 +163,7 @@ class DonutChart(QWidget):
             self._draw_pie(p, mid_rect, seg_start, seg_span, seg.color, sep)
             self._hits.append(
                 (seg_start, seg_span, r_hole, r_mid, seg.label, seg_val,
-                 seg_val / total)
+                 seg_val / total, None)
             )
             a += seg_span
 
@@ -228,7 +238,7 @@ class DonutChart(QWidget):
         r = math.hypot(dx, dy)
         # Angle clockwise from 12 o'clock: 0 at top, 90 to the right.
         a = math.degrees(math.atan2(dx, -dy)) % 360.0
-        for a_start, a_span, r_in, r_out, label, value, pct in self._hits:
+        for a_start, a_span, r_in, r_out, label, value, pct, account_id in self._hits:
             if not (r_in <= r <= r_out):
                 continue
             rel = (a - a_start) % 360.0
@@ -242,10 +252,33 @@ class DonutChart(QWidget):
                     self.mapToGlobal(QPoint(int(pos.x()), int(pos.y()))),
                     text, self,
                 )
+                if account_id is not None:
+                    self.setCursor(Qt.PointingHandCursor)
+                else:
+                    self.unsetCursor()
                 return
+        self.unsetCursor()
         QToolTip.hideText()
         super().mouseMoveEvent(event)
 
+    def mousePressEvent(self, event) -> None:  # noqa: D401 — Qt override
+        if event.button() != Qt.LeftButton or not self._hits:
+            super().mousePressEvent(event)
+            return
+        pos = event.position() if hasattr(event, "position") else event.posF()
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+        r = math.hypot(pos.x() - cx, pos.y() - cy)
+        a = math.degrees(math.atan2(pos.x() - cx, -(pos.y() - cy))) % 360.0
+        for a_start, a_span, r_in, r_out, _label, _value, _pct, account_id in self._hits:
+            if not (r_in <= r <= r_out) or account_id is None:
+                continue
+            if (a - a_start) % 360.0 <= a_span:
+                self.account_clicked.emit(account_id)
+                return
+        super().mousePressEvent(event)
+
     def leaveEvent(self, event) -> None:  # noqa: D401 — Qt override
+        self.unsetCursor()
         QToolTip.hideText()
         super().leaveEvent(event)

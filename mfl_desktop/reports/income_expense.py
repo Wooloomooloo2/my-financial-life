@@ -22,6 +22,7 @@ module never sees the sign convention, only the two positive totals.
 """
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -132,6 +133,44 @@ def enumerate_buckets(
                 out.append((key, f"{monday.day} {_MONTHS[monday.month]}"))
             cur = cur + one_day
     return out
+
+
+def bucket_bounds(key: str, mode: str) -> tuple[date, date]:
+    """Inverse of the bucket key → the ``(start, end)`` calendar dates that
+    bucket spans (both inclusive). Used by the Income & Expense drill-down
+    (ADR-083) to scope a clicked bar to its own period. Keys are the same
+    ``strftime`` strings :func:`enumerate_buckets` produces.
+
+    Week keys (``'2026-W05'``) follow SQLite's ``%W`` convention (Monday is
+    day 1; the days of January before the year's first Monday are week 00),
+    so the returned span is that Monday–Sunday window (week 00 = Jan 1 → the
+    day before the first Monday).
+    """
+    if mode == BUCKET_YEAR:
+        y = int(key)
+        return date(y, 1, 1), date(y, 12, 31)
+    if mode == BUCKET_QUARTER:
+        y_s, q_s = key.split("-Q")
+        y, q = int(y_s), int(q_s)
+        start_m = 3 * (q - 1) + 1
+        end_m = start_m + 2
+        return date(y, start_m, 1), date(y, end_m, calendar.monthrange(y, end_m)[1])
+    if mode == BUCKET_MONTH:
+        y_s, m_s = key.split("-")
+        y, m = int(y_s), int(m_s)
+        return date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
+    if mode == BUCKET_WEEK:
+        y_s, w_s = key.split("-W")
+        y, ww = int(y_s), int(w_s)
+        jan1 = date(y, 1, 1)
+        first_monday = jan1 + timedelta(days=(7 - jan1.weekday()) % 7)
+        if ww == 0:
+            return jan1, first_monday - timedelta(days=1)
+        start = first_monday + timedelta(days=(ww - 1) * 7)
+        return start, start + timedelta(days=6)
+    raise ValueError(
+        f"Unknown bucket mode {mode!r}; expected one of {_BUCKET_MODES}"
+    )
 
 
 def build_buckets(

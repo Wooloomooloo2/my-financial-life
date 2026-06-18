@@ -28,7 +28,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -101,6 +101,11 @@ class _TypeTotal:
 
 
 class NetWorthWindow(QMainWindow):
+    # Emitted when an outer-ring account slice is clicked (ADR-083) — the
+    # register window opens that account's Summary via its canonical
+    # single-instance path.
+    account_activated = Signal(int)
+
     def __init__(self, repo: Repository, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Net Worth")
@@ -156,6 +161,10 @@ class NetWorthWindow(QMainWindow):
         self._summary_panel, self._summary_total_lbl, \
             self._assets_donut, self._debts_donut, self._debts_donut_title, \
             self._legend_layout = self._build_summary_panel()
+        # Outer-ring slice click → re-emit the account id for the register
+        # window to open the Account Summary (ADR-083).
+        self._assets_donut.account_clicked.connect(self.account_activated)
+        self._debts_donut.account_clicked.connect(self.account_activated)
         self._assets_panel, self._assets_total_lbl, \
             self._assets_tree = self._build_side_panel(is_asset=True)
         self._debts_panel, self._debts_total_lbl, \
@@ -538,7 +547,7 @@ class NetWorthWindow(QMainWindow):
         for tt in type_totals:
             if tt.kind != kind or tt.total <= 0:
                 continue
-            members: list[tuple[str, float]] = []
+            members: list[tuple[int, str, float]] = []
             for acct in tt.accounts:
                 conv = self._converted.get(acct.id)
                 if conv is None:
@@ -546,13 +555,14 @@ class NetWorthWindow(QMainWindow):
                 val = float(-conv if kind == "debt" else conv)
                 if val <= 0:
                     continue
-                members.append((acct.name, val))
+                members.append((acct.id, acct.name, val))
             n = len(members)
             children = tuple(
                 DonutChild(
                     label=name, value=val, color=self._shade(tt.color, i, n),
+                    account_id=acct_id,
                 )
-                for i, (name, val) in enumerate(members)
+                for i, (acct_id, name, val) in enumerate(members)
             )
             segments.append(DonutSegment(
                 label=tt.type_label, value=float(tt.total),
