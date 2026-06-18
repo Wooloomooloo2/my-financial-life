@@ -41,7 +41,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.account_summary import period_bounds, PERIOD_LABELS as _PERIOD_LABELS
+from mfl_desktop.account_summary import period_bounds
+from mfl_desktop.ui.date_widgets import make_date_edit, make_period_combo
 from mfl_desktop.db.repository import (
     AccountSummary, CategoryNode, Repository,
 )
@@ -110,19 +111,14 @@ class SpendingFilterDialog(QDialog):
         self._result: Optional[SpendingOverTimeFilters] = None
 
         # ── left column: period + granularity + rollup + uncat toggle ──
-        self._period_combo = QComboBox()
-        for key in SPENDING_PERIOD_KEYS:
-            self._period_combo.addItem(_PERIOD_LABELS[key], userData=key)
-        self._set_combo_to(self._period_combo, current.period_key)
+        self._period_combo = make_period_combo(
+            SPENDING_PERIOD_KEYS, current=current.period_key,
+        )
         self._period_combo.currentIndexChanged.connect(self._sync_custom_visibility)
 
         cf, ct = self._initial_custom_dates(current)
-        self._custom_from = QDateEdit(QDate(cf.year, cf.month, cf.day))
-        self._custom_from.setCalendarPopup(True)
-        self._custom_from.setDisplayFormat("yyyy-MM-dd")
-        self._custom_to = QDateEdit(QDate(ct.year, ct.month, ct.day))
-        self._custom_to.setCalendarPopup(True)
-        self._custom_to.setDisplayFormat("yyyy-MM-dd")
+        self._custom_from = make_date_edit(QDate(cf.year, cf.month, cf.day))
+        self._custom_to = make_date_edit(QDate(ct.year, ct.month, ct.day))
 
         self._granularity_combo = QComboBox()
         for label, value in _GRANULARITY_OPTIONS:

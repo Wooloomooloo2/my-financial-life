@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import AccountSummary, CategoryChoice
+from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.category_picker import (
     make_category_picker,
     selected_category_id,
@@ -85,10 +86,7 @@ class NewTransactionDialog(QDialog):
                     self._account_combo.setCurrentIndex(i)
                     break
 
-        self._date_edit = QDateEdit()
-        self._date_edit.setDisplayFormat("yyyy-MM-dd")
-        self._date_edit.setCalendarPopup(True)
-        self._date_edit.setDate(QDate.currentDate())
+        self._date_edit = make_date_edit()
 
         self._payee_edit = QLineEdit()
         self._payee_edit.setPlaceholderText("Optional")

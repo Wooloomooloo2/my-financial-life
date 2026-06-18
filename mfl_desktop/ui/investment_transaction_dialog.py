@@ -54,6 +54,7 @@ from mfl_desktop.db.repository import AccountSummary, Repository, TransactionRow
 from mfl_desktop.import_engine.qif_actions import is_income, is_reinvest
 from mfl_desktop.prices import lookup_symbol_name
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 # Curated action list for manual entry (label, canonical QIF action stored in
 # txn.action — must match the strings the holdings/returns engines classify via
@@ -132,10 +133,7 @@ class InvestmentTransactionDialog(QDialog):
         tokens.themed(acct_label, "QLabel { color: {muted_strong}; }")
         self._form.addRow("Account:", acct_label)
 
-        self._date = QDateEdit()
-        self._date.setCalendarPopup(True)
-        self._date.setDisplayFormat("yyyy-MM-dd")
-        self._date.setDate(QDate.currentDate())
+        self._date = make_date_edit()
         self._form.addRow("Date:", self._date)
 
         self._action = QComboBox()

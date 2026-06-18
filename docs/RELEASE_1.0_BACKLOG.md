@@ -62,9 +62,10 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 - [x] Fixed a latent bug: `"6m"` meant 180 days in reports but calendar-6-months in the register → now calendar-accurate everywhere (reports' rolling windows shift 0–3 days, intended).
 - [x] Verified: periods unit tests, delegation parity + saved-filter round-trip, app import, offscreen filter-dialog + register checks.
 
-**Part B — `make_date_edit` adoption (REMAINING, next increment):**
-- [ ] Date *format* is already uniform ISO (P1a done). Remaining: replace the ~14 ad-hoc `QDateEdit()` sites with `make_date_edit(...)` for consistency + to fix the no-popup `schedule_dialog`. Display-only (value read via `.date()`), no persistence impact.
-- [ ] Adopt `make_period_combo` in the filter dialogs to retire the last `_PERIOD_LABELS` references.
+**Part B — `make_date_edit` adoption (DONE 2026-06-18):**
+- [x] Replaced 17 ad-hoc `QDateEdit()` sites across 12 files with `make_date_edit(...)` (incl. the no-popup `schedule_dialog`); `maximum_today=True` where a future date was previously forbidden (custom-period, reconcile end-date). Display-only (value read via `.date()`), no persistence impact. Left only `delegates.py` (inline cell editor — needs a `parent` the factory doesn't take; already ISO + popup).
+- [x] Adopted `make_period_combo` in all five filter dialogs (spending / income & expense / payee / category & payee / investment returns) and `periods.period_label(...)` in the five report windows → **no runtime `_PERIOD_LABELS` references remain**.
+- [x] Verified headless: py_compile clean; 23 touched modules + main app modules import offscreen; all 5 filter dialogs + 7 date dialogs construct against a seeded DB (period combos populate, selection round-trips, edits are ISO + calendar popup).
 
 ### P2 — Make every report clickable & cross-linked ⭐ (owner explicitly asked)
 **Problem (audited):** 5 surfaces drill, 4 are dead-ends. Drill-capable: Spending, Payee, Category & Payee, Account Summary (all → shared `TransactionsListWindow`), plus Home (navigation) and Budget (→ `BudgetDrillDownWindow`). **Dead-ends: Net Worth, Income & Expense, Sankey, Investment Returns.**

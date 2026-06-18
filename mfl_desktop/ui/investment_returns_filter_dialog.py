@@ -40,10 +40,7 @@ from mfl_desktop.reports.filters import (
     INVESTMENT_RETURNS_PERIOD_KEYS, InvestmentReturnsFilters,
 )
 from mfl_desktop.ui.check_list_panel import CheckListPanel
-from mfl_desktop import periods
-
-# Period labels are the shared registry (ADR-082, single source of truth).
-_PERIOD_LABELS = periods.PERIOD_LABELS
+from mfl_desktop.ui.date_widgets import make_date_edit, make_period_combo
 
 
 def security_label(s: SecurityRow) -> str:
@@ -75,19 +72,14 @@ class InvestmentReturnsFilterDialog(QDialog):
         self._result: Optional[InvestmentReturnsFilters] = None
 
         # ── period ──
-        self._period_combo = QComboBox()
-        for key in INVESTMENT_RETURNS_PERIOD_KEYS:
-            self._period_combo.addItem(_PERIOD_LABELS[key], userData=key)
-        self._set_combo_to(self._period_combo, current.period_key)
+        self._period_combo = make_period_combo(
+            INVESTMENT_RETURNS_PERIOD_KEYS, current=current.period_key,
+        )
         self._period_combo.currentIndexChanged.connect(self._sync_custom_visibility)
 
         cf, ct = self._initial_custom_dates(current)
-        self._custom_from = QDateEdit(QDate(cf.year, cf.month, cf.day))
-        self._custom_from.setCalendarPopup(True)
-        self._custom_from.setDisplayFormat("yyyy-MM-dd")
-        self._custom_to = QDateEdit(QDate(ct.year, ct.month, ct.day))
-        self._custom_to.setCalendarPopup(True)
-        self._custom_to.setDisplayFormat("yyyy-MM-dd")
+        self._custom_from = make_date_edit(QDate(cf.year, cf.month, cf.day))
+        self._custom_to = make_date_edit(QDate(ct.year, ct.month, ct.day))
 
         period_box = QGroupBox("Period")
         period_form = QFormLayout(period_box)

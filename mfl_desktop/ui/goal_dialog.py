@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import AccountSummary, BudgetGoal
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 _SAVINGS_FAMILIES = ("cash", "investment")
 
@@ -128,9 +129,7 @@ class GoalDialog(QDialog):
         form.addRow(self._target_caption, self._target)
 
         # ── target date ──
-        self._date = QDateEdit()
-        self._date.setCalendarPopup(True)
-        self._date.setDisplayFormat("yyyy-MM-dd")
+        self._date = make_date_edit()
         if editing:
             y, m, d = (int(x) for x in goal.target_date.split("-"))
             self._date.setDate(QDate(y, m, d))

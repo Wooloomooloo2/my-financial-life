@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import fx
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 _GRANULARITY_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Monthly (~12 / year)",  "monthly"),
@@ -62,12 +63,8 @@ class FxBackfillDialog(QDialog):
         self._ran = False  # True if a backfill actually fetched anything
 
         d_from, d_to = self._default_range()
-        self._from = QDateEdit(QDate(d_from.year, d_from.month, d_from.day))
-        self._from.setCalendarPopup(True)
-        self._from.setDisplayFormat("yyyy-MM-dd")
-        self._to = QDateEdit(QDate(d_to.year, d_to.month, d_to.day))
-        self._to.setCalendarPopup(True)
-        self._to.setDisplayFormat("yyyy-MM-dd")
+        self._from = make_date_edit(QDate(d_from.year, d_from.month, d_from.day))
+        self._to = make_date_edit(QDate(d_to.year, d_to.month, d_to.day))
         self._from.dateChanged.connect(self._update_estimate)
         self._to.dateChanged.connect(self._update_estimate)
 

@@ -41,7 +41,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.account_summary import period_bounds, PERIOD_LABELS as _PERIOD_LABELS
+from mfl_desktop.account_summary import period_bounds
+from mfl_desktop import periods
 from mfl_desktop.db.repository import Repository, ReportRow
 from mfl_desktop.reports import category_group_map
 from mfl_desktop.reports.filters import CategoryPayeeFilters, TYPE_CATEGORY_PAYEE
@@ -470,7 +471,7 @@ class CategoryPayeeWindow(QMainWindow):
     def _update_summary_panel(self, summary, row_dim: str, note: str = "") -> None:
         filters = self._current_filters
         d_from, d_to = self._resolve_date_bounds(filters)
-        period_label = _PERIOD_LABELS.get(filters.period_key, filters.period_key)
+        period_label = periods.period_label(filters.period_key)
         self._period_value.setText(
             f"{period_label}\n{d_from.isoformat()} → {d_to.isoformat()}"
         )

@@ -48,6 +48,7 @@ from mfl_desktop.prices import backfill_historical_into, refresh_latest_prices_i
 from mfl_desktop.ui.merge_securities_dialog import MergeSecuritiesDialog
 from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 
 def _fmt_refresh_time(iso_ts: Optional[str]) -> str:
@@ -206,10 +207,7 @@ class SecuritiesDialog(QDialog):
         self._add_price = QLineEdit()
         self._add_price.setPlaceholderText("price")
         self._add_price.setMaximumWidth(100)
-        self._add_date = QDateEdit()
-        self._add_date.setCalendarPopup(True)
-        self._add_date.setDisplayFormat("yyyy-MM-dd")
-        self._add_date.setDate(date.today())
+        self._add_date = make_date_edit()
         self._add_btn = QPushButton("Add price")
         self._add_btn.clicked.connect(self._on_add_manual_price)
 

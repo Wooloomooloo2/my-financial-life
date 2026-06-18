@@ -64,7 +64,6 @@ from dataclasses import replace
 _CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 
 # Period labels are the shared registry (ADR-082, single source of truth).
-_PERIOD_LABELS = periods.PERIOD_LABELS
 
 _GAIN = "#16a34a"
 _LOSS = "#dc2626"
@@ -824,7 +823,7 @@ class InvestmentReturnsWindow(QMainWindow):
         irr=None, irr_priced=True,
     ) -> None:
         key = self._current_filters.period_key
-        period_label = _PERIOD_LABELS.get(key, key)
+        period_label = periods.period_label(key)
         self._period_value.setText(
             f"{period_label}\n{d_from.isoformat()} → {d_to.isoformat()}"
         )

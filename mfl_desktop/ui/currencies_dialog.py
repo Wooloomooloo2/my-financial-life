@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.fx import FxFetchError, refresh_latest_into
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 
 _OXR_SIGNUP_URL = "https://openexchangerates.org/signup/free"
@@ -158,10 +159,7 @@ class CurrenciesDialog(QDialog):
         self._add_rate = QLineEdit()
         self._add_rate.setPlaceholderText("e.g. 0.7853")
         self._add_rate.setMaximumWidth(120)
-        self._add_date = QDateEdit()
-        self._add_date.setCalendarPopup(True)
-        self._add_date.setDisplayFormat("yyyy-MM-dd")
-        self._add_date.setDate(date.today())
+        self._add_date = make_date_edit()
         self._add_btn = QPushButton("Add rate")
         self._add_btn.clicked.connect(self._on_add_manual_rate)
 

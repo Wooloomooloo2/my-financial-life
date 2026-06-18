@@ -50,6 +50,7 @@ from mfl_desktop.db.repository import (
     SCHEDULE_CADENCES,
     ScheduledTxnRow,
 )
+from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.category_picker import (
     make_category_picker,
     selected_category_id,
@@ -226,9 +227,7 @@ class ScheduleDialog(QDialog):
                 break
 
         # Anchor date — first occurrence's posting date.
-        self._anchor_edit = QDateEdit()
-        self._anchor_edit.setDisplayFormat("yyyy-MM-dd")
-        self._anchor_edit.setCalendarPopup(True)
+        self._anchor_edit = make_date_edit()
         if is_edit:
             self._anchor_edit.setDate(_qdate(existing.anchor_date))
         elif seed and seed.anchor_date:
@@ -239,18 +238,14 @@ class ScheduleDialog(QDialog):
         # Next-due date — only meaningful when editing an existing schedule
         # (lets the user skip/replay). On create, hidden; the repository
         # defaults next_due_date to anchor_date.
-        self._next_due_edit = QDateEdit()
-        self._next_due_edit.setDisplayFormat("yyyy-MM-dd")
-        self._next_due_edit.setCalendarPopup(True)
+        self._next_due_edit = make_date_edit()
         if is_edit:
             self._next_due_edit.setDate(_qdate(existing.next_due_date))
 
         # End date — optional cap. A "(no end date)" checkbox disables the
         # picker; matches how Qt apps typically expose optional date fields.
         self._end_check = QCheckBox("Stop after end date:")
-        self._end_edit = QDateEdit()
-        self._end_edit.setDisplayFormat("yyyy-MM-dd")
-        self._end_edit.setCalendarPopup(True)
+        self._end_edit = make_date_edit()
         self._end_edit.setEnabled(False)
         if is_edit and existing.end_date:
             self._end_check.setChecked(True)

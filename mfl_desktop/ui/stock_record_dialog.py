@@ -57,6 +57,7 @@ from mfl_desktop.prices import PriceFetchError, backfill_security_history_into
 from mfl_desktop.ui.merge_securities_dialog import MergeSecuritiesDialog
 from mfl_desktop.ui.price_history_chart import PriceHistoryChart
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 # Display currency for quotes / cash on this screen. The owner's portfolio is
 # single-currency USD and prices are USD quotes; a per-account currency lookup
@@ -182,10 +183,7 @@ class StockRecordDialog(QDialog):
 
         add_row = QHBoxLayout()
         add_row.addWidget(QLabel("Add / edit:"))
-        self._add_date = QDateEdit()
-        self._add_date.setCalendarPopup(True)
-        self._add_date.setDisplayFormat("yyyy-MM-dd")
-        self._add_date.setDate(date.today())
+        self._add_date = make_date_edit()
         add_row.addWidget(self._add_date)
         self._add_price = QLineEdit()
         self._add_price.setPlaceholderText("price")

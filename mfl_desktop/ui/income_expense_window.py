@@ -36,7 +36,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.account_summary import period_bounds, PERIOD_LABELS as _PERIOD_LABELS
+from mfl_desktop.account_summary import period_bounds
+from mfl_desktop import periods
 from mfl_desktop.db.repository import Repository, ReportRow
 from mfl_desktop.reports.filters import (
     IncomeExpenseFilters, TYPE_INCOME_EXPENSE,
@@ -373,7 +374,7 @@ class IncomeExpenseWindow(QMainWindow):
         unconverted: dict,
         note: Optional[str] = None,
     ) -> None:
-        period_label = _PERIOD_LABELS.get(filters.period_key, filters.period_key)
+        period_label = periods.period_label(filters.period_key)
         if d_from is not None and d_to is not None:
             self._period_value.setText(
                 f"{period_label}\n{d_from.isoformat()} → {d_to.isoformat()}"

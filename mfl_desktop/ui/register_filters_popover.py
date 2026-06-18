@@ -15,6 +15,7 @@ the button and toggles it; the active-filter indicator lives on the button.
 """
 from __future__ import annotations
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 from datetime import date
 from decimal import Decimal
@@ -53,15 +54,11 @@ class RegisterFiltersPopover(QDialog):
 
         # ── date range ──
         self._from_check = QCheckBox("From:")
-        self._from_edit = QDateEdit(today)
-        self._from_edit.setCalendarPopup(True)
-        self._from_edit.setDisplayFormat("yyyy-MM-dd")
+        self._from_edit = make_date_edit(today)
         self._from_edit.setEnabled(False)
 
         self._to_check = QCheckBox("To:")
-        self._to_edit = QDateEdit(today)
-        self._to_edit.setCalendarPopup(True)
-        self._to_edit.setDisplayFormat("yyyy-MM-dd")
+        self._to_edit = make_date_edit(today)
         self._to_edit.setEnabled(False)
 
         # ── amount range (signed) ──

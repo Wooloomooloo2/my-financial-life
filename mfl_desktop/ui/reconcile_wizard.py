@@ -55,6 +55,7 @@ from mfl_desktop.db.repository import (
     Repository,
     StatementRow,
 )
+from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
 
 
@@ -186,13 +187,8 @@ class ReconcileWizard(QDialog):
         cols.setSpacing(40)
 
         # Left: dates.
-        self._start_date = QDateEdit()
-        self._start_date.setCalendarPopup(True)
-        self._start_date.setDisplayFormat("yyyy-MM-dd")
-        self._end_date = QDateEdit()
-        self._end_date.setCalendarPopup(True)
-        self._end_date.setDisplayFormat("yyyy-MM-dd")
-        self._end_date.setMaximumDate(QDate.currentDate())
+        self._start_date = make_date_edit()
+        self._end_date = make_date_edit(maximum_today=True)
         dates_form = QFormLayout()
         dates_form.addRow("Starting date:", self._start_date)
         dates_form.addRow("Ending date:", self._end_date)

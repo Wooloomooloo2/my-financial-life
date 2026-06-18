@@ -56,6 +56,7 @@ from mfl_desktop.db.repository import (
 )
 from mfl_desktop.ui.category_picker import make_category_picker, selected_category_id
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
@@ -114,10 +115,7 @@ class SplitTransactionDialog(QDialog):
         tokens.themed(acct_label, "QLabel { color: {muted_strong}; }")
         form.addRow("Account:", acct_label)
 
-        self._date = QDateEdit()
-        self._date.setCalendarPopup(True)
-        self._date.setDisplayFormat("yyyy-MM-dd")
-        self._date.setDate(QDate.currentDate())
+        self._date = make_date_edit()
         form.addRow("Date:", self._date)
 
         self._payee = QLineEdit()

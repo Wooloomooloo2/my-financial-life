@@ -12,6 +12,7 @@ preset selection without changing the visible range).
 """
 from __future__ import annotations
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.date_widgets import make_date_edit
 
 from datetime import date
 from typing import Optional
@@ -52,21 +53,16 @@ class CustomPeriodDialog(QDialog):
         intro.setWordWrap(True)
         tokens.themed(intro, "color: {muted_strong};")
 
-        self._from_edit = QDateEdit(QDate(initial_from.year,
-                                          initial_from.month,
-                                          initial_from.day))
-        self._from_edit.setCalendarPopup(True)
-        self._from_edit.setDisplayFormat("yyyy-MM-dd")
-        # Keep From ≤ today so the user can't pick a future start; the
+        # Keep From/To ≤ today so the user can't pick a future date; the
         # chart only shows posted txns.
-        self._from_edit.setMaximumDate(QDate.currentDate())
-
-        self._to_edit = QDateEdit(QDate(initial_to.year,
-                                        initial_to.month,
-                                        initial_to.day))
-        self._to_edit.setCalendarPopup(True)
-        self._to_edit.setDisplayFormat("yyyy-MM-dd")
-        self._to_edit.setMaximumDate(QDate.currentDate())
+        self._from_edit = make_date_edit(
+            QDate(initial_from.year, initial_from.month, initial_from.day),
+            maximum_today=True,
+        )
+        self._to_edit = make_date_edit(
+            QDate(initial_to.year, initial_to.month, initial_to.day),
+            maximum_today=True,
+        )
 
         form = QFormLayout()
         form.addRow("From:", self._from_edit)
