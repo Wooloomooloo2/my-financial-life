@@ -214,24 +214,53 @@ class ReturnsChart(QWidget):
                              int(y + fm.ascent() / 2 - 2), label)
             v += step
 
+    def _x_label_layout(
+        self, chart: QRectF, fm: QFontMetrics,
+    ) -> list[tuple[float, str, float]]:
+        """Pick the x-axis tick labels and their pixel spans, dropping any
+        that would overlap. Returns ``(centre_x, text, half_width)`` rows.
+
+        Candidate ticks are every ``sample``-th point plus **always the final
+        point** (the report's end date). When the forced end label collides
+        with its neighbour, the neighbour is dropped so the true end date
+        wins — this is the fix for the squashed last-label overlap."""
+        n = len(self._points)
+        if n == 0:
+            return []
+        sample = max(1, n // 8)
+        idxs = [i for i in range(n) if i % sample == 0]
+        if idxs[-1] != n - 1:
+            idxs.append(n - 1)
+
+        spans: list[tuple[float, str, float]] = []  # (centre_x, text, half_width)
+        for i in idxs:
+            x = self._x_for(i, chart)
+            text = self._month_label(self._points[i].date)
+            spans.append((x, text, fm.horizontalAdvance(text) / 2.0))
+
+        gap = 6.0
+        kept: list[tuple[float, str, float]] = []
+        for j, (x, text, hw) in enumerate(spans):
+            is_last = j == len(spans) - 1
+            if kept:
+                prev_x, _, prev_hw = kept[-1]
+                if x - hw < prev_x + prev_hw + gap:
+                    if is_last:
+                        kept.pop()          # end date wins — drop neighbour
+                    else:
+                        continue            # skip the colliding candidate
+            kept.append((x, text, hw))
+        return kept
+
     def _paint_x_labels(self, painter, chart) -> None:
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
-        n = len(self._points)
-        if n == 0:
-            return
-        sample = max(1, n // 8)
-        for i, p in enumerate(self._points):
-            if i % sample != 0 and i != n - 1:
-                continue
-            x = self._x_for(i, chart)
-            text = self._month_label(p.date)
-            tw = fm.horizontalAdvance(text)
-            painter.drawText(int(x - tw / 2),
-                             int(chart.bottom() + fm.ascent() + 6), text)
+        y = int(chart.bottom() + fm.ascent() + 6)
+        for x, text, hw in self._x_label_layout(chart, fm):
+            painter.drawText(int(x - hw), y, text)
 
     def _paint_bands(self, painter, chart, ymin, ymax) -> None:
         """Draw each composition band as per-segment quadrilaterals between

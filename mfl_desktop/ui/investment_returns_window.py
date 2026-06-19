@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -355,7 +356,21 @@ class InvestmentReturnsWindow(QMainWindow):
         layout.addWidget(self._perf_container)
 
         layout.addStretch(1)
-        return panel
+
+        # Wrap in a scroll area so a tall summary (Totals + Total return +
+        # the Performers list) scrolls on a short window instead of the
+        # bottom rows being squashed below their natural height. The inner
+        # panel keeps the canvas fill + left rule; the scroll area is a
+        # transparent frameless host. Horizontal scrolling is off — every
+        # text label word-wraps.
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(260)
+        tokens.themed(scroll, "QScrollArea { background: {canvas}; border: none; }")
+        return scroll
 
     @staticmethod
     def _mini_section_title(text: str) -> QLabel:
