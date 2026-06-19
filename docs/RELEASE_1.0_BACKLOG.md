@@ -79,11 +79,12 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 - [x] Drill consistency audited — Sankey/I&E/Returns all open the one `TransactionsListWindow`; Net Worth opens the canonical Account Summary; Budget keeps its precise bespoke register (documented).
 
 ### P3 — Remove overlapping functionality ⭐ (owner explicitly asked)
+**Status: P3a shipped 2026-06-18 (ADR-084 — the big rock); P3b/P3c remain.** Guiding rule established in ADR-084: consolidate divergent *duplicates of the same thing*, never prune distinct *affordances*.
 **Candidates (audited):**
-- [ ] **Schedules has 4 entry points** (Manage ▸ Schedules, register filter-bar button, Home "Bills due" card, right-click "Create Schedule From Transaction"). Keep the filter-bar button + the right-click seed path; demote or drop the redundant menu item. Decide the canonical path.
-- [ ] **Six report filter dialogs are ~40% copy-paste.** Extract a `ReportFilterDialogBase` (period + custom range + account/category/payee checklists); each report adds only its specials (granularity, rollup, top-N, transfers toggle). ~600 LOC removed, UX unified. _Also the natural home for the P1 shared period widget._
-- [ ] **Two transfer-matching UIs** (inline ADR-036 confirm/picker vs Manage ▸ Reconcile Transfers ADR-037) — unify the strength-chip/candidate-table presentation so they look identical even if entry points differ.
-- [ ] **`TransactionsListWindow` is only reachable via drill** — confirm that's intentional (it is a good detail view); no menu entry needed, but make sure the breadcrumb "back" is consistent.
+- [x] **Six report filter dialogs ~40% copy-paste — DONE (P3a, ADR-084).** Extracted a **toolkit** `ReportFilterDialogBase` (opt-in builders + shared helpers + statics); each dialog keeps its specials (rollup/securities/top-N/category tree). Constructor signatures + saved `filters_json` unchanged; verified headless across all six.
+- [x] **Schedules' 4 entry points — AUDITED, KEPT.** Confirmed legitimate affordances, not redundancy: Manage ▸ Schedules / filter-bar button (carries the overdue badge) / Home "Bills due" card are three discovery paths to the same `SchedulesDialog`; the right-click "Create Schedule From Transaction" opens a *different* seeded dialog. No amputation.
+- [ ] **P3b — Two transfer-matching UIs** (inline ADR-036 confirm/picker vs Manage ▸ Reconcile Transfers ADR-037) — extract the duplicated `_CHIP_COLOURS` / `_fmt_amount` / strength-chip into a shared `transfer_chips.py` so the two surfaces can't drift; row layouts stay bespoke. **Still pending.**
+- [x] **`TransactionsListWindow` only reachable via drill — CONFIRMED intentional** (good detail view; nav is breadcrumb-chip removal + period swap, consistent per ADR-083). No change. _(P3c affordance-audit = this + schedules, recorded in ADR-084.)_
 
 ### P4 — Visual & interaction polish for a paying audience
 - [ ] Consistent dialog sizing, button order (platform-native: macOS vs Windows), default-button + Esc behaviour across all dialogs.
