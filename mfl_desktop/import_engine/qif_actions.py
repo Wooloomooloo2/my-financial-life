@@ -46,6 +46,10 @@ SPLIT_ACTIONS = {"stksplit", "stocksplit"}
 # price × qty, since these rows carry no separate cash leg.
 REINVEST_ACTIONS = {"reinvdiv", "reinvlg", "reinvsh", "reinvint", "reinvmd"}
 
+# Cash EXPENSE actions — fees / margin interest paid out of the account
+# (negative cash). The counterpart to CASH_IN_ACTIONS. ADR-086.
+CASH_EXPENSE_ACTIONS = {"miscexp", "miscexpx", "margint", "margintx"}
+
 
 def _norm(action: str | None) -> str:
     return (action or "").strip().lower()
@@ -84,6 +88,19 @@ def is_reinvest(action: str | None) -> bool:
     """True if the action reinvests a distribution into new shares (zero net
     cash; the reinvested distribution is both income and cost basis)."""
     return _norm(action) in REINVEST_ACTIONS
+
+
+def is_categorisable(action: str | None) -> bool:
+    """True if a user may assign a ledger category to this investment action
+    (ADR-086): the genuine cash income/expense flows — distributions
+    (``CASH_IN_ACTIONS``), fees/margin interest (``CASH_EXPENSE_ACTIONS``), and
+    the manual ``Cash`` in/out. **False** for portfolio moves
+    (buy/sell/share-transfer/split) — categorising those would inject their
+    trade amounts into the cashflow reports — and for reinvested distributions,
+    which keep their auto *Investment income* category (zero-cash, booked by the
+    returns report at price × qty)."""
+    a = _norm(action)
+    return a in CASH_IN_ACTIONS or a in CASH_EXPENSE_ACTIONS or a == "cash"
 
 
 def affects_shares(action: str | None) -> bool:

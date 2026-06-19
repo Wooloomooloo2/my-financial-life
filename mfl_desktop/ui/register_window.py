@@ -43,6 +43,7 @@ from mfl_desktop.account_summary import bills_due_summary
 from mfl_desktop import periods
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.import_engine.import_service import ImportService
+from mfl_desktop.import_engine.qif_actions import is_categorisable
 from mfl_desktop.ui.account_dialog import AccountDialog
 from mfl_desktop.ui.account_summary_window import AccountSummaryWindow
 from mfl_desktop.ui.budget_window import BudgetWindow
@@ -1132,6 +1133,11 @@ class RegisterWindow(QMainWindow):
         if self._account is not None and self._account.family == "investment":
             if row.action is None:
                 return          # a plain cash row that happens to sit here
+            # ADR-086: the Category cell is inline-editable for cash income/
+            # expense actions — don't hijack its double-click to open the dialog.
+            col_name = self._model.COLUMNS[source_index.column()][1]
+            if col_name == "category_name" and is_categorisable(row.action):
+                return
             self._open_investment_txn_dialog(seed=row)
             return
         if row.split_count:

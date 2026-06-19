@@ -51,9 +51,10 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import AccountSummary, Repository, TransactionRow
-from mfl_desktop.import_engine.qif_actions import is_income, is_reinvest
+from mfl_desktop.import_engine.qif_actions import is_reinvest
 from mfl_desktop.prices import lookup_symbol_name
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.category_picker import make_category_picker, selected_category_id
 from mfl_desktop.ui.date_widgets import make_date_edit
 
 # Curated action list for manual entry (label, canonical QIF action stored in
@@ -194,6 +195,21 @@ class InvestmentTransactionDialog(QDialog):
         self._amount.setPlaceholderText("cash amount")
         self._form.addRow("Amount:", self._amount)
 
+        # ADR-086: a ledger category for the cash income/expense actions only
+        # (dividends, interest, cap-gains, fees, manual cash in/out). Hidden for
+        # portfolio moves (buy/sell/shares/split) — categorising those would
+        # distort the cashflow reports. Resolve the default income category once.
+        self._income_cat_id = self._repo.find_or_create_category_path(
+            _INCOME_PATH, source="user",
+        )
+        self._category = make_category_picker(self._repo.list_categories_flat())
+        self._category_touched = False
+        self._category.currentIndexChanged.connect(self._on_category_touched)
+        cat_line = self._category.lineEdit()
+        if cat_line is not None:
+            cat_line.textEdited.connect(self._on_category_touched)
+        self._form.addRow("Category:", self._category)
+
         self._ratio = QLineEdit()
         self._ratio.setPlaceholderText("new shares per old — 5 for 5-for-1, 0.1 for 1-for-10")
         self._ratio.textChanged.connect(self._recompute_hint)
@@ -272,6 +288,10 @@ class InvestmentTransactionDialog(QDialog):
         self._amount.setText(f"{seed.amount:.2f}")
         self._memo.setText(seed.memo or "")
         self._status.setCurrentText(seed.status or "Cleared")
+        # ADR-086: preserve the row's stored category (shown only for the
+        # categorisable actions). Signals are blocked, so this doesn't flip the
+        # touched flag — the per-action default won't clobber it on edit.
+        self._set_category(seed.category_id)
 
     # ── action-driven field rules ──
 
@@ -287,6 +307,7 @@ class InvestmentTransactionDialog(QDialog):
         show_commission = kind in ("buy", "sell")
         show_amount = kind in ("income", "cash")
         show_ratio = kind == "split"
+        show_category = kind in ("income", "cash")   # ADR-086
 
         self._set_row_visible(self._symbol, show_sec)
         self._set_row_visible(self._security, show_sec)
@@ -296,6 +317,18 @@ class InvestmentTransactionDialog(QDialog):
         self._set_row_visible(self._total, show_total)
         self._set_row_visible(self._amount, show_amount)
         self._set_row_visible(self._ratio, show_ratio)
+        self._set_row_visible(self._category, show_category)
+        # On create, default income actions to *Investment income* and the
+        # manual Cash action to Uncategorised — until the user picks otherwise.
+        # Edit mode keeps the row's stored category (seeded in _populate_from_seed).
+        if (
+            show_category and self._seed is None
+            and not self._loading and not self._category_touched
+        ):
+            self._set_category(
+                self._income_cat_id if kind == "income"
+                else self._repo.uncategorised_id()
+            )
         # Entering Buy/Sell with a qty + price already typed → fill the total
         # (unless the user/seed already supplied one).
         if show_total and not self._total.text().strip() and not self._loading:
@@ -304,6 +337,32 @@ class InvestmentTransactionDialog(QDialog):
 
     def _current_action(self) -> str:
         return self._action.currentData() or ""
+
+    # ── category (ADR-086) ──
+
+    def _on_category_touched(self, *_args) -> None:
+        """Mark the category as user-chosen so the per-action default stops
+        overriding it (programmatic changes block signals, so don't reach here)."""
+        if not self._loading:
+            self._category_touched = True
+
+    def _set_category(self, category_id: Optional[int]) -> None:
+        """Select the picker to a category id without tripping the touched flag."""
+        line = self._category.lineEdit()
+        self._category.blockSignals(True)
+        if line is not None:
+            line.blockSignals(True)
+        try:
+            idx = self._category.findData(category_id) if category_id is not None else -1
+            if idx >= 0:
+                self._category.setCurrentIndex(idx)
+            elif line is not None:
+                self._category.setCurrentIndex(-1)
+                line.setText("")
+        finally:
+            self._category.blockSignals(False)
+            if line is not None:
+                line.blockSignals(False)
 
     # ── tri-field solver (qty ⇄ price ⇄ total cost) ──
 
@@ -487,11 +546,18 @@ class InvestmentTransactionDialog(QDialog):
             )
             return
 
-        category_id = (
-            self._repo.find_or_create_category_path(_INCOME_PATH, source="user")
-            if (is_income(action) or is_reinvest(action))
-            else self._repo.uncategorised_id()
-        )
+        # ADR-086: the categorisable income/cash actions take the chosen
+        # category; a reinvest keeps its auto *Investment income* (zero-cash,
+        # booked by the returns report); all other actions stay Uncategorised.
+        kind = _kind(action)
+        if kind in ("income", "cash"):
+            category_id = selected_category_id(self._category)
+            if category_id is None:
+                category_id = self._repo.uncategorised_id()
+        elif is_reinvest(action):
+            category_id = self._income_cat_id
+        else:
+            category_id = self._repo.uncategorised_id()
         posted_date = self._date.date().toString("yyyy-MM-dd")
         status = self._status.currentText()
         memo = self._memo.text().strip()

@@ -15,6 +15,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
 from mfl_desktop.db.repository import Repository, TransactionRow
+from mfl_desktop.import_engine.qif_actions import is_categorisable
 
 # Custom Qt role for "give me the underlying ID, not the display string."
 # Used by the category delegate to read the current category_id from a cell.
@@ -61,6 +62,9 @@ class TransactionTableModel(QAbstractTableModel):
     # (double-click the row), not inline — so every column is non-editable here.
     # That also frees the table's double-click to open the dialog instead of an
     # inline editor.
+    # ADR-086: the Category column is the one inline-editable investment cell —
+    # editable only for the cash income/expense actions (is_categorisable),
+    # gated per-row in flags()/setData(). Every other column stays dialog-edited.
     COLUMNS_INVEST = [
         ("Date",     "posted_date",     False),
         ("Action",   "action",          False),
@@ -70,6 +74,7 @@ class TransactionTableModel(QAbstractTableModel):
         ("Price",    "price",           False),
         ("Status",   "status",          False),
         ("Memo",     "memo",            False),
+        ("Category", "category_name",   True),
         ("Amount",   "amount",          False),
         ("Balance",  "running_balance", False),
     ]
@@ -179,6 +184,15 @@ class TransactionTableModel(QAbstractTableModel):
             row = self._rows[index.row()]
             if row.split_count:
                 return f
+            # ADR-086: on an investment row only the Category cell is inline-
+            # editable, and only for the cash income/expense actions; everything
+            # else is dialog-edited.
+            if (
+                row.action
+                and self.COLUMNS[index.column()][1] == "category_name"
+                and not is_categorisable(row.action)
+            ):
+                return f
             f |= Qt.ItemIsEditable
         return f
 
@@ -232,6 +246,14 @@ class TransactionTableModel(QAbstractTableModel):
             return False
 
         row = self._rows[index.row()]
+        # ADR-086: mirror flags() — a non-categorisable investment row's
+        # Category cell rejects a programmatic write too (defence in depth).
+        if (
+            col_name == "category_name"
+            and row.action
+            and not is_categorisable(row.action)
+        ):
+            return False
         if (
             self.reconciled_edit_guard is not None
             and self._repo.is_reconciled(row.id)
