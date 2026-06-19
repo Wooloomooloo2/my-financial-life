@@ -582,8 +582,13 @@ class BankFeedsDialog(QDialog):
                     raw = sync.fetch_raw_for_feed(self._repo, feed)
                     token = self._service.stage_feed(acct.iri, raw, provider=feed.provider)
                     pending = self._service.get_pending(token)
+                    # ADR-085: the batch feed sync is non-interactive, so it
+                    # auto-confirms only *strong* matches (same-day / manual
+                    # placeholder) — weak cross-source matches are added rather
+                    # than silently skipped. The file-import path reviews them.
                     accepted = {tx.fitid for tx in pending.transactions
-                                if tx.status == "potential_match"}
+                                if tx.status == "potential_match"
+                                and tx.match_strength == "strong"}
                     result = self._service.commit_import(
                         token, pending.suggested_status, accepted)
                     self._repo.mark_feed_synced(account_id)

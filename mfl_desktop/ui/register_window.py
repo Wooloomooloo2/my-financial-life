@@ -49,6 +49,7 @@ from mfl_desktop.ui.budget_window import BudgetWindow
 from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
 from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
+from mfl_desktop.ui.import_review_dialog import ImportReviewDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.home_view import HomeView
@@ -2243,10 +2244,21 @@ class RegisterWindow(QMainWindow):
         pending = self._service.get_pending(token)
         if pending is None:
             return
-        accepted = {
-            tx.fitid for tx in pending.transactions
+        # ADR-085: when the cross-source duplicate pass flagged any rows, open
+        # the review dialog so the user decides which to skip/merge. A clean
+        # import (no matches) still commits silently — nothing to ask.
+        matches = [
+            tx for tx in pending.transactions
             if tx.status == "potential_match"
-        }
+        ]
+        if matches:
+            review = ImportReviewDialog(pending, parent=self)
+            if review.exec() != QDialog.Accepted:
+                self._service.discard_pending(token)
+                return
+            accepted = review.accepted_fitids()
+        else:
+            accepted = set()
         try:
             result = self._service.commit_import(
                 token, pending.suggested_status, accepted,

@@ -23,11 +23,14 @@ import logging
 import uuid
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.db.money import decimal_to_pence
 from mfl_desktop.import_engine import csv_parser, ofx_parser, qif_parser
+from mfl_desktop.import_engine import dedupe
 from mfl_desktop.rules_engine import apply_rules
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,14 @@ class ClassifiedTransaction:
     match_txn_iri: str = ""
     match_txn_payee: str = ""
     match_txn_date: str = ""
+    # Cross-source duplicate detection (ADR-085). Set on a 'potential_match'
+    # row. ``match_is_manual`` decides the confirm action: True → merge the
+    # incoming hash into the hand-typed placeholder (the original ADR-010
+    # behaviour); False → the match is an already-imported row, so confirm
+    # means skip the incoming duplicate. ``match_strength`` ('strong'|'weak')
+    # drives the review dialog's default tick.
+    match_is_manual: bool = True
+    match_strength: str = ""
     status_override: str = ""     # 'Cleared' | 'Reconciled' | 'Pending' | ''
     # Investment fields (ADR-043). `action` is "" for an ordinary cash row and
     # set ('Buy'/'Sell'/'Div'/…) for a QIF investment row; the rest carry the
@@ -252,7 +263,10 @@ class ImportService:
         suggested = "Cleared" if first else "Uncleared"
 
         classified: list[ClassifiedTransaction] = []
-        new_count = dup_count = match_count = 0
+        # Cash rows (non-investment, not an exact-hash duplicate) deferred to
+        # the post-loop cross-source duplicate pass (ADR-085): each entry is
+        # (index_in_classified, date_iso, signed_amount, payee_raw).
+        fuzzy_candidates: list[tuple[int, str, Decimal, str]] = []
         # Hashes already assigned to a row in *this* batch. Used to resolve
         # within-batch collisions on the composite-hash path — two CSV rows
         # with the same date, amount, and payee (very common when the source
@@ -310,34 +324,27 @@ class ImportService:
             signed_amount = -amount if tx_type == "debit" else amount
 
             if self._repo.import_hash_exists(acct.id, import_hash):
+                # Exact same-source re-import — unambiguous, auto-skipped.
                 status = "duplicate"
-                dup_count += 1
                 match_id = None
                 match_iri = match_payee = match_date = ""
             elif action:
-                # Investment rows aren't manually keyed in (yet), so the
-                # ±2-day manual-match heuristic — designed for cash entry —
-                # doesn't apply. New unless an identical hash already exists.
+                # Investment rows keep their action+security+quantity hash and
+                # aren't fuzzy-matched (ADR-085 — their duplication shape
+                # differs). New unless an identical hash already exists.
                 status = "new"
-                new_count += 1
                 match_id = None
                 match_iri = match_payee = match_date = ""
             else:
-                manual = self._repo.find_manual_match(
-                    acct.id, date_iso, signed_amount,
+                # Cross-source duplicate detection runs as a batch pass *after*
+                # this loop (ADR-085) so multiplicity is respected — tentatively
+                # new; the pass may flip it to 'potential_match'.
+                status = "new"
+                match_id = None
+                match_iri = match_payee = match_date = ""
+                fuzzy_candidates.append(
+                    (len(classified), date_iso, signed_amount, payee_raw)
                 )
-                if manual is not None:
-                    status = "potential_match"
-                    match_id = manual.id
-                    match_iri = manual.iri
-                    match_payee = manual.payee_raw
-                    match_date = manual.posted_date
-                    match_count += 1
-                else:
-                    status = "new"
-                    new_count += 1
-                    match_id = None
-                    match_iri = match_payee = match_date = ""
 
             classified.append(ClassifiedTransaction(
                 fitid=fitid, date_iso=date_iso, amount=amount,
@@ -350,6 +357,16 @@ class ImportService:
                 quantity=quantity, price=price, commission=commission,
                 linked_account=linked_account, splits=splits,
             ))
+
+        # ── ADR-085: cross-source, count-aware duplicate pass ──
+        if fuzzy_candidates:
+            self._apply_dedupe(
+                acct.id, classified, fuzzy_candidates, batch_seen_hashes,
+            )
+
+        new_count = sum(1 for c in classified if c.status == "new")
+        dup_count = sum(1 for c in classified if c.status == "duplicate")
+        match_count = sum(1 for c in classified if c.status == "potential_match")
 
         token = uuid.uuid4().hex[:16]
         self._pending[token] = PendingImport(
@@ -364,8 +381,69 @@ class ImportService:
         )
         return token
 
+    def _apply_dedupe(
+        self,
+        account_id: int,
+        classified: list[ClassifiedTransaction],
+        fuzzy_candidates: list[tuple[int, str, Decimal, str]],
+        batch_hashes: set[str],
+    ) -> None:
+        """Flip cross-source duplicates to ``potential_match`` (ADR-085).
+
+        Pairs the batch's cash rows against existing account transactions in a
+        ±window date range, each existing row claimed at most once, then patches
+        the matched :class:`ClassifiedTransaction`s in place. Multiplicity is
+        respected by the consume-once pairing — 1 existing copy absorbs exactly
+        1 of N incoming copies.
+        """
+        dates = [d for (_idx, d, _amt, _pay) in fuzzy_candidates]
+        try:
+            lo = date.fromisoformat(min(dates))
+            hi = date.fromisoformat(max(dates))
+        except ValueError:
+            return
+        window = dedupe.DEFAULT_WINDOW_DAYS
+        start = (lo - timedelta(days=window)).isoformat()
+        end = (hi + timedelta(days=window)).isoformat()
+
+        existing = self._repo.list_dedupe_candidates(account_id, start, end)
+        # Exclude exact-hash targets already claimed by the batch's fast path,
+        # so an exact duplicate's existing row can't also be fuzzy-claimed.
+        existing = [e for e in existing if e.import_hash not in batch_hashes]
+        if not existing:
+            return
+
+        import_rows = [
+            dedupe.ImportRow(
+                index=idx, date_iso=d,
+                amount_pence=decimal_to_pence(amt), payee_raw=pay,
+            )
+            for (idx, d, amt, pay) in fuzzy_candidates
+        ]
+        existing_rows = [
+            dedupe.ExistingRow(
+                id=e.id, date_iso=e.posted_date, amount_pence=e.amount_pence,
+                payee_name=e.payee_name, is_manual=e.is_manual,
+            )
+            for e in existing
+        ]
+        matches = dedupe.match_duplicates(import_rows, existing_rows)
+        for idx, m in matches.items():
+            c = classified[idx]
+            c.status = "potential_match"
+            c.match_txn_id = m.existing_id
+            c.match_txn_payee = m.existing_payee
+            c.match_txn_date = m.existing_date
+            c.match_is_manual = m.is_manual
+            c.match_strength = m.strength
+
     def get_pending(self, token: str) -> Optional[PendingImport]:
         return self._pending.get(token)
+
+    def discard_pending(self, token: str) -> None:
+        """Drop a staged import (e.g. the user cancelled the review dialog).
+        Idempotent."""
+        self._pending.pop(token, None)
 
     def get_pending_map(self, token: str) -> Optional[PendingCsvMap]:
         return self._pending_maps.get(token)
@@ -448,12 +526,20 @@ class ImportService:
                 if tx.status == "potential_match" and tx.fitid in accepted_match_fitids:
                     # match_txn_id is always set when status == 'potential_match'
                     assert tx.match_txn_id is not None
-                    self._repo.merge_into_manual_transaction(
-                        manual_id=tx.match_txn_id,
-                        import_hash=tx.import_hash,
-                        memo=tx.memo,
-                    )
-                    matched += 1
+                    if tx.match_is_manual:
+                        # Confirm against a hand-typed placeholder → fill in its
+                        # import_hash/memo (ADR-010). The row stays; not skipped.
+                        self._repo.merge_into_manual_transaction(
+                            manual_id=tx.match_txn_id,
+                            import_hash=tx.import_hash,
+                            memo=tx.memo,
+                        )
+                        matched += 1
+                    else:
+                        # Confirm against an already-imported row → it's a true
+                        # cross-source duplicate (ADR-085); skip the incoming
+                        # copy, never touch the existing row.
+                        skipped += 1
                     continue
 
                 effective_status = tx.status_override or import_status

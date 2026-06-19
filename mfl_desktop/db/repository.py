@@ -72,6 +72,19 @@ class ManualMatch:
 
 
 @dataclass(frozen=True)
+class DedupeExisting:
+    """An existing transaction offered as a cross-source duplicate target
+    (ADR-085). ``is_manual`` (no import_hash) decides the resolution on
+    confirm: merge into the placeholder vs skip the incoming row."""
+    id: int
+    posted_date: str
+    amount_pence: int
+    payee_name: str
+    import_hash: Optional[str]
+    is_manual: bool
+
+
+@dataclass(frozen=True)
 class TransactionRow:
     """A transaction joined with its payee + category + account names.
 
@@ -3073,6 +3086,39 @@ class Repository:
             id=row["id"], iri=row["iri"],
             posted_date=row["posted_date"], payee_raw=row["payee_name"],
         )
+
+    def list_dedupe_candidates(
+        self, account_id: int, start_date: str, end_date: str,
+    ) -> list[DedupeExisting]:
+        """Existing transactions in ``[start_date, end_date]`` for an account,
+        as cross-source duplicate-match targets (ADR-085).
+
+        Unlike :meth:`find_manual_match` this returns rows of **any** source
+        (manual or imported) — the count-aware matcher needs every existing
+        copy so multiplicity is respected. Reconciled rows are included (a
+        confirmed duplicate against one is only ever *skipped on the incoming
+        side*; the reconciled row is never altered). ``import_hash`` is
+        returned so the caller can exclude exact-hash targets already claimed
+        by the batch's fast path.
+        """
+        rows = self._conn.execute(
+            "SELECT t.id, t.posted_date, t.amount, t.import_hash, "
+            "       COALESCE(p.name, '') AS payee_name "
+            "FROM txn t "
+            "LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE t.account_id = ? "
+            "  AND t.posted_date BETWEEN ? AND ?",
+            (account_id, start_date, end_date),
+        ).fetchall()
+        return [
+            DedupeExisting(
+                id=r["id"], posted_date=r["posted_date"],
+                amount_pence=r["amount"], payee_name=r["payee_name"],
+                import_hash=r["import_hash"],
+                is_manual=r["import_hash"] is None,
+            )
+            for r in rows
+        ]
 
     def insert_transaction(
         self,
