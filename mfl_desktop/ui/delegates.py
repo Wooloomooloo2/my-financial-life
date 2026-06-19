@@ -26,8 +26,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QEvent, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemDelegate,
     QComboBox,
     QCompleter,
     QDateEdit,
@@ -57,6 +58,7 @@ class PayeeTypeaheadDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
+        self._editor = editor
         names = self._repo.list_payee_names()
         completer = QCompleter(names, editor)
         completer.setCompletionMode(QCompleter.PopupCompletion)
@@ -84,12 +86,60 @@ class PayeeTypeaheadDelegate(QStyledItemDelegate):
         completer.activated[str].connect(
             lambda text, e=editor: self._accept_completion(e, text)
         )
+        # Watch the completer popup too, so Tab is caught while it's open —
+        # the popup, not the line edit, has focus then (see eventFilter).
+        popup.installEventFilter(self)
         return editor
 
     def _accept_completion(self, editor: QLineEdit, text: str) -> None:
         editor.setText(text)
         self.commitData.emit(editor)
         self.closeEditor.emit(editor)
+
+    def eventFilter(self, obj, event):
+        """Make Tab / Shift+Tab commit and **advance to the next editable
+        cell** (payee → category), opening its editor instead of just closing.
+
+        The view installs this delegate as the editor's event filter; we also
+        install it on the completer popup (which holds focus while open). When
+        the popup is showing, Tab first accepts the highlighted completion, so
+        normalising a payee to an existing one and tabbing on lands a clean
+        value in the next field."""
+        if (
+            event.type() == QEvent.KeyPress
+            and event.key() in (Qt.Key_Tab, Qt.Key_Backtab)
+        ):
+            editor = obj if isinstance(obj, QLineEdit) else getattr(self, "_editor", None)
+            if editor is not None:
+                self._take_visible_completion(editor)
+                self.commitData.emit(editor)
+                hint = (
+                    QAbstractItemDelegate.EditNextItem
+                    if event.key() == Qt.Key_Tab
+                    else QAbstractItemDelegate.EditPreviousItem
+                )
+                self.closeEditor.emit(editor, hint)
+                return True
+        # Only the editor's events belong to the base filter; popup events
+        # (obj is the completion list view) must not be forwarded to it.
+        if isinstance(obj, QLineEdit):
+            return super().eventFilter(obj, event)
+        return False
+
+    @staticmethod
+    def _take_visible_completion(editor: QLineEdit) -> None:
+        """If the completer popup is open with a highlighted row, adopt it as
+        the editor text before committing — so Tab accepts the suggestion."""
+        completer = editor.completer()
+        if completer is None:
+            return
+        popup = completer.popup()
+        if popup is not None and popup.isVisible():
+            idx = popup.currentIndex()
+            if idx.isValid():
+                editor.setText(idx.data())
+            elif completer.currentCompletion():
+                editor.setText(completer.currentCompletion())
 
     def setEditorData(self, editor: QLineEdit, index) -> None:
         current = index.data(Qt.EditRole) or ""

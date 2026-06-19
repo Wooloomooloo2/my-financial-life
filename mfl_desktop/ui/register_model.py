@@ -243,8 +243,23 @@ class TransactionTableModel(QAbstractTableModel):
             return False
         self._rows[index.row()] = updated
         self._search_blobs[index.row()] = self._build_search_blob(updated)
-        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+        # A payee edit can auto-fill the category (ADR-072): repaint both cells.
+        # Keep top_left on the edited column so _on_model_data_changed reads it
+        # as a payee edit (no category re-prompt / transfer dialog).
+        right = index
+        if col_name == "payee_name" and updated.category_id != row.category_id:
+            cat_col = self._column_index("category_name")
+            if cat_col is not None:
+                right = self.index(index.row(), max(index.column(), cat_col))
+        self.dataChanged.emit(index, right, [Qt.DisplayRole, Qt.EditRole])
         return True
+
+    def _column_index(self, col_name: str) -> Optional[int]:
+        """Column position for a field name, or None if the layout omits it."""
+        for i, col in enumerate(self.COLUMNS):
+            if col[1] == col_name:
+                return i
+        return None
 
     # ── edit routing ──
 
@@ -265,7 +280,26 @@ class TransactionTableModel(QAbstractTableModel):
         if col_name == "payee_name":
             new_name = str(value).strip()
             payee_id, display = self._repo.update_transaction_payee(row.id, new_name)
-            return replace(row, payee_id=payee_id, payee_name=display)
+            updated = replace(row, payee_id=payee_id, payee_name=display)
+            # ADR-072 (extended to inline edits): if the chosen payee remembers
+            # a default category and this row is still Uncategorised, fill it in
+            # now — same "memory only fills an Uncategorised row" rule the import
+            # path uses, so a category the user already picked always wins. A
+            # transfer-kind default is skipped (it would need a partner row).
+            if payee_id is not None and row.category_id == self._repo.uncategorised_id():
+                default_cat = self._repo.get_payee_default_category(payee_id)
+                if (
+                    default_cat is not None
+                    and default_cat != row.category_id
+                    and self._repo.get_category_kind(default_cat) != "transfer"
+                ):
+                    cat_name = self._repo.update_transaction_category(
+                        row.id, default_cat,
+                    )
+                    updated = replace(
+                        updated, category_id=default_cat, category_name=cat_name,
+                    )
+            return updated
 
         if col_name == "category_name":
             category_id = int(value)

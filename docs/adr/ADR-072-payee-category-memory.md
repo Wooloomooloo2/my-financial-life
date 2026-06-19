@@ -83,3 +83,17 @@ Offscreen, against a temp DB:
 - Import: a row with no source category and a remembered payee lands on the memorised category; a row whose file carried a category keeps it; a split parent stays Uncategorised; re-import dedups (hash unchanged).
 - `count_/apply_default_category_to_uncategorised`: counts/updates only Uncategorised non-transfer non-split rows across canonical + aliases; returns the row count; leaves already-categorised rows alone.
 - Offscreen Qt: `MemoriseCategoryDialog` returns the apply-to-existing flag; the Payees dialog renders the Auto-category column and the picker/clear flow.
+
+---
+
+## Amendment (2026-06-19) — memory also applies when the payee is set inline
+
+**Status:** Accepted.
+
+ADR-072 originally applied the remembered payee→category only at **import** time. Real use surfaced the symmetric expectation: when you change a transaction's **payee** inline in the register to a payee that already has a memory (e.g. retype "A AND B COUNCIL" as "Tesco", which is remembered as *Groceries*), the category should fill in there too — not just on the next import.
+
+`TransactionTableModel._apply_edit` now, on a `payee_name` edit, applies the payee's `default_category_id` **using the same contract as the import path**: only when the row is still **Uncategorised** (a category the user already chose always wins), and never for a **transfer-kind** default (it would need a partner row — guarded via `get_category_kind`). The model emits a `dataChanged` span covering the payee **and** category cells so both repaint, while keeping `top_left` on the payee column so `RegisterWindow._on_model_data_changed` still reads it as a payee edit (no re-prompt, no transfer dialog). No new learning path — the memory is still set only via the `MemoriseCategoryDialog` / Payees dialog; this just **reads** it at one more natural moment.
+
+Shipped alongside an unrelated register-editing nicety (no ADR): **Tab in the inline payee editor commits and advances to the Category cell** (opening its editor), accepting the highlighted completer suggestion first — so normalise-payee-then-Tab flows straight into the (now possibly auto-filled) category. (`PayeeTypeaheadDelegate.eventFilter`.)
+
+**Verified** offscreen: inline payee→Tesco auto-fills Groceries and persists; an already-categorised row is left untouched; the `dataChanged` span is payee→category; Tab on the payee editor (popup open or closed) emits `EditNextItem` and takes the completion, Shift+Tab emits `EditPreviousItem`, and a typed brand-new payee keeps its text.
