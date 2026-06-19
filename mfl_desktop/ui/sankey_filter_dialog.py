@@ -10,25 +10,25 @@ Returns the chosen ``(account_ids, category_ids)`` on Accepted via
 :py:meth:`values`; each is an empty tuple when "all" is selected, matching the
 saved-filter convention. The dialog is seeded from the current selection so the
 user tweaks rather than starts over.
+
+This dialog adopts :class:`ReportFilterDialogBase` (ADR-084) **partially** —
+it has no period block and returns a tuple rather than a filter dataclass, but
+still reuses the base's accounts checklist, all-checked→``[]`` normalisation,
+OK/Cancel scaffold, and ``values()``. Its category **tree** stays bespoke.
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QDialog,
-    QDialogButtonBox,
-    QSplitter,
-    QVBoxLayout,
-)
+from PySide6.QtWidgets import QSplitter
 
 from mfl_desktop.db.repository import AccountSummary, CategoryNode, Repository
 from mfl_desktop.ui.category_tree_panel import CategoryTreePanel
-from mfl_desktop.ui.check_list_panel import CheckListPanel
+from mfl_desktop.ui.report_filter_dialog_base import ReportFilterDialogBase
 
 
-class SankeyFilterDialog(QDialog):
+class SankeyFilterDialog(ReportFilterDialogBase):
     """Modal account/category filter editor — accept commits, cancel discards."""
 
     def __init__(
@@ -41,19 +41,10 @@ class SankeyFilterDialog(QDialog):
         current_category_ids: tuple[int, ...],
         parent=None,
     ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Filter — Sankey")
-        self.setModal(True)
+        super().__init__(parent, title="Filter — Sankey")
         self.resize(720, 560)
 
-        self._result: Optional[tuple[tuple[int, ...], tuple[int, ...]]] = None
-
-        self._accounts_panel = CheckListPanel(
-            "Accounts",
-            [(a.id, a.name) for a in accounts],
-            placeholder="Search accounts…",
-        )
-        self._accounts_panel.set_checked_ids(current_account_ids or None)
+        accounts_panel = self._make_accounts_panel(accounts, current_account_ids)
 
         # Only income/expense categories are relevant (transfers are excluded
         # from the report). Drop an ancestor only when it isn't itself
@@ -70,23 +61,13 @@ class SankeyFilterDialog(QDialog):
         self._categories_panel.set_checked_ids(current_category_ids or None)
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._accounts_panel)
+        splitter.addWidget(accounts_panel)
         splitter.addWidget(self._categories_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([240, 440])
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
-        root.addWidget(splitter, stretch=1)
-        root.addWidget(buttons)
+        self._finalise(splitter)
 
     # ── public API ──
 
@@ -96,11 +77,7 @@ class SankeyFilterDialog(QDialog):
     # ── internals ──
 
     def _on_accept(self) -> None:
-        accounts = self._accounts_panel.checked_ids()
-        if self._accounts_panel.is_all_checked():
-            accounts = []
-        categories = self._categories_panel.checked_ids()
-        if self._categories_panel.is_all_checked():
-            categories = []
+        accounts = self._checked_or_all(self._accounts_panel)
+        categories = self._checked_or_all(self._categories_panel)
         self._result = (tuple(accounts), tuple(categories))
         self.accept()

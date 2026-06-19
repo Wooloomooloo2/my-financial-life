@@ -19,30 +19,26 @@ The category checklist rebuilds when the rollup level changes — the
 distinct bucket-id set shifts (see ADR-030). The widget tries to
 preserve the previously-checked subset where the bucket-ids still exist,
 otherwise falls back to all-checked.
+
+The period/granularity/accounts plumbing + the OK/Cancel scaffold come
+from :class:`ReportFilterDialogBase` (ADR-084); only the rollup +
+categories/payees specials live here.
 """
 from __future__ import annotations
 
-from datetime import date
 from typing import Optional
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDateEdit,
-    QDialog,
-    QDialogButtonBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
-    QLabel,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
-from mfl_desktop.account_summary import period_bounds
-from mfl_desktop.ui.date_widgets import make_date_edit, make_period_combo
 from mfl_desktop.db.repository import (
     AccountSummary, CategoryNode, Repository,
 )
@@ -53,18 +49,11 @@ from mfl_desktop.reports.filters import (
     SPENDING_PERIOD_KEYS, SpendingOverTimeFilters,
 )
 from mfl_desktop.ui.check_list_panel import CheckListPanel
+from mfl_desktop.ui.report_filter_dialog_base import ReportFilterDialogBase
 
 # Shared with the report window.
 UNCATEGORISED_ID = 1
 
-# Period labels reuse account_summary.PERIOD_LABELS (ADR-082, single source).
-_GRANULARITY_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("Auto",       "auto"),
-    ("Weekly",     "weekly"),
-    ("Monthly",    "monthly"),
-    ("Quarterly",  "quarterly"),
-    ("Annually",   "annually"),
-)
 _ROLLUP_TOP = "top"
 _ROLLUP_GROUP = "group"
 _ROLLUP_LEAF = "leaf"
@@ -75,7 +64,7 @@ _ROLLUP_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 
 
-class SpendingFilterDialog(QDialog):
+class SpendingFilterDialog(ReportFilterDialogBase):
     """Modal filter editor — single trip in / out, accept commits."""
 
     def __init__(
@@ -88,9 +77,7 @@ class SpendingFilterDialog(QDialog):
         canonical_payees: list[tuple[int, str]],
         parent=None,
     ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Filter — Spending Over Time")
-        self.setModal(True)
+        super().__init__(parent, title="Filter — Spending Over Time")
         self.resize(820, 620)
 
         self._repo = repo
@@ -108,22 +95,14 @@ class SpendingFilterDialog(QDialog):
             _ROLLUP_LEAF:  {c.id: c.id for c in categories},
         }
 
-        self._result: Optional[SpendingOverTimeFilters] = None
-
         # ── left column: period + granularity + rollup + uncat toggle ──
-        self._period_combo = make_period_combo(
-            SPENDING_PERIOD_KEYS, current=current.period_key,
+        period_combo = self._make_period_combo(
+            SPENDING_PERIOD_KEYS, current.period_key,
         )
-        self._period_combo.currentIndexChanged.connect(self._sync_custom_visibility)
-
-        cf, ct = self._initial_custom_dates(current)
-        self._custom_from = make_date_edit(QDate(cf.year, cf.month, cf.day))
-        self._custom_to = make_date_edit(QDate(ct.year, ct.month, ct.day))
-
-        self._granularity_combo = QComboBox()
-        for label, value in _GRANULARITY_OPTIONS:
-            self._granularity_combo.addItem(label, userData=value)
-        self._set_combo_to(self._granularity_combo, current.granularity)
+        custom_from, custom_to = self._make_custom_dates(
+            current.period_key, current.custom_start, current.custom_end,
+        )
+        granularity_combo = self._make_granularity_combo(current.granularity)
 
         self._rollup_combo = QComboBox()
         for label, value in _ROLLUP_OPTIONS:
@@ -136,13 +115,13 @@ class SpendingFilterDialog(QDialog):
 
         period_box = QGroupBox("Period")
         period_form = QFormLayout(period_box)
-        period_form.addRow("Preset:", self._period_combo)
-        period_form.addRow("From:", self._custom_from)
-        period_form.addRow("To:", self._custom_to)
+        period_form.addRow("Preset:", period_combo)
+        period_form.addRow("From:", custom_from)
+        period_form.addRow("To:", custom_to)
 
         shape_box = QGroupBox("Shape")
         shape_form = QFormLayout(shape_box)
-        shape_form.addRow("Granularity:", self._granularity_combo)
+        shape_form.addRow("Granularity:", granularity_combo)
         shape_form.addRow("Rollup:", self._rollup_combo)
         shape_form.addRow(self._include_uncat_check)
 
@@ -155,12 +134,9 @@ class SpendingFilterDialog(QDialog):
         left_layout.addStretch(1)
 
         # ── right column: three checklists side-by-side ──
-        self._accounts_panel = CheckListPanel(
-            "Accounts",
-            [(a.id, a.name) for a in accounts],
-            placeholder="Search accounts…",
+        accounts_panel = self._make_accounts_panel(
+            accounts, current.account_ids,
         )
-        self._accounts_panel.set_checked_ids(current.account_ids or None)
 
         category_rows = self._category_rows_for_rollup(current.rollup_level)
         self._categories_panel = CheckListPanel(
@@ -178,7 +154,7 @@ class SpendingFilterDialog(QDialog):
         self._payees_panel.set_checked_ids(current.payee_ids or None)
 
         lists_splitter = QSplitter(Qt.Horizontal)
-        lists_splitter.addWidget(self._accounts_panel)
+        lists_splitter.addWidget(accounts_panel)
         lists_splitter.addWidget(self._categories_panel)
         lists_splitter.addWidget(self._payees_panel)
         lists_splitter.setStretchFactor(0, 1)
@@ -194,24 +170,8 @@ class SpendingFilterDialog(QDialog):
         top_splitter.setStretchFactor(1, 1)
         top_splitter.setSizes([240, 560])
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
-        root.addWidget(top_splitter, stretch=1)
-        root.addWidget(buttons)
-
+        self._finalise(top_splitter)
         self._sync_custom_visibility()
-
-    # ── public API ──
-
-    def values(self) -> Optional[SpendingOverTimeFilters]:
-        return self._result
 
     # ── internals ──
 
@@ -247,35 +207,8 @@ class SpendingFilterDialog(QDialog):
         if carryover and carryover != new_ids:
             self._categories_panel.set_checked_ids(carryover)
 
-    def _sync_custom_visibility(self) -> None:
-        is_custom = self._period_combo.currentData() == "custom"
-        self._custom_from.setEnabled(is_custom)
-        self._custom_to.setEnabled(is_custom)
-
     def _on_accept(self) -> None:
-        period_key = self._period_combo.currentData() or "quarter"
-        custom_start: Optional[str] = None
-        custom_end: Optional[str] = None
-        if period_key == "custom":
-            cf = self._custom_from.date()
-            ct = self._custom_to.date()
-            if cf > ct:
-                # Swap silently — the alternative is a modal warning the
-                # user has to dismiss every time they fat-fingered the
-                # date pickers; the swap is what they wanted anyway.
-                cf, ct = ct, cf
-            custom_start = cf.toString(Qt.ISODate)
-            custom_end = ct.toString(Qt.ISODate)
-
-        categories = self._categories_panel.checked_ids()
-        if self._categories_panel.is_all_checked():
-            categories = []
-        payees = self._payees_panel.checked_ids()
-        if self._payees_panel.is_all_checked():
-            payees = []
-        accounts = self._accounts_panel.checked_ids()
-        if self._accounts_panel.is_all_checked():
-            accounts = []
+        period_key, custom_start, custom_end = self._period_and_custom("quarter")
 
         self._result = SpendingOverTimeFilters(
             period_key=period_key,
@@ -283,38 +216,10 @@ class SpendingFilterDialog(QDialog):
             custom_end=custom_end,
             granularity=self._granularity_combo.currentData() or "auto",
             rollup_level=self._rollup_combo.currentData() or _ROLLUP_TOP,
-            category_ids=tuple(categories),
+            category_ids=tuple(self._checked_or_all(self._categories_panel)),
             include_uncategorised=self._include_uncat_check.isChecked(),
-            payee_ids=tuple(payees),
-            account_ids=tuple(accounts),
+            payee_ids=tuple(self._checked_or_all(self._payees_panel)),
+            account_ids=tuple(self._checked_or_all(self._accounts_panel)),
             include_transfers=self._current.include_transfers,
         )
         self.accept()
-
-    # ── helpers ──
-
-    @staticmethod
-    def _set_combo_to(combo: QComboBox, value: str) -> None:
-        for i in range(combo.count()):
-            if combo.itemData(i) == value:
-                combo.setCurrentIndex(i)
-                return
-        combo.setCurrentIndex(0)
-
-    @staticmethod
-    def _initial_custom_dates(
-        f: SpendingOverTimeFilters,
-    ) -> tuple[date, date]:
-        today = date.today()
-        if f.period_key == "custom" and f.custom_start and f.custom_end:
-            try:
-                return (
-                    date.fromisoformat(f.custom_start),
-                    date.fromisoformat(f.custom_end),
-                )
-            except ValueError:
-                pass
-        try:
-            return period_bounds(f.period_key, today)
-        except ValueError:
-            return (today.replace(day=1), today)
