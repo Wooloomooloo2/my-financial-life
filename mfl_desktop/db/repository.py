@@ -8381,10 +8381,19 @@ class Repository:
             raise
 
     def is_reconciled(self, txn_id: int) -> bool:
-        """True if the txn is currently Reconciled to a closed statement —
-        the gate for the "change anyway?" confirm on inline edits."""
+        """True if the txn is reconciled **to an actual statement** — the gate
+        for the "change anyway?" confirm on inline edits / split open.
+
+        Requires a non-null ``statement_id``, not just ``status='Reconciled'``:
+        the confirm warns that an edit "may put that statement out of balance",
+        which is meaningless for a row that carries the Reconciled *status* but
+        no statement. Banktivity-migrated data arrives exactly like that
+        (status preserved, no statement created — see Known pitfalls §8), so a
+        status-only check spuriously blocked editing those rows and their
+        splits (ADR-040 amendment, 2026-06-19)."""
         row = self._conn.execute(
-            "SELECT 1 FROM txn WHERE id = ? AND status = 'Reconciled'",
+            "SELECT 1 FROM txn WHERE id = ? AND status = 'Reconciled' "
+            "AND statement_id IS NOT NULL",
             (txn_id,),
         ).fetchone()
         return row is not None

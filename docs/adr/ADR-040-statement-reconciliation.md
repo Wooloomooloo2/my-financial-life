@@ -365,3 +365,17 @@ Transfer pairs reconcile independently per side; cross-currency accounts reconci
 **Why a default and not a hard-computed field.** The auto-derived value is a *suggestion* — the genuine purpose of reconciliation is still to compare the bank's ending balance (typed by the user) against the records via the live **Missing** counter (point #2). The fix only makes the suggestion correct for the chosen period and keeps it in sync as the date is adjusted, without taking the field away from the user.
 
 **Files touched:** `mfl_desktop/db/repository.py` (new `balance_as_of`); `mfl_desktop/ui/reconcile_wizard.py` (`_seed_defaults` rewrite, new `_derive_ending_balance` / `_on_end_date_changed` / `_on_end_balance_edited`, `dateChanged` + `textEdited` wiring, `_load_statement_into_pages` marks stored balance user-set). **Verified:** `balance_as_of` checked end-to-end on a temp DB built from the real migrations — boundary day inclusive, future-dated txns excluded, opening-only date returns the opening balance.
+
+---
+
+## Amendment (2026-06-19) — the edit guard requires an actual statement, not just the status string
+
+**Status:** Accepted.
+
+`Repository.is_reconciled` — the gate for the "this is reconciled, change anyway?" confirm on inline edits and on opening a reconciled **split** — checked only `status = 'Reconciled'`, contradicting its own docstring ("reconciled **to a closed statement**"). Banktivity-migrated data carries the Reconciled *status* with **no statement** (`statement_id IS NULL`; see Known pitfalls §8) — in the owner's file **27,977** rows are status-only vs **1,337** genuinely attached to a statement. So the guard fired on all 27,977, warning that an edit "may put that statement out of balance" when there is **no statement to unbalance**.
+
+The concrete symptom: a Banktivity-migrated **split** (e.g. Smile Current, 2026-03-03, a balanced 3-line rent split) wouldn't open on double-click — the spurious confirm defaults to **No**, so the split dialog never appeared. (The reports were fine: the split-unrolled `txn_category_line` view correctly attributes the lines.)
+
+**Fix:** `is_reconciled` now also requires `statement_id IS NOT NULL`. Genuinely statement-reconciled rows keep their protection; status-only migration rows are freely editable (their splits open directly, inline edits don't prompt). One-line query change, no migration. **Verified** against a copy of the live file: `is_reconciled(2567)` → False, a statement-attached row → still True, and driving the real double-click handler now opens the split dialog with **zero** confirms.
+
+_Operational note: this supersedes the "bulk-edit the status to un-reconcile" workaround in Known pitfalls §8 for the *edit-blocking* symptom — the status string can stay; only the statement linkage governs the guard now._
