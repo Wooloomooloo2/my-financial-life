@@ -120,7 +120,11 @@ class CheckListPanel(QWidget):
         a parent dialog changes the category bucket-id set). All rows
         start checked; callers re-apply any saved subset afterwards."""
         self._all_rows = list(rows)
-        # Re-apply search filter against the new rows.
+        # Actually rebuild the visible list — _apply_filter only shows/hides
+        # the *existing* items, so without this the widget kept the prior
+        # rollup's rows until the dialog was reopened.
+        self._populate(self._all_rows)
+        # Re-apply any active search filter against the new rows.
         self._apply_filter(self._search.text())
         self.changed.emit()
 
