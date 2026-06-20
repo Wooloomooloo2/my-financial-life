@@ -49,7 +49,10 @@ from mfl_desktop.reports import (
     category_group_map, category_path, category_root_map,
 )
 from mfl_desktop.reports.filters import (
-    SpendingOverTimeFilters, TYPE_SPENDING_OVER_TIME,
+    IncomeOverTimeFilters,
+    SpendingOverTimeFilters,
+    TYPE_INCOME_OVER_TIME,
+    TYPE_SPENDING_OVER_TIME,
 )
 from mfl_desktop.ui.chart_helpers import colour_for, legend_chip
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
@@ -59,7 +62,7 @@ from mfl_desktop.ui.spending_filter_dialog import (
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 # Granularity dataclass keys → SQL bucket keys (the SQL side speaks
 # "week" / "month" / ...; the dataclass speaks "weekly" / "monthly").
@@ -85,6 +88,48 @@ _ROLLUP_DESCENT: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class _Direction:
+    """Everything that differs between the Spending and Income variants of
+    this one time-bucketed report (ADR-088).
+
+    The window machinery (drill-down, rollup, filter dialog, save/load) is
+    identical for both; only the category *kind* that counts, the repository
+    aggregate it calls, the saved-report type, and the on-screen wording
+    change. A subclass picks its variant via the ``_DIRECTION`` class
+    attribute, so :meth:`SpendingReportWindow.open_bare` /
+    :meth:`load_from_id` stay shared.
+    """
+
+    kind: str                 # category kind that counts: "expense" | "income"
+    type_key: str             # saved-report type discriminator
+    type_label: str           # "Spending Over Time" | "Income Over Time"
+    noun: str                 # "spending" | "income" — for the empty-state line
+    filters_cls: type         # SpendingOverTimeFilters | IncomeOverTimeFilters
+    aggregate_method: str     # Repository method name returning the buckets
+    value_key: str            # row-dict key holding the per-bucket pence
+
+
+_EXPENSE_DIRECTION = _Direction(
+    kind="expense",
+    type_key=TYPE_SPENDING_OVER_TIME,
+    type_label="Spending Over Time",
+    noun="spending",
+    filters_cls=SpendingOverTimeFilters,
+    aggregate_method="spending_aggregates",
+    value_key="spending_pence",
+)
+_INCOME_DIRECTION = _Direction(
+    kind="income",
+    type_key=TYPE_INCOME_OVER_TIME,
+    type_label="Income Over Time",
+    noun="income",
+    filters_cls=IncomeOverTimeFilters,
+    aggregate_method="income_aggregates",
+    value_key="income_pence",
+)
+
+
 def _auto_granularity_for(span_days: int) -> str:
     """Resolve granularity='auto' against a date-span size — mirrors the
     account-summary screen but with no daily bucket (the spending chart's
@@ -108,6 +153,11 @@ class SpendingReportWindow(QMainWindow):
     """
 
     reports_changed = Signal()
+
+    # Which variant this window is. The expense report uses the default;
+    # IncomeReportWindow overrides it (ADR-088). Everything kind-specific is
+    # read from here so the two share all the machinery below.
+    _DIRECTION: _Direction = _EXPENSE_DIRECTION
 
     def __init__(
         self,
@@ -142,10 +192,13 @@ class SpendingReportWindow(QMainWindow):
         }
 
         # Active filters — either the loaded saved filters, or defaults.
+        # The concrete class is the direction's (Spending vs Income), so a
+        # saved blob round-trips through the right type (ADR-088).
+        filters_cls = self._DIRECTION.filters_cls
         self._current_filters: SpendingOverTimeFilters = (
-            SpendingOverTimeFilters.from_json(report.filters_json)
+            filters_cls.from_json(report.filters_json)
             if report is not None
-            else SpendingOverTimeFilters.default()
+            else filters_cls.default()
         )
 
         # ── top bar ──
@@ -223,7 +276,7 @@ class SpendingReportWindow(QMainWindow):
         cls, repo: Repository, report_id: int, parent=None,
     ) -> Optional["SpendingReportWindow"]:
         report = repo.get_report(report_id)
-        if report is None or report.type != TYPE_SPENDING_OVER_TIME:
+        if report is None or report.type != cls._DIRECTION.type_key:
             return None
         return cls(repo, report=report, parent=parent)
 
@@ -357,7 +410,8 @@ class SpendingReportWindow(QMainWindow):
         else:
             expanded_payee_ids = None
 
-        rows = self._repo.spending_aggregates(
+        aggregate = getattr(self._repo, self._DIRECTION.aggregate_method)
+        rows = aggregate(
             date_from=d_from.isoformat(),
             date_to=d_to.isoformat(),
             granularity=sql_granularity,
@@ -365,6 +419,7 @@ class SpendingReportWindow(QMainWindow):
             include_uncategorised=filters.include_uncategorised,
             payee_ids=expanded_payee_ids,
         )
+        value_key = self._DIRECTION.value_key
 
         rollup_map = self._rollup_maps[filters.rollup_level]
         checked_bucket_ids: Optional[set[int]] = (
@@ -381,7 +436,7 @@ class SpendingReportWindow(QMainWindow):
             ):
                 continue
             key = (bid, r["bucket"])
-            spending[key] = spending.get(key, 0) + r["spending_pence"]
+            spending[key] = spending.get(key, 0) + r[value_key]
 
         self._render(spending, sql_granularity, d_from, d_to, filters)
 
@@ -395,7 +450,9 @@ class SpendingReportWindow(QMainWindow):
     ) -> None:
         buckets = sorted({key[1] for key in spending.keys()})
         if not buckets:
-            self._show_empty("No spending in the selected range / filters.")
+            self._show_empty(
+                f"No {self._DIRECTION.noun} in the selected range / filters."
+            )
             return
 
         group_totals: dict[int, int] = {}
@@ -519,7 +576,7 @@ class SpendingReportWindow(QMainWindow):
         rollup_map = self._rollup_maps.get(rollup, {})
         return len({
             rollup_map[c.id] for c in self._all_categories
-            if c.kind == "expense" and c.id in rollup_map
+            if c.kind == self._DIRECTION.kind and c.id in rollup_map
             and rollup_map[c.id] != UNCATEGORISED_ID
         })
 
@@ -554,6 +611,8 @@ class SpendingReportWindow(QMainWindow):
             accounts=self._all_accounts,
             categories=self._all_categories,
             canonical_payees=self._all_canonical_payees,
+            kind=self._DIRECTION.kind,
+            title=f"Filter — {self._DIRECTION.type_label}",
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -593,7 +652,7 @@ class SpendingReportWindow(QMainWindow):
             next_rollup_map.get(cid, cid)
             for cid in descendants
             if cid in self._categories_by_id
-            and self._categories_by_id[cid].kind == "expense"
+            and self._categories_by_id[cid].kind == self._DIRECTION.kind
         }
         next_bucket_ids.discard(UNCATEGORISED_ID)
         if not next_bucket_ids:
@@ -623,22 +682,10 @@ class SpendingReportWindow(QMainWindow):
     def _with_updates(
         base: SpendingOverTimeFilters, **changes,
     ) -> SpendingOverTimeFilters:
-        return SpendingOverTimeFilters(
-            period_key=changes.get("period_key", base.period_key),
-            custom_start=changes.get("custom_start", base.custom_start),
-            custom_end=changes.get("custom_end", base.custom_end),
-            granularity=changes.get("granularity", base.granularity),
-            rollup_level=changes.get("rollup_level", base.rollup_level),
-            category_ids=changes.get("category_ids", base.category_ids),
-            include_uncategorised=changes.get(
-                "include_uncategorised", base.include_uncategorised,
-            ),
-            payee_ids=changes.get("payee_ids", base.payee_ids),
-            account_ids=changes.get("account_ids", base.account_ids),
-            include_transfers=changes.get(
-                "include_transfers", base.include_transfers,
-            ),
-        )
+        # ``replace`` keeps the concrete filter type (Spending vs Income —
+        # ADR-088) and carries unspecified fields (incl. saved splitter
+        # sizes) through untouched.
+        return replace(base, **changes)
 
     # ── save / save-as / dirty state ──
 
@@ -696,7 +743,7 @@ class SpendingReportWindow(QMainWindow):
             return
         try:
             row = resolve_save_as(
-                self, self._repo, self._report_id, TYPE_SPENDING_OVER_TIME,
+                self, self._repo, self._report_id, self._DIRECTION.type_key,
                 choice.name, choice.folder_id, filters.to_json(),
             )
         except ValueError as e:
@@ -719,10 +766,11 @@ class SpendingReportWindow(QMainWindow):
         self.reports_changed.emit()
 
     def _update_name_label(self) -> None:
+        label = self._DIRECTION.type_label
         if self._loaded_name is None:
-            self._name_label.setText("Untitled Spending Over Time")
+            self._name_label.setText(f"Untitled {label}")
             tokens.themed(self._name_label, "color: {muted}; font-style: italic; font-weight: bold; padding: 4px 8px;")
-            self.setWindowTitle("Spending Over Time — Untitled")
+            self.setWindowTitle(f"{label} — Untitled")
             return
         prefix = ""
         if self._loaded_folder_id is not None:
@@ -734,7 +782,7 @@ class SpendingReportWindow(QMainWindow):
         self._name_label.setText(f"{prefix}{self._loaded_name}{dirty_mark}")
         tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
         self.setWindowTitle(
-            f"Spending Over Time — {prefix}{self._loaded_name}{dirty_mark}"
+            f"{label} — {prefix}{self._loaded_name}{dirty_mark}"
         )
 
     def _update_save_buttons(self) -> None:

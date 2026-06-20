@@ -3911,6 +3911,92 @@ class Repository:
             for r in cur
         ]
 
+    def income_aggregates(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        granularity: str,
+        account_ids: Optional[list[int]] = None,
+        include_uncategorised: bool = True,
+        payee_ids: Optional[list[int]] = None,
+    ) -> list[dict]:
+        """Inflow income per (bucket, category_id) over a date range — the
+        income-side mirror of :meth:`spending_aggregates` (ADR-088, Income
+        Over Time report).
+
+        Uses the symmetric **strict inflow** definition: only transactions
+        whose amount is positive on a ``kind='income'`` category contribute,
+        so the chart's bars are unambiguously positive and a negative
+        correction on an income category doesn't flip a bar negative (the
+        mirror of the strict-outflow rule documented on
+        :meth:`spending_aggregates`).
+
+        ``include_uncategorised`` is accepted for signature parity with
+        ``spending_aggregates`` but is effectively inert here: the reserved
+        Uncategorised category (id=1) is ``kind='expense'`` (ADR-014), so it
+        never matches the income kind filter regardless of the flag.
+
+        Returns a list of dicts: ``{bucket, category_id, income_pence}`` —
+        pence are always ≥ 0. Caller rolls ``category_id`` up to a report
+        group id and aggregates further (same flow as the spending report).
+        """
+        if granularity not in self._BUCKET_EXPR:
+            raise ValueError(
+                f"Unknown granularity {granularity!r}; expected one of "
+                f"{tuple(self._BUCKET_EXPR.keys())}"
+            )
+        bucket_expr = self._BUCKET_EXPR[granularity]
+
+        filters: list[str] = []
+        params: list = [date_from, date_to]
+
+        if account_ids is not None:
+            if not account_ids:
+                return []
+            ph = ",".join("?" * len(account_ids))
+            filters.append(f"t.account_id IN ({ph})")
+            params.extend(account_ids)
+
+        if not include_uncategorised:
+            filters.append("t.category_id != ?")
+            params.append(UNCATEGORISED_ID)
+
+        if payee_ids:
+            ph = ",".join("?" * len(payee_ids))
+            filters.append(f"t.payee_id IN ({ph})")
+            params.extend(payee_ids)
+
+        filter_sql = ""
+        if filters:
+            filter_sql = " AND " + " AND ".join(filters)
+
+        sql = (
+            f"SELECT {bucket_expr} AS bucket, "
+            f"       t.category_id AS category_id, "
+            f"       SUM(t.amount) AS income_pence "
+            # Read from the split-unrolled view (ADR-051) so a split lands on
+            # each line's own category (identical to scanning `txn` when the
+            # file has no splits) — see spending_aggregates for the rationale.
+            f"FROM txn_category_line t "
+            f"JOIN category c ON c.id = t.category_id "
+            f"WHERE t.posted_date BETWEEN ? AND ? "
+            f"  AND c.kind = 'income' "
+            f"  AND t.amount > 0 "  # strict inflow — see docstring
+            f"  {filter_sql} "
+            f"GROUP BY bucket, t.category_id "
+            f"ORDER BY bucket"
+        )
+        cur = self._conn.execute(sql, params)
+        return [
+            {
+                "bucket": r["bucket"],
+                "category_id": int(r["category_id"]),
+                "income_pence": int(r["income_pence"]),
+            }
+            for r in cur
+        ]
+
     def payee_spending_aggregates(
         self,
         *,
@@ -4196,6 +4282,7 @@ class Repository:
         date_to: str,
         granularity: str,
         account_ids: Optional[Iterable[int]] = None,
+        category_ids: Optional[Iterable[int]] = None,
         display_currency: Optional[str] = None,
         include_transfers: bool = False,
     ) -> dict:
@@ -4223,7 +4310,12 @@ class Repository:
         ``granularity`` is one of ``_BUCKET_EXPR``'s keys (week / month /
         quarter / year); the caller resolves ``'auto'`` to one of those
         first. ``account_ids`` non-empty restricts to those accounts;
-        ``None``/empty means all.
+        ``None``/empty means all. ``category_ids`` non-empty restricts to
+        lines whose own category is in the set (ADR-088 amend) — the caller
+        expands a picked parent to its descendants first, so a parent
+        selection naturally pulls in its children; ``None``/empty means all
+        categories. The kind rule still decides income vs expense, so this
+        only narrows *which* income/expense categories feed the totals.
 
         ``display_currency`` converts every per-(bucket, currency) total
         into that one currency via the ADR-035 FX layer, summed in the
@@ -4261,6 +4353,10 @@ class Repository:
         if acc:
             clauses.append(f"t.account_id IN ({','.join('?' * len(acc))})")
             params.extend(acc)
+        cats = list(category_ids) if category_ids else []
+        if cats:
+            clauses.append(f"t.category_id IN ({','.join('?' * len(cats))})")
+            params.extend(cats)
         if not include_transfers:
             clauses.append("t.transfer_id IS NULL")
 

@@ -34,6 +34,7 @@ from mfl_desktop.periods import (  # noqa: F401
 # keys in ``FILTER_DEFAULTS`` / ``filters_from_json``. Mirrors the CHECK
 # constraint in 0010_reports.sql.
 TYPE_SPENDING_OVER_TIME = "spending_over_time"
+TYPE_INCOME_OVER_TIME = "income_over_time"
 TYPE_NET_WORTH = "net_worth"
 TYPE_INCOME_EXPENSE = "income_expense"
 TYPE_SANKEY = "sankey"
@@ -43,6 +44,7 @@ TYPE_CATEGORY_PAYEE = "category_payee"
 
 REPORT_TYPES: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
+    TYPE_INCOME_OVER_TIME,
     TYPE_NET_WORTH,
     TYPE_INCOME_EXPENSE,
     TYPE_SANKEY,
@@ -53,6 +55,7 @@ REPORT_TYPES: tuple[str, ...] = (
 
 REPORT_TYPE_LABELS: dict[str, str] = {
     TYPE_SPENDING_OVER_TIME: "Spending Over Time",
+    TYPE_INCOME_OVER_TIME:   "Income Over Time",
     TYPE_NET_WORTH:          "Net Worth",
     TYPE_INCOME_EXPENSE:     "Income & Expense",
     TYPE_SANKEY:             "Sankey",
@@ -123,6 +126,47 @@ class SpendingOverTimeFilters:
         return _from_dict(cls, raw)
 
 
+# ── Income Over Time (ADR-088) ───────────────────────────────────────────────
+
+# Mirror image of Spending Over Time: the same time-bucketed stacked-bar
+# report, but summing **income** (inflows on ``kind='income'`` categories)
+# instead of spending. The filter shape is identical — same period /
+# granularity / rollup / category / payee / account vocabulary — so this is a
+# thin subclass of SpendingOverTimeFilters with its own type so the saved-
+# report dispatch (``_FILTER_CLASSES``, the window loader) can tell them apart.
+#
+# ``include_uncategorised`` is inherited but inert here: the reserved
+# Uncategorised category (id=1) is ``kind='expense'`` (0002_category_kind.sql /
+# ADR-014), so it can never appear in an income aggregation. The Income Over
+# Time filter dialog hides the toggle; the field stays for shape symmetry so
+# the two blobs round-trip through the same code path.
+
+
+@dataclass(frozen=True)
+class IncomeOverTimeFilters(SpendingOverTimeFilters):
+    """Persisted filter set for a saved Income Over Time report (ADR-088).
+
+    Structurally identical to :class:`SpendingOverTimeFilters` (see its
+    docstring for the per-field semantics). Distinct only in type, so the
+    report loader and ``_FILTER_CLASSES`` map a saved blob to the income
+    window rather than the spending one.
+    """
+
+    @classmethod
+    def default(cls) -> "IncomeOverTimeFilters":
+        return cls()
+
+    @classmethod
+    def from_json(cls, blob: str) -> "IncomeOverTimeFilters":
+        raw = json.loads(blob) if blob else {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"IncomeOverTimeFilters: expected JSON object, got "
+                f"{type(raw).__name__}"
+            )
+        return _from_dict(cls, raw)
+
+
 # ── Income & Expense (ADR-064 / Arc E, E1) ──────────────────────────────────
 
 # Reuses the Spending period + granularity vocabulary so the report family
@@ -149,6 +193,13 @@ class IncomeExpenseFilters:
     custom_end:   Optional[str] = None
     granularity: str = "auto"
     account_ids: tuple[int, ...] = field(default_factory=tuple)
+    # Category narrowing (ADR-088 amend). Empty == all categories (the shared
+    # "empty means all" convention). Holds the categories the user picked in
+    # the filter dialog; the window expands each to its descendants before
+    # querying, so selecting a parent (e.g. "Expense") includes its children.
+    # Income vs expense is still decided by kind in SQL — this only restricts
+    # *which* income/expense categories feed the totals.
+    category_ids: tuple[int, ...] = field(default_factory=tuple)
     # Transfers between the owner's own accounts are neither income nor
     # expense. ``kind='transfer'`` categories are always excluded by the
     # kind rule; this additionally drops anything carrying a ``transfer_id``
@@ -404,6 +455,7 @@ class CategoryPayeeFilters:
 # type later means a new entry here + a new dataclass above.
 _FILTER_CLASSES: dict[str, type] = {
     TYPE_SPENDING_OVER_TIME: SpendingOverTimeFilters,
+    TYPE_INCOME_OVER_TIME: IncomeOverTimeFilters,
     TYPE_INCOME_EXPENSE: IncomeExpenseFilters,
     TYPE_INVESTMENT_RETURNS: InvestmentReturnsFilters,
     TYPE_SANKEY: SankeyFilters,

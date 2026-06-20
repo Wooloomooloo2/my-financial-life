@@ -6,28 +6,37 @@ report's filter dimensions:
 - Period preset (with Custom range pickers)
 - Granularity (auto / weekly / monthly / quarterly / annually)
 - Accounts — a search-enabled checklist (:class:`CheckListPanel`)
+- Categories — a search-enabled checklist over the income + expense
+  categories (ADR-088 amend). Empty == all; a picked parent expands to its
+  descendants in the window before the query runs.
 
 Returns the chosen :class:`IncomeExpenseFilters` on Accepted via
-:py:meth:`values`. Income vs expense is decided by category kind in SQL,
-so there's no category/kind control here (and no rollup — the report has
-no per-category breakdown in E1). The display currency is a top-bar view
-preference, not a saved filter, so it lives on the window, not here.
+:py:meth:`values`. Income vs expense is still decided by category kind in
+SQL — the category checklist only narrows *which* income/expense categories
+feed the totals (there's no rollup; the report has no per-category breakdown
+in E1). The display currency is a top-bar view preference, not a saved
+filter, so it lives on the window, not here.
 
 The period/granularity/accounts plumbing + the OK/Cancel scaffold come
 from :class:`ReportFilterDialogBase` (ADR-084).
 """
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
+    QSplitter,
     QVBoxLayout,
+    QWidget,
 )
 
-from mfl_desktop.db.repository import AccountSummary, Repository
+from mfl_desktop.db.repository import AccountSummary, CategoryNode, Repository
+from mfl_desktop.reports import category_path
 from mfl_desktop.reports.filters import (
     SPENDING_PERIOD_KEYS, IncomeExpenseFilters,
 )
+from mfl_desktop.ui.check_list_panel import CheckListPanel
 from mfl_desktop.ui.report_filter_dialog_base import ReportFilterDialogBase
 
 
@@ -40,14 +49,16 @@ class IncomeExpenseFilterDialog(ReportFilterDialogBase):
         *,
         current: IncomeExpenseFilters,
         accounts: list[AccountSummary],
+        categories: list[CategoryNode],
         parent=None,
     ) -> None:
         super().__init__(parent, title="Filter — Income & Expense")
-        self.resize(520, 560)
+        self.resize(720, 580)
 
         self._repo = repo
         self._current = current
         self._all_accounts = accounts
+        self._all_categories = categories
 
         # ── period + granularity ──
         period_combo = self._make_period_combo(
@@ -70,19 +81,56 @@ class IncomeExpenseFilterDialog(ReportFilterDialogBase):
         period_form.addRow("Granularity:", granularity_combo)
         period_form.addRow(transfers_check)
 
-        # ── accounts ──
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+        left_layout.addWidget(period_box)
+        left_layout.addStretch(1)
+
+        # ── accounts + categories checklists ──
         accounts_panel = self._make_accounts_panel(accounts, current.account_ids)
 
-        body = QVBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(10)
-        body.addWidget(period_box)
-        body.addWidget(accounts_panel, stretch=1)
+        self._categories_panel = CheckListPanel(
+            "Categories",
+            self._category_rows(),
+            placeholder="Search categories…",
+        )
+        self._categories_panel.set_checked_ids(current.category_ids or None)
 
-        self._finalise(body)
+        lists_splitter = QSplitter(Qt.Horizontal)
+        lists_splitter.addWidget(accounts_panel)
+        lists_splitter.addWidget(self._categories_panel)
+        lists_splitter.setStretchFactor(0, 1)
+        lists_splitter.setStretchFactor(1, 1)
+        lists_splitter.setSizes([220, 260])
+
+        top_splitter = QSplitter(Qt.Horizontal)
+        top_splitter.addWidget(left_column)
+        top_splitter.addWidget(lists_splitter)
+        top_splitter.setStretchFactor(0, 0)
+        top_splitter.setStretchFactor(1, 1)
+        top_splitter.setSizes([240, 460])
+
+        self._finalise(top_splitter)
         self._sync_custom_visibility()
 
     # ── internals ──
+
+    def _category_rows(self) -> list[tuple[int, str]]:
+        """``(id, full_path_label)`` rows for every income/expense category
+        (ADR-088 amend). Transfer categories are excluded — they're never
+        income or expense, so filtering by them would be meaningless. Sorted
+        by full breadcrumb (ADR-031) so siblings cluster; selecting a parent
+        pulls in its children (the window expands to descendants)."""
+        by_id = {c.id: c for c in self._all_categories}
+        rows = [
+            (c.id, category_path(by_id, c.id))
+            for c in self._all_categories
+            if c.kind in ("income", "expense")
+        ]
+        rows.sort(key=lambda pair: pair[1].lower())
+        return rows
 
     def _on_accept(self) -> None:
         period_key, custom_start, custom_end = self._period_and_custom("1y")
@@ -93,6 +141,7 @@ class IncomeExpenseFilterDialog(ReportFilterDialogBase):
             custom_end=custom_end,
             granularity=self._granularity_combo.currentData() or "auto",
             account_ids=tuple(self._checked_or_all(self._accounts_panel)),
+            category_ids=tuple(self._checked_or_all(self._categories_panel)),
             include_transfers=self._include_transfers_check.isChecked(),
         )
         self.accept()

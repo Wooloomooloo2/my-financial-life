@@ -27,6 +27,7 @@ from mfl_desktop.reports.filters import (
     REPORT_TYPE_LABELS,
     TYPE_CATEGORY_PAYEE,
     TYPE_INCOME_EXPENSE,
+    TYPE_INCOME_OVER_TIME,
     TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
     TYPE_PAYEE,
@@ -37,11 +38,12 @@ from mfl_desktop.reports.filters import (
 # Types shipped with persistence today. The rest render but are disabled
 # until their per-type ADR lands (ADR-039 §rounds).
 _AVAILABLE_TYPES: tuple[str, ...] = (
-    TYPE_SPENDING_OVER_TIME, TYPE_INCOME_EXPENSE, TYPE_INVESTMENT_RETURNS,
-    TYPE_SANKEY, TYPE_PAYEE, TYPE_CATEGORY_PAYEE,
+    TYPE_SPENDING_OVER_TIME, TYPE_INCOME_OVER_TIME, TYPE_INCOME_EXPENSE,
+    TYPE_INVESTMENT_RETURNS, TYPE_SANKEY, TYPE_PAYEE, TYPE_CATEGORY_PAYEE,
 )
 _TYPE_ORDER: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
+    TYPE_INCOME_OVER_TIME,
     TYPE_INCOME_EXPENSE,
     TYPE_PAYEE,
     TYPE_CATEGORY_PAYEE,

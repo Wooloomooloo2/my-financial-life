@@ -1,4 +1,5 @@
-"""Filter dialog for the Spending Over Time report (ADR-039 follow-up).
+"""Filter dialog for the Spending / Income Over Time reports (ADR-039
+follow-up; generalised for income in ADR-088).
 
 Replaces the always-visible left filter panel with a modal opened by a
 "Filter…" button on the report window's top bar. Houses every filter
@@ -50,6 +51,7 @@ from mfl_desktop.reports.filters import (
 )
 from mfl_desktop.ui.check_list_panel import CheckListPanel
 from mfl_desktop.ui.report_filter_dialog_base import ReportFilterDialogBase
+from dataclasses import replace
 
 # Shared with the report window.
 UNCATEGORISED_ID = 1
@@ -75,13 +77,20 @@ class SpendingFilterDialog(ReportFilterDialogBase):
         accounts: list[AccountSummary],
         categories: list[CategoryNode],
         canonical_payees: list[tuple[int, str]],
+        kind: str = "expense",
+        title: str = "Filter — Spending Over Time",
         parent=None,
     ) -> None:
-        super().__init__(parent, title="Filter — Spending Over Time")
+        super().__init__(parent, title=title)
         self.resize(820, 620)
 
         self._repo = repo
         self._current = current
+        # The category kind this report counts ("expense" for Spending Over
+        # Time, "income" for Income Over Time — ADR-088). Drives which
+        # categories populate the checklist and whether the Uncategorised
+        # toggle is meaningful (only expense has an Uncategorised bucket).
+        self._kind = kind
         self._all_accounts = accounts
         self._all_categories = categories
         self._categories_by_id = {c.id: c for c in categories}
@@ -112,6 +121,9 @@ class SpendingFilterDialog(ReportFilterDialogBase):
 
         self._include_uncat_check = QCheckBox("Include Uncategorised")
         self._include_uncat_check.setChecked(current.include_uncategorised)
+        # The Uncategorised category (id=1) is kind='expense' (ADR-014), so an
+        # income report can never surface it — hide the toggle there (ADR-088).
+        self._include_uncat_check.setVisible(self._kind == "expense")
 
         period_box = QGroupBox("Period")
         period_form = QFormLayout(period_box)
@@ -177,13 +189,14 @@ class SpendingFilterDialog(ReportFilterDialogBase):
 
     def _category_rows_for_rollup(self, rollup: str) -> list[tuple[int, str]]:
         """Return ``(id, full_path_label)`` rows for the distinct
-        bucket-ids that the rollup map produces over kind='expense'
-        categories. Uncategorised is excluded — its own toggle covers it.
-        Sorted by full breadcrumb (ADR-031) so siblings cluster."""
+        bucket-ids that the rollup map produces over the report's kind
+        (expense or income — ADR-088) categories. Uncategorised is excluded
+        — its own toggle covers it (and it's expense-only anyway). Sorted by
+        full breadcrumb (ADR-031) so siblings cluster."""
         rollup_map = self._rollup_maps[rollup]
         bucket_ids: set[int] = set()
         for c in self._all_categories:
-            if c.kind == "expense":
+            if c.kind == self._kind:
                 bucket_ids.add(rollup_map[c.id])
         bucket_ids.discard(UNCATEGORISED_ID)
         rows = [
@@ -210,7 +223,11 @@ class SpendingFilterDialog(ReportFilterDialogBase):
     def _on_accept(self) -> None:
         period_key, custom_start, custom_end = self._period_and_custom("quarter")
 
-        self._result = SpendingOverTimeFilters(
+        # ``replace`` preserves the concrete filter type — SpendingOverTimeFilters
+        # for the spending report, IncomeOverTimeFilters for income (ADR-088) —
+        # and carries the saved splitter sizes through untouched.
+        self._result = replace(
+            self._current,
             period_key=period_key,
             custom_start=custom_start,
             custom_end=custom_end,

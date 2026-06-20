@@ -119,6 +119,7 @@ class IncomeExpenseWindow(QMainWindow):
 
         # ── reference data ──
         self._all_accounts = repo.list_accounts()
+        self._all_categories = repo.list_category_tree()
 
         self._current_filters: IncomeExpenseFilters = (
             IncomeExpenseFilters.from_json(report.filters_json)
@@ -315,11 +316,19 @@ class IncomeExpenseWindow(QMainWindow):
             self._show_empty("Select at least one account.")
             return
 
+        # Expand each picked category to its subtree so selecting a parent
+        # (e.g. "Expense") pulls in its children (ADR-088 amend). Empty == all.
+        category_ids = self._expanded_category_ids(filters.category_ids)
+        if filters.category_ids and not category_ids:
+            self._show_empty("No transactions match the selected categories.")
+            return
+
         result = self._repo.income_expense_series(
             date_from=d_from.isoformat(),
             date_to=d_to.isoformat(),
             granularity=sql_granularity,
             account_ids=account_ids,
+            category_ids=category_ids,
             display_currency=self._display_ccy,
             include_transfers=filters.include_transfers,
         )
@@ -433,6 +442,9 @@ class IncomeExpenseWindow(QMainWindow):
             self._filter_line(
                 "Accounts", filters.account_ids, len(self._all_accounts),
             ),
+            self._filter_line(
+                "Categories", filters.category_ids, self._category_count(),
+            ),
             "Transfers: " + ("included" if filters.include_transfers else "excluded"),
         ]
         self._filters_value.setText("\n".join(filter_bits))
@@ -489,6 +501,27 @@ class IncomeExpenseWindow(QMainWindow):
             return f"{label}: all"
         return f"{label}: {len(selected)} of {total}"
 
+    def _expanded_category_ids(
+        self, selected: tuple[int, ...],
+    ) -> Optional[list[int]]:
+        """Expand the picked category ids to their full subtrees (ADR-088
+        amend) so a parent selection includes its descendants. Returns
+        ``None`` when nothing is selected (the repo's "all categories"
+        signal); otherwise the de-duplicated descendant id list."""
+        if not selected:
+            return None
+        ids: set[int] = set()
+        for cid in selected:
+            ids |= self._repo.category_descendants(cid)
+        return sorted(ids)
+
+    def _category_count(self) -> int:
+        """How many income/expense categories exist — the denominator for
+        the 'Categories: N of M' summary line."""
+        return sum(
+            1 for c in self._all_categories if c.kind in ("income", "expense")
+        )
+
     def _resolve_date_bounds(
         self, filters: IncomeExpenseFilters,
     ) -> tuple[date, date]:
@@ -515,6 +548,7 @@ class IncomeExpenseWindow(QMainWindow):
             self._repo,
             current=self._current_filters,
             accounts=self._all_accounts,
+            categories=self._all_categories,
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
