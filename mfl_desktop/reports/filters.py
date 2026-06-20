@@ -147,10 +147,19 @@ class IncomeOverTimeFilters(SpendingOverTimeFilters):
     """Persisted filter set for a saved Income Over Time report (ADR-088).
 
     Structurally identical to :class:`SpendingOverTimeFilters` (see its
-    docstring for the per-field semantics). Distinct only in type, so the
-    report loader and ``_FILTER_CLASSES`` map a saved blob to the income
-    window rather than the spending one.
+    docstring for the per-field semantics) plus one income-only field. Distinct
+    type, so the report loader and ``_FILTER_CLASSES`` map a saved blob to the
+    income window rather than the spending one.
+
+    ``include_reinvested_dividends`` (ADR-089) folds DRIP income — reinvested
+    distributions valued at quantity × price, which carry no cash ``amount`` —
+    into the totals, so a ReinvDiv tagged *Dividend Income* shows alongside cash
+    dividends. Default **on** (the natural expectation for an income report);
+    untag-and-it-vanishes is one filter click away. The Spending report has no
+    such concept, which is why the field lives on this subclass.
     """
+
+    include_reinvested_dividends: bool = True
 
     @classmethod
     def default(cls) -> "IncomeOverTimeFilters":

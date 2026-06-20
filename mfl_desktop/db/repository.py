@@ -1290,6 +1290,43 @@ class Repository:
     def uncategorised_id(self) -> int:
         return UNCATEGORISED_ID
 
+    _REINVEST_DIVIDEND_CATEGORY_SETTING = "reinvest_dividend_category_id"
+
+    def get_reinvest_dividend_category_id(self) -> Optional[int]:
+        """The category that **reinvested distributions** (DRIP) default to on
+        import and in the investment dialog (ADR-089). It's the owner's choice
+        — e.g. *Dividend Income* — seeded by filing a reinvest under a category
+        in the dialog (which writes it via
+        :meth:`set_reinvest_dividend_category_id`).
+
+        Returns the configured category id, or ``None`` when unset or when the
+        stored id no longer points at a live ``kind='income'`` category (so a
+        deleted / re-kinded category silently falls back to no-default rather
+        than mis-filing income)."""
+        raw = self.get_setting(self._REINVEST_DIVIDEND_CATEGORY_SETTING)
+        if not raw:
+            return None
+        try:
+            cid = int(raw)
+        except (TypeError, ValueError):
+            return None
+        row = self._conn.execute(
+            "SELECT 1 FROM category "
+            "WHERE id = ? AND kind = 'income' AND archived_at IS NULL",
+            (cid,),
+        ).fetchone()
+        return cid if row is not None else None
+
+    def set_reinvest_dividend_category_id(
+        self, category_id: Optional[int],
+    ) -> None:
+        """Persist the default reinvested-dividend category (ADR-089). Pass
+        ``None`` to clear it."""
+        self.set_setting(
+            self._REINVEST_DIVIDEND_CATEGORY_SETTING,
+            str(category_id) if category_id is not None else "",
+        )
+
     def find_or_create_category_path(
         self, segments: list[str], source: str = "import",
         default_root_kind: str = "expense",
@@ -3879,6 +3916,11 @@ class Repository:
             filters.append(f"t.payee_id IN ({ph})")
             params.extend(payee_ids)
 
+        # ADR-090: portfolio-move trades are not spending — drop them.
+        move_clause, move_params = self._portfolio_move_exclusion()
+        filters.append(move_clause)
+        params.extend(move_params)
+
         filter_sql = ""
         if filters:
             filter_sql = " AND " + " AND ".join(filters)
@@ -3920,6 +3962,7 @@ class Repository:
         account_ids: Optional[list[int]] = None,
         include_uncategorised: bool = True,
         payee_ids: Optional[list[int]] = None,
+        include_reinvested: bool = False,
     ) -> list[dict]:
         """Inflow income per (bucket, category_id) over a date range — the
         income-side mirror of :meth:`spending_aggregates` (ADR-088, Income
@@ -3937,9 +3980,22 @@ class Repository:
         Uncategorised category (id=1) is ``kind='expense'`` (ADR-014), so it
         never matches the income kind filter regardless of the flag.
 
+        ``include_reinvested`` (ADR-089) folds in **reinvested distributions**
+        (DRIP — ``ReinvDiv`` & co.), which carry their dividend as new shares,
+        not cash: their ``amount`` is 0, so the strict-inflow query above can't
+        see them. When True, a second pass values each reinvest row on a
+        ``kind='income'`` category at **quantity × price** (the reinvested
+        distribution = the new lot's cost) and adds it under that row's
+        category, so a DRIP tagged *Dividend Income* lands alongside the cash
+        dividends. Reinvests left Uncategorised (the import default) stay out —
+        the owner tags them first (now possible per ADR-089). No double count:
+        the cash pass requires ``amount > 0`` and reinvests are always 0.
+
         Returns a list of dicts: ``{bucket, category_id, income_pence}`` —
         pence are always ≥ 0. Caller rolls ``category_id`` up to a report
         group id and aggregates further (same flow as the spending report).
+        Rows are not de-duplicated across the two passes; the caller already
+        sums by (bucket, group), so a category can legitimately appear twice.
         """
         if granularity not in self._BUCKET_EXPR:
             raise ValueError(
@@ -3988,7 +4044,7 @@ class Repository:
             f"ORDER BY bucket"
         )
         cur = self._conn.execute(sql, params)
-        return [
+        out = [
             {
                 "bucket": r["bucket"],
                 "category_id": int(r["category_id"]),
@@ -3996,6 +4052,94 @@ class Repository:
             }
             for r in cur
         ]
+
+        if include_reinvested:
+            out.extend(
+                self._reinvested_income_rows(
+                    bucket_expr=bucket_expr,
+                    filter_sql=filter_sql,
+                    # Same WHERE-clause params as the cash pass: [from, to] +
+                    # the account / uncat / payee values appended above.
+                    filter_params=params[2:],
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+            )
+        return out
+
+    def _reinvested_income_rows(
+        self,
+        *,
+        bucket_expr: str,
+        filter_sql: str,
+        filter_params: list,
+        date_from: str,
+        date_to: str,
+    ) -> list[dict]:
+        """Reinvested-distribution (DRIP) income per (bucket, category_id),
+        valued at **quantity × price** (ADR-089). Reads ``txn`` directly — a
+        reinvest is never split, so the split-unrolled view adds nothing — and
+        counts only rows on a ``kind='income'`` category (Uncategorised DRIPs
+        are excluded until the owner tags them). The ``filter_sql`` /
+        ``filter_params`` are the caller's account / uncategorised / payee
+        clauses, which reference ``t.*`` columns present on ``txn`` too."""
+        from mfl_desktop.import_engine.qif_actions import REINVEST_ACTIONS
+
+        actions = sorted(REINVEST_ACTIONS)
+        action_ph = ",".join("?" * len(actions))
+        sql = (
+            f"SELECT {bucket_expr} AS bucket, "
+            f"       t.category_id AS category_id, "
+            # `price` is a per-share unit price in **pounds** (a Buy's
+            # pence `amount` == quantity × price × 100), so scale to pence.
+            f"       CAST(ROUND(SUM(t.quantity * t.price) * 100) AS INTEGER) AS income_pence "
+            f"FROM txn t "
+            f"JOIN category c ON c.id = t.category_id "
+            f"WHERE t.posted_date BETWEEN ? AND ? "
+            f"  AND c.kind = 'income' "
+            f"  AND lower(t.action) IN ({action_ph}) "
+            f"  AND t.quantity IS NOT NULL AND t.price IS NOT NULL "
+            f"  {filter_sql} "
+            f"GROUP BY bucket, t.category_id "
+            f"ORDER BY bucket"
+        )
+        params = [date_from, date_to] + actions + list(filter_params)
+        cur = self._conn.execute(sql, params)
+        return [
+            {
+                "bucket": r["bucket"],
+                "category_id": int(r["category_id"]),
+                "income_pence": int(r["income_pence"]),
+            }
+            for r in cur
+            if r["income_pence"] is not None
+        ]
+
+    def _portfolio_move_exclusion(self) -> tuple[str, list]:
+        """SQL clause + params that exclude investment **portfolio-move
+        trades** (buy / sell / share-in-out / reinvest / split) from the
+        cashflow aggregations (ADR-090).
+
+        A trade moves cash *within* the portfolio (cash ⇄ securities), so it is
+        neither spending nor income — but a Buy is ``amount < 0`` on the
+        Uncategorised (``kind='expense'``) category, so the strict-outflow rule
+        would otherwise miscount it as spending (and, having no payee, dump it
+        into the Payee report's "(No payee)" bucket). Filters by **txn id** —
+        the split-unrolled ``txn_category_line`` view exposes ``txn_id`` but not
+        ``action`` — and reuses ``affects_shares``' action sets so it can't
+        drift from the holdings engine / importer. (Cash distributions —
+        Div/IntInc/cap-gains — and the manual Cash in/out are *not* moves: they
+        are real flows and stay in the reports.)"""
+        from mfl_desktop.import_engine.qif_actions import (
+            SHARE_IN_ACTIONS, SHARE_OUT_ACTIONS, SPLIT_ACTIONS,
+        )
+        moves = sorted(SHARE_IN_ACTIONS | SHARE_OUT_ACTIONS | SPLIT_ACTIONS)
+        ph = ",".join("?" * len(moves))
+        clause = (
+            f"t.txn_id NOT IN (SELECT id FROM txn "
+            f"WHERE action IS NOT NULL AND lower(action) IN ({ph}))"
+        )
+        return clause, moves
 
     def payee_spending_aggregates(
         self,
@@ -4052,6 +4196,11 @@ class Repository:
             params.extend(acc)
         if not include_transfers:
             clauses.append("t.transfer_id IS NULL")
+        # ADR-090: portfolio-move trades aren't spending (and have no payee, so
+        # they'd otherwise swell the "(No payee)" bucket) — drop them.
+        move_clause, move_params = self._portfolio_move_exclusion()
+        clauses.append(move_clause)
+        params.extend(move_params)
 
         cur = self._conn.execute(
             "SELECT COALESCE(p.canonical_id, p.id) AS canon_id, "
@@ -4143,6 +4292,10 @@ class Repository:
             params.extend(acc)
         if not include_transfers:
             clauses.append("t.transfer_id IS NULL")
+        # ADR-090: portfolio-move trades aren't spending — drop them.
+        move_clause, move_params = self._portfolio_move_exclusion()
+        clauses.append(move_clause)
+        params.extend(move_params)
 
         cur = self._conn.execute(
             "SELECT t.category_id AS category_id, "
@@ -4245,6 +4398,12 @@ class Repository:
         if cats:
             clauses.append(f"t.category_id IN ({','.join('?' * len(cats))})")
             params.extend(cats)
+        # ADR-090: portfolio-move trades are neither income nor expense — drop
+        # them so a Buy (amount<0 on Uncategorised/expense) doesn't show up as
+        # an expense flow on the Sankey.
+        move_clause, move_params = self._portfolio_move_exclusion()
+        clauses.append(move_clause)
+        params.extend(move_params)
         cur = self._conn.execute(
             "SELECT c.kind AS kind, t.category_id AS cid, a.currency AS ccy, "
             "  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
@@ -4359,6 +4518,11 @@ class Repository:
             params.extend(cats)
         if not include_transfers:
             clauses.append("t.transfer_id IS NULL")
+        # ADR-090: portfolio-move trades are neither income nor expense — drop
+        # them so buys don't inflate the expense side / savings rate.
+        move_clause, move_params = self._portfolio_move_exclusion()
+        clauses.append(move_clause)
+        params.extend(move_params)
 
         cur = self._conn.execute(
             f"SELECT {bucket_expr} AS bucket, c.kind AS kind, "

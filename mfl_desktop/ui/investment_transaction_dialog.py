@@ -89,7 +89,7 @@ def _kind(action: str) -> str:
         return "buy"
     if a == "sell":
         return "sell"
-    if a == "reinvdiv":
+    if is_reinvest(a):          # reinvdiv / reinvlg / reinvsh / reinvint / reinvmd
         return "reinvest"
     if a in ("shrsin", "shrsout"):
         return "shares"
@@ -202,6 +202,13 @@ class InvestmentTransactionDialog(QDialog):
         self._income_cat_id = self._repo.find_or_create_category_path(
             _INCOME_PATH, source="user",
         )
+        # ADR-089: reinvested distributions default to the owner's configured
+        # reinvest-dividend category (e.g. *Dividend Income*) when set, else the
+        # seeded *Investment income*. Saving a reinvest under a category writes
+        # this back (see _save), so it self-seeds and stays in sync with import.
+        self._reinvest_cat_id = (
+            self._repo.get_reinvest_dividend_category_id() or self._income_cat_id
+        )
         self._category = make_category_picker(self._repo.list_categories_flat())
         self._category_touched = False
         self._category.currentIndexChanged.connect(self._on_category_touched)
@@ -307,7 +314,10 @@ class InvestmentTransactionDialog(QDialog):
         show_commission = kind in ("buy", "sell")
         show_amount = kind in ("income", "cash")
         show_ratio = kind == "split"
-        show_category = kind in ("income", "cash")   # ADR-086
+        # ADR-086 + ADR-089: cash income/expense **and** reinvests are
+        # categorisable (a reinvest is zero-cash, so its category only feeds the
+        # income report's reinvested-dividend valuation, never the cash totals).
+        show_category = kind in ("income", "cash", "reinvest")
 
         self._set_row_visible(self._symbol, show_sec)
         self._set_row_visible(self._security, show_sec)
@@ -326,7 +336,8 @@ class InvestmentTransactionDialog(QDialog):
             and not self._loading and not self._category_touched
         ):
             self._set_category(
-                self._income_cat_id if kind == "income"
+                self._reinvest_cat_id if kind == "reinvest"
+                else self._income_cat_id if kind == "income"
                 else self._repo.uncategorised_id()
             )
         # Entering Buy/Sell with a qty + price already typed → fill the total
@@ -546,18 +557,28 @@ class InvestmentTransactionDialog(QDialog):
             )
             return
 
-        # ADR-086: the categorisable income/cash actions take the chosen
-        # category; a reinvest keeps its auto *Investment income* (zero-cash,
-        # booked by the returns report); all other actions stay Uncategorised.
+        # ADR-086 + ADR-089: the categorisable actions — cash income/expense
+        # **and** reinvests — take the chosen category (defaulting to
+        # *Investment income* for the income-like ones); all other actions stay
+        # Uncategorised. A reinvest is zero-cash, so its category never reaches
+        # the cash totals — it only feeds the income report's reinvest valuation.
         kind = _kind(action)
-        if kind in ("income", "cash"):
+        if kind in ("income", "cash", "reinvest"):
             category_id = selected_category_id(self._category)
             if category_id is None:
-                category_id = self._repo.uncategorised_id()
-        elif is_reinvest(action):
-            category_id = self._income_cat_id
+                category_id = (
+                    self._reinvest_cat_id if kind == "reinvest"
+                    else self._income_cat_id if kind == "income"
+                    else self._repo.uncategorised_id()
+                )
         else:
             category_id = self._repo.uncategorised_id()
+
+        # ADR-089: filing a reinvest under a category makes it the default for
+        # future reinvests (import + dialog). The repo getter validates it's a
+        # live income-kind category, so a stray non-income pick self-heals.
+        if kind == "reinvest" and category_id != self._repo.uncategorised_id():
+            self._repo.set_reinvest_dividend_category_id(category_id)
         posted_date = self._date.date().toString("yyyy-MM-dd")
         status = self._status.currentText()
         memo = self._memo.text().strip()

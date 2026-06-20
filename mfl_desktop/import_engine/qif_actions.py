@@ -91,16 +91,26 @@ def is_reinvest(action: str | None) -> bool:
 
 
 def is_categorisable(action: str | None) -> bool:
-    """True if a user may assign a ledger category to this investment action
-    (ADR-086): the genuine cash income/expense flows — distributions
-    (``CASH_IN_ACTIONS``), fees/margin interest (``CASH_EXPENSE_ACTIONS``), and
-    the manual ``Cash`` in/out. **False** for portfolio moves
-    (buy/sell/share-transfer/split) — categorising those would inject their
-    trade amounts into the cashflow reports — and for reinvested distributions,
-    which keep their auto *Investment income* category (zero-cash, booked by the
-    returns report at price × qty)."""
+    """True if a user may assign a ledger category to this investment action:
+    the genuine cash income/expense flows — distributions (``CASH_IN_ACTIONS``),
+    fees/margin interest (``CASH_EXPENSE_ACTIONS``), the manual ``Cash`` in/out
+    (all ADR-086) — **and reinvested distributions** (``REINVEST_ACTIONS``,
+    ADR-089). A reinvest carries **zero cash**, so categorising it can never
+    inject anything into the strict-cashflow reports (they sum signed amount,
+    which is 0 here); it only lets the owner tag a DRIP as e.g. *Dividend
+    Income* so the Income Over Time report can surface its share-valued income
+    (qty × price) when its "include reinvested dividends" toggle is on.
+
+    Still **False** for portfolio moves (buy/sell/share-transfer/split) —
+    categorising those would inject their trade amounts into the cashflow
+    reports."""
     a = _norm(action)
-    return a in CASH_IN_ACTIONS or a in CASH_EXPENSE_ACTIONS or a == "cash"
+    return (
+        a in CASH_IN_ACTIONS
+        or a in CASH_EXPENSE_ACTIONS
+        or a in REINVEST_ACTIONS
+        or a == "cash"
+    )
 
 
 def affects_shares(action: str | None) -> bool:

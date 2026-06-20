@@ -125,6 +125,21 @@ class SpendingFilterDialog(ReportFilterDialogBase):
         # income report can never surface it — hide the toggle there (ADR-088).
         self._include_uncat_check.setVisible(self._kind == "expense")
 
+        # Income-only: fold in reinvested-dividend (DRIP) income, valued at
+        # quantity × price since these rows carry no cash (ADR-089). Hidden for
+        # the spending report, which has no such concept.
+        self._include_reinv_check = QCheckBox("Include reinvested dividends")
+        self._include_reinv_check.setToolTip(
+            "Reinvested distributions (DRIP — ReinvDiv) carry their dividend as\n"
+            "new shares, not cash. When on, each is valued at quantity × price\n"
+            "and counted as income under the category you've tagged it with\n"
+            "(tag a reinvest via the register's Category cell or its dialog)."
+        )
+        self._include_reinv_check.setChecked(
+            getattr(current, "include_reinvested_dividends", True)
+        )
+        self._include_reinv_check.setVisible(self._kind == "income")
+
         period_box = QGroupBox("Period")
         period_form = QFormLayout(period_box)
         period_form.addRow("Preset:", period_combo)
@@ -136,6 +151,7 @@ class SpendingFilterDialog(ReportFilterDialogBase):
         shape_form.addRow("Granularity:", granularity_combo)
         shape_form.addRow("Rollup:", self._rollup_combo)
         shape_form.addRow(self._include_uncat_check)
+        shape_form.addRow(self._include_reinv_check)
 
         left_column = QWidget()
         left_layout = QVBoxLayout(left_column)
@@ -226,8 +242,7 @@ class SpendingFilterDialog(ReportFilterDialogBase):
         # ``replace`` preserves the concrete filter type — SpendingOverTimeFilters
         # for the spending report, IncomeOverTimeFilters for income (ADR-088) —
         # and carries the saved splitter sizes through untouched.
-        self._result = replace(
-            self._current,
+        changes = dict(
             period_key=period_key,
             custom_start=custom_start,
             custom_end=custom_end,
@@ -239,4 +254,11 @@ class SpendingFilterDialog(ReportFilterDialogBase):
             account_ids=tuple(self._checked_or_all(self._accounts_panel)),
             include_transfers=self._current.include_transfers,
         )
+        # Income-only field (ADR-089) — only set it when the current filter
+        # actually has it, else ``replace`` on a spending filter would raise.
+        if hasattr(self._current, "include_reinvested_dividends"):
+            changes["include_reinvested_dividends"] = (
+                self._include_reinv_check.isChecked()
+            )
+        self._result = replace(self._current, **changes)
         self.accept()

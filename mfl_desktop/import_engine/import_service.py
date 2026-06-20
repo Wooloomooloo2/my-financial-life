@@ -31,6 +31,7 @@ from mfl_desktop.db.repository import Repository
 from mfl_desktop.db.money import decimal_to_pence
 from mfl_desktop.import_engine import csv_parser, ofx_parser, qif_parser
 from mfl_desktop.import_engine import dedupe
+from mfl_desktop.import_engine.qif_actions import is_reinvest
 from mfl_desktop.rules_engine import apply_rules
 
 logger = logging.getLogger(__name__)
@@ -572,6 +573,20 @@ class ImportService:
                     chosen = rule_cat if rule_cat is not None else payee_default_cat
                     if chosen is not None:
                         category_id = chosen
+                # ADR-089: a reinvested distribution (DRIP) carries no payee and
+                # no source category, so the rule/payee passes above can't tag
+                # it. If it's still Uncategorised, fall back to the owner's
+                # configured reinvest-dividend category (e.g. *Dividend Income*)
+                # so future imports land there automatically. A rule the owner
+                # wrote still wins — this only fills a row nothing else claimed.
+                if (
+                    not tx.splits
+                    and category_id == self._repo.uncategorised_id()
+                    and is_reinvest(tx.action)
+                ):
+                    reinv_cat = self._repo.get_reinvest_dividend_category_id()
+                    if reinv_cat is not None:
+                        category_id = reinv_cat
                 signed_amount = -tx.amount if tx.tx_type == "debit" else tx.amount
 
                 # ADR-051: a split row inserts a parent carrying the signed

@@ -411,7 +411,7 @@ class SpendingReportWindow(QMainWindow):
             expanded_payee_ids = None
 
         aggregate = getattr(self._repo, self._DIRECTION.aggregate_method)
-        rows = aggregate(
+        agg_kwargs = dict(
             date_from=d_from.isoformat(),
             date_to=d_to.isoformat(),
             granularity=sql_granularity,
@@ -419,6 +419,12 @@ class SpendingReportWindow(QMainWindow):
             include_uncategorised=filters.include_uncategorised,
             payee_ids=expanded_payee_ids,
         )
+        # Income-only: fold in reinvested-dividend (DRIP) income (ADR-089). The
+        # field lives only on IncomeOverTimeFilters, so guard on its presence —
+        # the spending aggregate doesn't take the param.
+        if hasattr(filters, "include_reinvested_dividends"):
+            agg_kwargs["include_reinvested"] = filters.include_reinvested_dividends
+        rows = aggregate(**agg_kwargs)
         value_key = self._DIRECTION.value_key
 
         rollup_map = self._rollup_maps[filters.rollup_level]
