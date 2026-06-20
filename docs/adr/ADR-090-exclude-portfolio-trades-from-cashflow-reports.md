@@ -48,6 +48,12 @@ Applied to the five cashflow aggregates:
 - `income_expense_series` (Income & Expense)
 - `sankey_category_totals` (Sankey)
 
+Also applied to the **Home dashboard's Recent activity** feed
+(`list_recent_transactions`, amend 2026-06-20): trades carry no payee and sit on
+Uncategorised, so they were filling the card with "Uncategorised" rows that
+aren't cash activity and aren't the user's to categorise. Here the filter is on
+`t.action` directly (the feed reads `txn`, not the split view).
+
 **Not** applied to `income_aggregates`: trades never reach its income side
 (buys/sells aren't `kind='income'`; reinvests are `amount = 0`), and its
 *reinvested-dividend* valuation (ADR-089) is a **deliberate** inclusion of

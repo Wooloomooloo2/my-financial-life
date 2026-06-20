@@ -3745,7 +3745,19 @@ class Repository:
         A bounded ``ORDER BY … DESC LIMIT`` so the dashboard never materialises
         the full ledger (tens of thousands of rows) on every refresh. Mirrors
         ``list_all_transactions``' join/row shape; running balance is not
-        meaningful across accounts and is reported as 0."""
+        meaningful across accounts and is reported as 0.
+
+        Portfolio-move trades (buy/sell/share-move/reinvest/split) are excluded
+        (ADR-090, extended to the Home feed): they carry no payee and sit on the
+        Uncategorised category, so they'd otherwise fill the Recent activity card
+        with "Uncategorised" rows that aren't cash activity and aren't the user's
+        to categorise. Cash distributions (Div/IntInc) and the manual Cash in/out
+        are *not* moves and stay."""
+        from mfl_desktop.import_engine.qif_actions import (
+            SHARE_IN_ACTIONS, SHARE_OUT_ACTIONS, SPLIT_ACTIONS,
+        )
+        moves = sorted(SHARE_IN_ACTIONS | SHARE_OUT_ACTIONS | SPLIT_ACTIONS)
+        move_ph = ",".join("?" * len(moves))
         cur = self._conn.execute(
             "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
             "       t.posted_date, t.amount, "
@@ -3765,8 +3777,9 @@ class Repository:
             "LEFT JOIN (SELECT txn_id, COUNT(*) AS c, "
             "                  GROUP_CONCAT(category_id) AS cids "
             "           FROM txn_split GROUP BY txn_id) sp ON sp.txn_id = t.id "
+            f"WHERE (t.action IS NULL OR lower(t.action) NOT IN ({move_ph})) "
             "ORDER BY t.posted_date DESC, t.id DESC LIMIT ?",
-            (limit,),
+            (*moves, limit),
         )
         return [
             TransactionRow(
