@@ -12,7 +12,7 @@ from __future__ import annotations
 import calendar
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -440,6 +440,35 @@ class ScheduledTxnRow:
     auto_post: bool
     notes: str
     archived_at: Optional[str]
+
+
+@dataclass(frozen=True)
+class AutoPostFailure:
+    """One schedule the launch sweep tried to auto-post but couldn't (ADR-091).
+
+    ``label`` is a human-readable identifier for the Schedules list
+    ("Polestar 2 — Asset Depreciation (Myself)"); ``reason`` is the
+    exception message from ``post_scheduled_txn`` (e.g. a destination-less
+    transfer schedule, a missing FX rate). Carried out of ``auto_post_due``
+    so the caller can tell the user instead of the failure vanishing.
+    """
+    schedule_id: int
+    label: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class AutoPostResult:
+    """Outcome of a launch-time auto-post sweep (ADR-091).
+
+    ``posted`` is the txn ids materialised (source-side for transfers);
+    ``failures`` is the schedules that raised and were skipped. Before
+    ADR-091 the sweep returned only the posted ids and silently dropped
+    failures, so a permanently-broken schedule (e.g. transfer-kind with no
+    destination) looked like nothing was due, launch after launch.
+    """
+    posted: list[int] = field(default_factory=list)
+    failures: list[AutoPostFailure] = field(default_factory=list)
 
 
 # Provenance of a transfer's exchange rate (per ADR-035). 'derived' = back-
@@ -1616,6 +1645,45 @@ class Repository:
         if not descendants:
             return
         placeholders = ",".join("?" * len(descendants))
+        # ADR-091: switching a category to transfer-kind would orphan any
+        # active schedule that uses it without a destination account — the
+        # auto-post sweep would then silently skip it forever (the very bug
+        # ADR-074 traced to a post-hoc kind change). Refuse the change and
+        # name the offenders so the user fixes the destination (or the kind)
+        # first, rather than discovering broken schedules much later.
+        if new_kind == "transfer":
+            orphaned = self._conn.execute(
+                f"SELECT s.id, a.name AS acct, "
+                f"       COALESCE(p.name, '') AS payee, c.name AS cat "
+                f"FROM scheduled_txn s "
+                f"JOIN      account  a ON a.id = s.account_id "
+                f"LEFT JOIN payee    p ON p.id = s.payee_id "
+                f"JOIN      category c ON c.id = s.category_id "
+                f"WHERE s.archived_at IS NULL "
+                f"  AND s.transfer_to_account_id IS NULL "
+                f"  AND s.category_id IN ({placeholders}) "
+                f"ORDER BY a.name, c.name",
+                tuple(descendants),
+            ).fetchall()
+            if orphaned:
+                labels = ", ".join(
+                    f"{r['acct']} — {r['cat']}"
+                    + (f" ({r['payee']})" if r["payee"] else "")
+                    for r in orphaned[:3]
+                )
+                extra = (
+                    "" if len(orphaned) <= 3
+                    else f" (+{len(orphaned) - 3} more)"
+                )
+                one = len(orphaned) == 1
+                raise ValueError(
+                    f"{len(orphaned)} active schedule"
+                    f"{'' if one else 's'} use{'s' if one else ''} this "
+                    f"category with no destination account: {labels}{extra}. A "
+                    f"transfer-kind schedule needs a destination, so they "
+                    f"would silently stop auto-posting. Set a destination on "
+                    f"each (open Schedules), or pick a non-transfer kind."
+                )
         try:
             self._conn.execute(
                 f"UPDATE category SET kind = ? WHERE id IN ({placeholders})",
@@ -6757,20 +6825,24 @@ class Repository:
             self.rollback()
             raise
 
-    def auto_post_due(self, through_date: str) -> list[int]:
+    def auto_post_due(self, through_date: str) -> AutoPostResult:
         """Launch-time sweep: post every ``auto_post=1`` active schedule
         whose ``next_due_date <= through_date``. Catches up multiple
         missed occurrences by looping until next_due_date moves past
-        the cutoff. Returns the list of materialised txn ids (source
-        side for transfers) in post order.
+        the cutoff. Returns an ``AutoPostResult`` carrying the materialised
+        txn ids (source side for transfers, in post order) **and** the
+        schedules that couldn't post (ADR-091).
 
         Each post is its own atomic transaction; one schedule's failure
-        doesn't abort the others. Failures are silently skipped here —
-        the caller is the app startup path and shouldn't refuse to
-        launch over a single bad schedule. (The dialog's manual Post
-        Now flow surfaces errors per-action.)
+        doesn't abort the others, and the sweep never refuses to launch
+        over a single bad schedule. But — unlike before ADR-091 — a
+        failure is no longer dropped on the floor: it's recorded in
+        ``failures`` so the caller can tell the user. A schedule that's
+        permanently broken (e.g. transfer-kind with no destination, per
+        ADR-074) was otherwise invisible — it looked like nothing was due,
+        launch after launch, while quietly never posting.
         """
-        posted: list[int] = []
+        result = AutoPostResult()
         cur = self._conn.execute(
             "SELECT id FROM scheduled_txn "
             "WHERE archived_at IS NULL AND auto_post = 1 "
@@ -6793,13 +6865,22 @@ class Repository:
                     break
                 try:
                     txn_id = self.post_scheduled_txn(sid)
-                    posted.append(txn_id)
-                except Exception:
-                    # Skip the rest of this schedule's catch-up — likely
-                    # a variable bill or a config issue the user needs to
-                    # resolve manually.
+                    result.posted.append(txn_id)
+                except Exception as exc:
+                    # Skip the rest of this schedule's catch-up — likely a
+                    # variable bill or a config issue the user must resolve
+                    # manually (e.g. a transfer schedule missing its
+                    # destination). Record it so the caller can surface it
+                    # instead of it silently never posting.
+                    label = (
+                        f"{sched.account_name} — {sched.category_name}"
+                        f" ({sched.payee_name})"
+                    )
+                    result.failures.append(AutoPostFailure(
+                        schedule_id=sid, label=label, reason=str(exc),
+                    ))
                     break
-        return posted
+        return result
 
     # ── Budgets (ADR-058) ──
 

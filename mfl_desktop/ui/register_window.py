@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop import data_library, snapshots
+from mfl_desktop.app_session import remember_last_db
 from mfl_desktop.account_summary import bills_due_summary
 from mfl_desktop import periods
 from mfl_desktop.db.repository import AccountSummary, Repository
@@ -2045,6 +2046,10 @@ class RegisterWindow(QMainWindow):
         self._loaded_dataset = None
         self._adopt_repository(new_repo)
         self._teardown_repository(old_repo)
+        # The opened file is now the live file — reopen it on next launch
+        # (ADR-092). A loaded dataset (``_load_dataset``) deliberately keeps
+        # the same working file, so its path is already what's remembered.
+        remember_last_db(new_repo.db_path)
 
     def _adopt_repository(self, new_repo: Repository) -> None:
         """Make ``new_repo`` the live repo and rebuild every UI surface that
@@ -2916,24 +2921,38 @@ class RegisterWindow(QMainWindow):
         """Materialise any auto-post schedules whose next-due date has
         already arrived. Idempotent: each post advances next_due_date
         past today, so re-running on the same launch posts nothing.
-        Failures inside individual schedules are swallowed by the
-        repository sweep (see ``auto_post_due``); we surface the count
-        only if it was non-zero so a quiet startup stays quiet."""
+
+        Per-schedule failures are no longer hidden (ADR-091): the sweep
+        returns them, and we surface a warning so a permanently-broken
+        schedule (e.g. transfer-kind with no destination) can't keep
+        silently missing every launch. A clean run stays quiet."""
         try:
-            posted = self._repo.auto_post_due(date.today().isoformat())
+            result = self._repo.auto_post_due(date.today().isoformat())
         except Exception:
             # The whole sweep failed (unexpected DB error). Don't refuse
             # to launch over it — the user can still use the app and
             # see the schedules via the dialog.
             return
-        if not posted:
-            return
-        self._model.reload()
-        self._refresh_sidebar_balances()
-        self.statusBar().showMessage(
-            f"Auto-posted {len(posted)} scheduled "
-            f"transaction{'s' if len(posted) != 1 else ''}.", 8000,
-        )
+        if result.posted:
+            self._model.reload()
+            self._refresh_sidebar_balances()
+            self.statusBar().showMessage(
+                f"Auto-posted {len(result.posted)} scheduled "
+                f"transaction{'s' if len(result.posted) != 1 else ''}.", 8000,
+            )
+        if result.failures:
+            n = len(result.failures)
+            lines = "\n".join(
+                f"• {f.label}: {f.reason}" for f in result.failures
+            )
+            QMessageBox.warning(
+                self, "Some schedules couldn't auto-post",
+                f"{n} scheduled transaction{'s' if n != 1 else ''} couldn't "
+                f"be posted automatically and {'were' if n != 1 else 'was'} "
+                f"skipped:\n\n{lines}\n\nOpen Schedules to fix "
+                f"{'them' if n != 1 else 'it'} — e.g. set a destination "
+                f"account on a transfer schedule, then Post Now.",
+            )
 
     # ── reports ──
 

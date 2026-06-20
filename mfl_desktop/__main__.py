@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from PySide6.QtCore import QThreadPool, QRunnable, QStandardPaths
 
+from mfl_desktop.app_session import last_db_path, remember_last_db
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.fx import refresh_latest_into
 from mfl_desktop.prices import (
@@ -136,11 +137,19 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv)
     # Set before any QStandardPaths lookup — it is what makes AppDataLocation
-    # resolve to the trailing "MFL" folder (ADR-050 rule 2).
+    # resolve to the trailing "MFL" folder (ADR-050 rule 2). The same two names
+    # are what a no-arg QSettings() keys off for app-level state (ADR-092).
+    app.setOrganizationName(APP_NAME)
     app.setApplicationName(APP_NAME)
 
-    # Resolve which database to open (ADR-050 rule 2 + ADR-016).
+    # Resolve which database to open (ADR-050 rule 2 + ADR-016 + ADR-092).
+    # Precedence, highest first:
+    #   1. --db          explicit caller intent
+    #   2. last-opened   the file open at last quit (ADR-092), if it still exists
+    #   3. legacy cwd db dev convenience for a checked-out repo (mfl_dev.mfl/.db)
+    #   4. appdata default  the OS-standard per-user file (seeded if empty)
     seed_if_empty = False
+    remembered = None if args.db is not None else last_db_path()
     legacy_db = next((p for p in LEGACY_DB_CANDIDATES if p.exists()), None)
     if args.db is not None:
         # Explicit path: the caller asked for a specific file — don't silently
@@ -153,6 +162,11 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+    elif remembered is not None:
+        # Reopen the file the user was working in when they last quit (ADR-092).
+        # last_db_path() already confirmed it exists; if it turns out to be
+        # unreadable we fall back to the default below.
+        db_path = remembered
     elif legacy_db is not None:
         # Dev convenience: a checked-out repo with the historical working DB in
         # cwd keeps launching against it with no --db flag. The canonical .mfl
@@ -165,7 +179,22 @@ def main(argv: list[str] | None = None) -> int:
         db_path = _appdata_db_path()
         seed_if_empty = True
 
-    repo = Repository(db_path)
+    try:
+        repo = Repository(db_path)
+    except Exception as e:
+        if remembered is not None and db_path == remembered:
+            # The remembered file exists but won't open (corrupt / not an MFL
+            # file). Don't strand the user on a dead launch — fall back to the
+            # normal default and let them File ▸ Open the right one.
+            db_path = legacy_db if legacy_db is not None else _appdata_db_path()
+            seed_if_empty = legacy_db is None
+            repo = Repository(db_path)
+        else:
+            raise
+
+    # Persist the file we actually opened so the next launch reopens it
+    # (ADR-092). File ▸ Open updates this again at runtime.
+    remember_last_db(db_path)
 
     # ADR-076: apply the persisted light/dark theme now the DB is open (before
     # any window is shown, so there's no flash). Default light.
