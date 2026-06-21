@@ -10,11 +10,27 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+
+def _migrations_dir() -> Path:
+    """Locate the bundled migration SQL files (ADR-104).
+
+    In a source checkout they sit beside the package (``mfl_desktop/
+    migrations``). In a frozen PyInstaller build the spec bundles them to
+    ``<_MEIPASS>/mfl_desktop/migrations`` — resolve against ``sys._MEIPASS``
+    there so the packaged app can bootstrap a database (without this the
+    frozen app finds no migrations and every DB stays empty)."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "mfl_desktop" / "migrations"
+    return Path(__file__).parent.parent / "migrations"
+
+
+MIGRATIONS_DIR = _migrations_dir()
 
 
 def bootstrap(db_path: Path) -> None:

@@ -126,15 +126,21 @@ There are **two different things** the owner referred to as "notarised … so it
 **Decision (locked 2026-06-16):** **Ship 1.0 as direct signed+notarised downloads** (fast, full trust, no sandbox rework); **App Stores are a 1.1/1.2 channel** once revenue justifies the sandbox work. This is the single biggest scope lever in the whole plan, and it removes the K3 sandbox work from the 1.0 critical path entirely.
 
 ### K1 — macOS direct (Developer ID)
+**Build scaffold DONE 2026-06-21 (ADR-104) — signing/notarisation pending the Apple account.**
+- [x] PyInstaller build → `.app` → DMG — **DONE (ADR-104).** `packaging/mfl.spec` + `build_macos.sh` produce a runnable `My Financial Life.app` + `.dmg`; verified the frozen app bundles all 31 migrations + icons and bootstraps a DB. Signing/notarisation are env-gated in the script (one command once the identity exists).
 - [ ] Apple Developer Program enrolment (org, once the LLC exists — see B1). **$99/yr.**
-- [ ] PyInstaller (or briefcase) build → `.app` → Developer ID signing → **notarisation** → stapled DMG (closes ADR-050 Tier-3).
+- [ ] Developer ID signing → **notarisation** → stapled DMG (script-ready: set `MACOS_SIGN_IDENTITY` + `AC_NOTARY_PROFILE`). Closes ADR-050 Tier-3.
 - [ ] Hardened runtime + entitlements; verify FX/price network calls and file access work notarised.
 - [ ] Sparkle (or equivalent) auto-update feed hosted on the website.
 
 ### K2 — Windows direct
-- [ ] **Code-signing certificate** — ⚠ note: OV certs now effectively require hardware tokens/cloud HSM; EV smooths SmartScreen. Budget for this (~$200–400/yr via a CA, or use Azure Trusted Signing if eligible).
-- [ ] PyInstaller build → signed installer (Inno Setup / MSIX) → SmartScreen reputation seasoning.
+**Build scaffold DONE 2026-06-21 (ADR-104) — signing/installer pending the cert; build unrun locally (no Windows host), exercised by CI.**
+- [x] PyInstaller build (folder+exe) — **DONE (ADR-104).** Same `mfl.spec` + `build_windows.ps1`; runs on the CI Windows runner.
+- [ ] **Code-signing certificate** — ⚠ OV certs now effectively require hardware tokens/cloud HSM; EV smooths SmartScreen (~$200–400/yr, or Azure Trusted Signing). Script-ready: set `WINDOWS_SIGN_PFX`/`_PASSWORD`.
+- [ ] Signed installer (Inno Setup `installer.iss` / MSIX) → SmartScreen reputation seasoning.
 - [ ] Auto-update mechanism (e.g. WinSparkle / MSIX app installer feed).
+
+_CI: `.github/workflows/build.yml` builds both OSes (unsigned) on every push after the offscreen smokes, and uploads the artifacts — the reproducible per-OS build env (ADR-104)._
 
 ### K3 — App Stores (phase 2, gated on K0)
 - [ ] **Mac App Store:** sandbox entitlements, security-scoped bookmarks for user-chosen `.mfl` files, relocate `Snapshots/`/`Library/` to sandbox-legal container paths, App Store Connect listing, review.

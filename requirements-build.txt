@@ -1,0 +1,9 @@
+# Build-time-only dependencies for packaging the desktop app (ADR-104).
+# Not needed to run from source — install alongside requirements-desktop.txt
+# only when producing a packaged build:
+#
+#     pip install -r requirements-desktop.txt -r requirements-build.txt
+#
+# Pinned to the version the macOS .app build was verified against.
+
+pyinstaller==6.21.0
