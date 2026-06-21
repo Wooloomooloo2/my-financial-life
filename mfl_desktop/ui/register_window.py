@@ -832,6 +832,11 @@ class RegisterWindow(QMainWindow):
         self._new_account_action.triggered.connect(self._on_new_account)
         account_menu.addAction(self._new_account_action)
 
+        # ADR-095: loans need their terms captured, so they get a dedicated verb.
+        self._new_loan_action = QAction("New &Loan…", self)
+        self._new_loan_action.triggered.connect(self._on_new_loan)
+        account_menu.addAction(self._new_loan_action)
+
         self._edit_account_action = QAction("&Edit Account…", self)
         self._edit_account_action.triggered.connect(self._on_edit_account)
         account_menu.addAction(self._edit_account_action)
@@ -2440,6 +2445,35 @@ class RegisterWindow(QMainWindow):
         self._reload_sidebar(select_iri=acct.iri)
         self.statusBar().showMessage(f"Created account {acct.name!r}", 4000)
 
+    def _on_new_loan(self) -> None:
+        """Create a loan account via the loan dialog (ADR-095), then open its
+        amortization schedule."""
+        from mfl_desktop.ui.loan_dialog import LoanDialog
+        dialog = LoanDialog(self._repo, account_id=None, parent=self)
+        if dialog.exec() != QDialog.Accepted or dialog.created_account_id is None:
+            return
+        acct_id = dialog.created_account_id
+        acct = self._repo.get_account_by_id(acct_id)
+        self._reload_sidebar(select_iri=acct.iri if acct else None)
+        self.statusBar().showMessage(
+            f"Created loan {acct.name!r}" if acct else "Created loan", 4000,
+        )
+        self._open_amortization(acct_id)
+
+    def _open_amortization(self, account_id: int) -> None:
+        """Open (or raise) the single amortization window for a loan (ADR-095)."""
+        from mfl_desktop.ui.amortization_window import AmortizationWindow
+        if not hasattr(self, "_amort_wins"):
+            self._amort_wins: dict[int, AmortizationWindow] = {}
+        win = self._amort_wins.get(account_id)
+        if win is not None:
+            win.raise_(); win.activateWindow(); return
+        win = AmortizationWindow(self._repo, account_id, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose, True)
+        win.destroyed.connect(lambda *_a, aid=account_id: self._amort_wins.pop(aid, None))
+        self._amort_wins[account_id] = win
+        win.show()
+
     def _on_edit_account(self) -> None:
         if self._account is None:
             return
@@ -2828,6 +2862,14 @@ class RegisterWindow(QMainWindow):
             # Summary first — it's the verb a Banktivity user reaches for
             # most often from a sidebar right-click (ADR-033).
             menu.addAction(self._account_summary_action)
+            # ADR-095: loans get their amortization schedule here.
+            acct_obj = self._repo.get_account_by_iri(iri)
+            if acct_obj is not None and acct_obj.family == "loan":
+                amort_act = menu.addAction("Amortization Schedule…")
+                amort_act.triggered.connect(
+                    lambda checked=False, aid=acct_obj.id:
+                    self._open_amortization(aid)
+                )
             menu.addSeparator()
             if is_closed:
                 # A closed account (ADR-069): Reopen is the primary verb;

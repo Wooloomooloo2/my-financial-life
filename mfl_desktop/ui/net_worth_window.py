@@ -64,6 +64,7 @@ _FAMILY_VIEW: list[tuple[str, str, QColor, str]] = [
     ("vehicle",    "Vehicles",      QColor("#f59e0b"), "asset"),
     ("cash",       "Cash & Bank",   QColor("#22c55e"), "asset"),
     ("credit",     "Credit Cards",  QColor("#ec4899"), "debt"),
+    ("loan",       "Loans",         QColor("#a855f7"), "debt"),
 ]
 
 _ASSET_COLOR = QColor("#16a34a")   # column header

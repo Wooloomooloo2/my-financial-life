@@ -33,8 +33,9 @@ _FAMILY_LABELS = {
     "investment": "Investments",
     "property": "Property",
     "vehicle": "Vehicles",
+    "loan": "Loans",
 }
-_FAMILY_ORDER = ("cash", "credit", "investment", "property", "vehicle")
+_FAMILY_ORDER = ("cash", "credit", "investment", "property", "vehicle", "loan")
 
 
 @dataclass(frozen=True)

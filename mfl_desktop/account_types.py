@@ -22,7 +22,7 @@ class AccountTypeSpec:
     storage: str        # account.type column, e.g. 'cash_std'
     label: str          # display label for the type combo
     class_name: str     # MRL class name for IRI generation
-    family: str         # 'cash' | 'credit' | 'investment' | 'property' | 'vehicle'
+    family: str         # 'cash'|'credit'|'investment'|'property'|'vehicle'|'loan'
     is_liability: bool
 
 
@@ -33,6 +33,9 @@ ACCOUNT_TYPES: tuple[AccountTypeSpec, ...] = (
     AccountTypeSpec("investment", "investment_std", "Investment",      "InvestmentAccount", "investment", False),
     AccountTypeSpec("property",   "property_std",   "Property",        "PropertyAccount",   "property",   False),
     AccountTypeSpec("vehicle",    "vehicle_std",    "Vehicle",         "VehicleAccount",    "vehicle",    False),
+    # ADR-095: an amortizing loan (mortgage / car / personal). Liability; its
+    # terms + schedule live in the `loan` table.
+    AccountTypeSpec("loan",       "loan_std",       "Loan",            "LoanAccount",       "loan",       True),
 )
 
 _BY_KEY     = {t.key: t for t in ACCOUNT_TYPES}

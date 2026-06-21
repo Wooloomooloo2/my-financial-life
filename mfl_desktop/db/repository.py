@@ -795,6 +795,34 @@ def new_rule_iri() -> str:
     return f"mfl:Rule_{uuid.uuid4().hex[:8]}"
 
 
+@dataclass(frozen=True)
+class Loan:
+    """An amortizing loan's terms (ADR-095), 1:1 with its account. Money fields
+    are Decimal (converted from pence). ``current_principal`` =
+    ``original_amount − principal_paid`` — the balance the amortization schedule
+    is projected from. ``payment`` is None when it should be calculated from the
+    term."""
+    account_id: int
+    original_amount: Decimal
+    principal_paid: Decimal
+    interest_rate: float          # annual %, e.g. 5.5
+    compounding: str              # daily / monthly / annually
+    term_months: Optional[int]
+    payment: Optional[Decimal]    # None = calculate from term
+    extra_payment: Decimal
+    start_date: str               # 'YYYY-MM-DD'
+    payment_day: int
+    track_mode: str               # split / whole
+    interest_source: str          # loan / payment
+    payment_account_id: Optional[int]
+    interest_category_id: Optional[int]
+    goal_id: Optional[int]
+
+    @property
+    def current_principal(self) -> Decimal:
+        return self.original_amount - self.principal_paid
+
+
 # ── Repository ──────────────────────────────────────────────────────────────
 
 
@@ -1286,6 +1314,269 @@ class Repository:
             )
             values[acct.id] = view.account_value
         return values
+
+    # ── Loans (ADR-095) ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _row_to_loan(r) -> Loan:
+        return Loan(
+            account_id=r["account_id"],
+            original_amount=pence_to_decimal(r["original_amount"]),
+            principal_paid=pence_to_decimal(r["principal_paid"]),
+            interest_rate=float(r["interest_rate"]),
+            compounding=r["compounding"],
+            term_months=r["term_months"],
+            payment=(pence_to_decimal(r["payment"])
+                     if r["payment"] is not None else None),
+            extra_payment=pence_to_decimal(r["extra_payment"]),
+            start_date=r["start_date"], payment_day=int(r["payment_day"]),
+            track_mode=r["track_mode"], interest_source=r["interest_source"],
+            payment_account_id=r["payment_account_id"],
+            interest_category_id=r["interest_category_id"],
+            goal_id=r["goal_id"],
+        )
+
+    def get_loan(self, account_id: int) -> Optional[Loan]:
+        """The loan terms for an account, or None if it isn't a loan."""
+        r = self._conn.execute(
+            "SELECT * FROM loan WHERE account_id = ?", (account_id,),
+        ).fetchone()
+        return self._row_to_loan(r) if r is not None else None
+
+    def list_loans(self) -> list[Loan]:
+        """Every loan's terms (one per loan account)."""
+        return [
+            self._row_to_loan(r)
+            for r in self._conn.execute("SELECT * FROM loan")
+        ]
+
+    def loan_current_balance(self, account_id: int) -> Decimal:
+        """The principal still owed, as a **positive** magnitude (the loan
+        account's balance is negative; this flips it). The amortization schedule
+        and payment posting project forward from this live figure."""
+        bal = self.compute_account_balances(include_closed=True).get(
+            account_id, Decimal("0.00"),
+        )
+        return -bal if bal < 0 else Decimal("0.00")
+
+    def effective_payment(self, loan: Loan) -> Decimal:
+        """The level monthly payment: the stored one, else calculated from the
+        **original** amount over the term (the contractual payment)."""
+        if loan.payment is not None:
+            return loan.payment
+        if loan.term_months:
+            from mfl_desktop.loan_calc import required_payment
+            return required_payment(
+                loan.original_amount, loan.interest_rate, loan.compounding,
+                loan.term_months,
+            )
+        return Decimal("0.00")
+
+    def loan_schedule(self, account_id: int):
+        """The amortization schedule from the loan's **live** balance forward
+        (ADR-095). Returns a ``loan_calc.AmortSchedule`` (lazy import — loan_calc
+        is pure and Qt-free, but importing at module top isn't needed)."""
+        from mfl_desktop.loan_calc import compute_schedule
+        loan = self.get_loan(account_id)
+        if loan is None:
+            raise ValueError(f"Account {account_id} is not a loan.")
+        return compute_schedule(
+            current_principal=self.loan_current_balance(account_id),
+            annual_rate_pct=loan.interest_rate, compounding=loan.compounding,
+            payment=self.effective_payment(loan),
+            start_date=loan.start_date, payment_day=loan.payment_day,
+            extra_payment=loan.extra_payment,
+        )
+
+    def create_loan_account(
+        self, *,
+        name: str,
+        currency: str,
+        original_amount: Decimal,
+        interest_rate: float,
+        start_date: str,
+        principal_paid: Decimal = Decimal("0.00"),
+        compounding: str = "monthly",
+        term_months: Optional[int] = None,
+        payment: Optional[Decimal] = None,
+        extra_payment: Decimal = Decimal("0.00"),
+        payment_day: int = 1,
+        track_mode: str = "split",
+        interest_source: str = "loan",
+        payment_account_id: Optional[int] = None,
+        interest_category_id: Optional[int] = None,
+    ) -> int:
+        """Create a loan account + its terms (ADR-095). The account's opening
+        balance is set to the **current principal owed** (original − already
+        paid) as a negative liability, so its balance reads as the debt. Returns
+        the new account id. Commits."""
+        current = original_amount - principal_paid
+        acct = self.create_account(
+            name=name, type_key="loan", currency=currency,
+            opening_balance=-current,
+        )
+        try:
+            self._conn.execute(
+                "INSERT INTO loan (account_id, original_amount, principal_paid, "
+                "  interest_rate, compounding, term_months, payment, "
+                "  extra_payment, start_date, payment_day, track_mode, "
+                "  interest_source, payment_account_id, interest_category_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    acct.id, decimal_to_pence(original_amount),
+                    decimal_to_pence(principal_paid), float(interest_rate),
+                    compounding, term_months,
+                    decimal_to_pence(payment) if payment is not None else None,
+                    decimal_to_pence(extra_payment), start_date, int(payment_day),
+                    track_mode, interest_source, payment_account_id,
+                    interest_category_id,
+                ),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return acct.id
+
+    def update_loan(self, account_id: int, **fields) -> None:
+        """Update a loan's terms. Accepts any subset of the column names
+        (Decimal money fields are converted to pence). Commits."""
+        if not fields:
+            return
+        money_cols = {"original_amount", "principal_paid", "payment",
+                      "extra_payment"}
+        sets: list[str] = []
+        params: list = []
+        for col, value in fields.items():
+            sets.append(f"{col} = ?")
+            if col in money_cols and value is not None:
+                params.append(decimal_to_pence(value))
+            else:
+                params.append(value)
+        params.append(account_id)
+        try:
+            self._conn.execute(
+                f"UPDATE loan SET {', '.join(sets)} WHERE account_id = ?", params,
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def post_loan_payment(
+        self, *,
+        account_id: int,
+        posted_date: str,
+        amount: Optional[Decimal] = None,
+        extra: Optional[Decimal] = None,
+        status: str = "Cleared",
+    ) -> None:
+        """Record one loan payment, split into principal + interest per the
+        loan's track mode (ADR-095), through the existing transfer/split paths.
+
+        ``amount`` defaults to the loan's effective level payment; ``extra`` to
+        its stored extra. The interest is computed from the **live** balance, so
+        it shrinks as the loan is paid down. Commits (or rolls back)."""
+        loan = self.get_loan(account_id)
+        if loan is None:
+            raise ValueError(f"Account {account_id} is not a loan.")
+        bal = self.loan_current_balance(account_id)
+        if bal <= 0:
+            raise ValueError("This loan is already paid off.")
+        pay = amount if amount is not None else self.effective_payment(loan)
+        extra = extra if extra is not None else loan.extra_payment
+        if pay + (extra or Decimal("0.00")) <= 0:
+            raise ValueError("Enter a payment amount (no payment is set on this loan).")
+
+        from mfl_desktop.loan_calc import split_payment
+        interest, principal = split_payment(
+            bal, loan.interest_rate, loan.compounding, pay, extra or Decimal("0.00"),
+        )
+        total_cash = interest + principal     # what actually leaves the cash account
+
+        if loan.payment_account_id is None:
+            raise ValueError(
+                "Set a paying account on this loan before recording a payment."
+            )
+        try:
+            if loan.track_mode == "whole":
+                # No split — the whole payment reduces the loan balance.
+                self.create_transfer(
+                    from_account_id=loan.payment_account_id,
+                    to_account_id=account_id, posted_date=posted_date,
+                    amount=total_cash,
+                    category_id=self.get_default_transfer_category_id(),
+                    status=status, memo="Loan payment",
+                )
+            elif loan.interest_source == "loan":
+                # Full payment into the loan account, then interest booked there.
+                self.create_transfer(
+                    from_account_id=loan.payment_account_id,
+                    to_account_id=account_id, posted_date=posted_date,
+                    amount=total_cash,
+                    category_id=self.get_default_transfer_category_id(),
+                    status=status, memo="Loan payment",
+                )
+                if interest > 0:
+                    cat = (loan.interest_category_id
+                           or self._loan_interest_category_id())
+                    self.insert_transaction(
+                        account_id=account_id, posted_date=posted_date,
+                        amount=-interest, payee_id=None, category_id=cat,
+                        status=status, memo="Loan interest",
+                        import_hash=None, import_batch_id=None,
+                    )
+            else:  # split, interest paid from the paying account
+                cat = loan.interest_category_id or self._loan_interest_category_id()
+                xfer_cat = self.get_default_transfer_category_id()
+                lines = [
+                    (xfer_cat, "Principal", -principal, account_id),
+                ]
+                if interest > 0:
+                    lines.append((cat, "Interest", -interest))
+                self.insert_split_transaction(
+                    account_id=loan.payment_account_id, posted_date=posted_date,
+                    payee_id=None, status=status, memo="Loan payment",
+                    total_amount=-total_cash, lines=lines,
+                    import_hash=None, import_batch_id=None,
+                )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def _loan_interest_category_id(self) -> int:
+        """The default interest-expense category (seeded under Expenses),
+        created on demand."""
+        return self.find_or_create_category_path(
+            ["Interest", "Loan interest"], source="user",
+        )
+
+    def create_loan_paydown_goal(self, account_id: int, budget_id: int) -> int:
+        """Create a pay-down goal that tracks this loan to zero by its payoff
+        date (ADR-095, reusing ADR-058 R4b) and link it on the loan. The loan
+        account is the goal's sole account at 100%. Returns the goal id."""
+        loan = self.get_loan(account_id)
+        if loan is None:
+            raise ValueError(f"Account {account_id} is not a loan.")
+        acct = next(
+            (a for a in self.list_accounts(include_closed=True) if a.id == account_id),
+            None,
+        )
+        sched = self.loan_schedule(account_id)
+        target_date = sched.payoff_date or loan.start_date
+        goal_id = self.add_budget_goal(
+            budget_id=budget_id,
+            name=f"Pay off {acct.name if acct else 'loan'}",
+            kind="paydown",
+            currency=acct.currency if acct else "GBP",
+            target_amount=Decimal("0.00"),     # fully paid
+            target_date=target_date,
+            accounts=[(account_id, 10000)],    # 100%
+            today=date.today().isoformat(),
+        )
+        self.update_loan(account_id, goal_id=goal_id)
+        return goal_id
 
     def close_account(self, account_id: int) -> AccountSummary:
         """Soft-close an account: set ``archived_at`` to now (ADR-069).
