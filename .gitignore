@@ -11,3 +11,6 @@ data/
 .env
 dist/
 build/
+# License-signing private key (ADR-079) — must NEVER be committed or bundled.
+tools/.dev_signing_key
+*.signing_key

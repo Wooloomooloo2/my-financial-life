@@ -13,8 +13,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QEvent, QStandardPaths
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import Qt, QTimer, QEvent, QStandardPaths, QUrl
+from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QApplication,
@@ -39,7 +39,9 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop import data_library, snapshots
+from mfl_desktop import license_service
 from mfl_desktop.app_session import remember_last_db
+from mfl_desktop.licensing import STATE_EXPIRED, STATE_TRIAL
 from mfl_desktop.account_summary import bills_due_summary
 from mfl_desktop import periods
 from mfl_desktop.db.repository import AccountSummary, Repository
@@ -419,6 +421,11 @@ class RegisterWindow(QMainWindow):
         self._apply_snapshot_interval()
         self._snapshot_timer.start()
 
+        # ADR-079: gentle licensing surface — title-bar cue always, plus a
+        # one-off launch prompt when the trial is ending/ended.
+        self._license_title_suffix = ""
+        self._maybe_show_license_nag()
+
     def _apply_snapshot_interval(self) -> None:
         """Set the in-session capture cadence from the live file's stored policy
         (ADR-060). Called on launch and after the user edits snapshot settings."""
@@ -567,7 +574,9 @@ class RegisterWindow(QMainWindow):
             suffix = "All transactions"
         else:
             suffix = f"{self._account.name}  ·  {self._account.currency}"
-        self.setWindowTitle(f"My Financial Life — {filename} — {suffix}")
+        # ADR-079: a quiet, always-visible trial/expired cue in the title bar.
+        lic = getattr(self, "_license_title_suffix", "")
+        self.setWindowTitle(f"My Financial Life — {filename} — {suffix}{lic}")
 
     def _set_account_action_state(self, account_selected: bool) -> None:
         """Enable Edit/Delete/Summary only when a specific account is being viewed."""
@@ -954,6 +963,89 @@ class RegisterWindow(QMainWindow):
         self._dark_mode_action.setChecked(tokens.current_theme() == "dark")
         self._dark_mode_action.toggled.connect(self._on_toggle_dark_mode)
         view_menu.addAction(self._dark_mode_action)
+
+        # ── Help ▸ About / licensing (ADR-079) ──
+        help_menu = self.menuBar().addMenu("&Help")
+        about_action = QAction("&About My Financial Life…", self)
+        about_action.triggered.connect(self._on_about)
+        help_menu.addAction(about_action)
+        enter_license_action = QAction("Enter &License…", self)
+        enter_license_action.triggered.connect(self._on_enter_license)
+        help_menu.addAction(enter_license_action)
+        buy_action = QAction("&Buy My Financial Life…", self)
+        buy_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(license_service.BUY_URL))
+        )
+        help_menu.addAction(buy_action)
+
+    def _on_about(self) -> None:
+        """Help ▸ About — version + license state (ADR-079)."""
+        from mfl_desktop.ui.about_dialog import AboutDialog
+        AboutDialog(self).exec()
+        self._refresh_license_cue()
+
+    def _on_enter_license(self) -> None:
+        """Help ▸ Enter License — paste + validate a key (ADR-079)."""
+        from mfl_desktop.ui.license_dialog import LicenseDialog
+        dlg = LicenseDialog(self)
+        if dlg.exec() == QDialog.Accepted and dlg.installed is not None:
+            self.statusBar().showMessage(
+                f"License activated — thank you, {dlg.installed.name}!", 8000,
+            )
+            self._refresh_license_cue()
+
+    def _maybe_show_license_nag(self) -> None:
+        """On launch, gently surface licensing when the trial is ending or has
+        ended (ADR-079 — friction, not a fortress). A licensed app and a trial
+        with plenty of runway stay silent."""
+        try:
+            status = license_service.current_status()
+        except Exception:
+            return
+        if status.state == STATE_EXPIRED:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("Your free trial has ended")
+            box.setText(
+                "Thanks for trying My Financial Life. Your free trial has "
+                "ended — buy a license to keep your financial life going."
+            )
+            box.setInformativeText(
+                "Your data is safe and untouched; entering a license unlocks "
+                "everything again."
+            )
+            buy = box.addButton("Buy…", QMessageBox.AcceptRole)
+            enter = box.addButton("Enter license…", QMessageBox.ActionRole)
+            box.addButton("Continue", QMessageBox.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is buy:
+                QDesktopServices.openUrl(QUrl(license_service.BUY_URL))
+            elif clicked is enter:
+                self._on_enter_license()
+        elif status.state == STATE_TRIAL and status.trial_days_left <= 7:
+            n = status.trial_days_left
+            self.statusBar().showMessage(
+                f"Free trial — {n} day{'s' if n != 1 else ''} left. "
+                f"Help ▸ Buy to purchase a license.", 10000,
+            )
+        self._refresh_license_cue()
+
+    def _refresh_license_cue(self) -> None:
+        """Reflect license state in the window title (a quiet, always-visible
+        cue). Licensed = clean title; trial/expired get a short suffix."""
+        try:
+            status = license_service.current_status()
+        except Exception:
+            return
+        self._license_title_suffix = ""
+        if status.state == STATE_TRIAL:
+            self._license_title_suffix = (
+                f" — Trial ({status.trial_days_left}d left)"
+            )
+        elif status.state == STATE_EXPIRED:
+            self._license_title_suffix = " — Trial ended"
+        self._update_window_title()
 
     def _on_toggle_dark_mode(self, on: bool) -> None:
         """ADR-076: switch the app theme live and persist the choice."""

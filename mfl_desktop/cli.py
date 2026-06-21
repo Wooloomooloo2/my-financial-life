@@ -337,6 +337,25 @@ def cmd_plaid_check(args) -> int:
     return 0
 
 
+def cmd_license_check(args) -> int:
+    """Verify a license key against the shipped public key and print its state
+    (ADR-079). Headless mirror of the in-app Enter-License flow — no DB, no
+    network. Exit 0 if the signature is valid and covers this version."""
+    from datetime import date
+    from mfl_desktop import licensing
+    from mfl_desktop.version import APP_EDITION
+    try:
+        info = licensing.parse_and_verify(args.license)
+    except licensing.LicenseError as e:
+        print(f"INVALID: {e}", file=sys.stderr)
+        return 1
+    status = licensing.evaluate(args.license, None, date.today(), APP_EDITION)
+    print(f"VALID — {info.name} <{info.email}>; edition {info.edition}.x; "
+          f"issued {info.issued}")
+    print(f"state={status.state} unlocked={status.unlocked}")
+    return 0 if status.state == "licensed" else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows console defaults to cp1252; force UTF-8 so £ and tree markers
     # render correctly. Harmless on macOS/Linux which are already UTF-8.
@@ -448,6 +467,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--country", default="US", help="ISO country (default: US)")
     p.add_argument("--count", type=int, default=10, help="How many institutions to sample")
     p.set_defaults(func=cmd_plaid_check)
+
+    p = sub.add_parser(
+        "license-check",
+        help="Verify a license key against the shipped public key (ADR-079)",
+    )
+    p.add_argument("--license", required=True, help="The license key to verify")
+    p.set_defaults(func=cmd_license_check)
 
     args = parser.parse_args(argv)
     return args.func(args)

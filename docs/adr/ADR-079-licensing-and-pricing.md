@@ -58,3 +58,34 @@ When the App Store channel lands (ADR-078), store policy may **mandate the store
 - Set the **2.0 upgrade price/policy** when 2.0 is real (out of scope now).
 - **Store-IAP reconciliation** is deferred to the K3 round; keep the entitlement check store-agnostic so a store receipt can grant the same unlock.
 - Keep the escape hatch in mind: if ADR-080 ever chooses a **hosted** Enable-Banking model (real server cost), revisit subscription for that capability.
+
+---
+
+## Implementation (amendment — 2026-06-21)
+
+The offline-key mechanism described above is now built. What shipped:
+
+### Modules
+- **`mfl_desktop/version.py`** — single source of `__version__` (`1.0.0`) and `APP_EDITION` (the integer major a license must cover, derived from `__version__` so they can't drift). `app.setApplicationVersion` is set at launch.
+- **`mfl_desktop/licensing.py`** — Qt-free, **verify-only**. Parses + verifies a key, exposes `edition_covers`, trial math, and an `evaluate(...)` state machine returning a `LicenseStatus` (`licensed` / `trial` / `expired` / `invalid` / `wrong_edition`, plus the single `unlocked` boolean the app gates on). Pure: the caller injects `today` and the persisted values, so it's fully unit-testable without Qt or a clock.
+- **`mfl_desktop/license_service.py`** — thin orchestration binding the pure module to persistence + the system clock: `current_status()` (the one call the UI needs; starts the trial clock first-write-wins), `apply_license_key()` (verify + edition-check, persist only on full success so a bad paste never displaces a working key), `remove_license()`, and the `BUY_URL`.
+- **`mfl_desktop/app_session.py`** — extended (it already held ADR-092 launch state) with `get/set_license_key` + `get/set_trial_start`. Licensing is **app-level, not per-file** — one key + one trial clock cover every `.mfl` — so it lives in `QSettings`, not the per-file `setting` table.
+- **UI** — `ui/about_dialog.py` (canonical license-state surface: version, "Licensed to X" / "Trial — N days" / "Trial ended", Buy / Enter-license, self-refreshing) and `ui/license_dialog.py` (paste + on-device validate, inline error, no close on failure). A new **Help** menu in `register_window` (About / Enter License / Buy), a launch nag, and a quiet title-bar cue.
+- **Tooling** — `tools/license_tool.py` (offline `keygen` / `sign` / `verify`; **not shipped**) and a headless `python -m mfl_desktop.cli license-check` mirror.
+
+### Key format (v1)
+`<payload_b64url>.<signature_b64url>` — Ed25519 (via the already-present `cryptography` dep) over the **exact payload-segment bytes**, so verification never depends on re-serialising JSON. Payload: `{"v":1,"name","email","ed":<major>,"iss":<ISO date>}`. A key entitles its edition **and any older major** (a newer license still runs an older build); 2.0 needs a 2.x key.
+
+### Key custody
+The app ships only the **public** key (`LICENSE_PUBLIC_KEY_B64`). The current value is a **development** key whose private half lives only in the gitignored `tools/.dev_signing_key` (`*.signing_key` is ignored too); it must be replaced with a production public key, with the private key held offline / by the MoR, before paid builds. See `tools/README.md`.
+
+### Trial & enforcement policy (the one sub-decision settled here)
+- **Trial = 30 days, full-feature**, recorded in `QSettings` with **first-write-wins** so a relaunch/reinstall can't reset it.
+- **Enforcement is deliberately gentle (not a hard block)** for 1.0, matching this ADR's "friction, not a DRM fortress": an expired trial shows a dismissible launch prompt (Buy / Enter license / Continue) and a persistent title-bar "Trial ended" cue, but does **not** lock the user out of their own data. `LicenseStatus.unlocked` already expresses the gate, so tightening to a hard block later is a localised change, not a redesign. A stored key that no longer verifies or covers the wrong major falls back to the trial rather than hard-locking, and is flagged in About.
+- **`BUY_URL` is a placeholder** (`https://myfinancial.life/buy`) until the W1 marketing site exists.
+
+### Verification
+Offscreen (isolated `QSettings`): the pure state machine across licensed / trial day-0/29/30 / long-expired / wrong-edition (trial + expired) / newer-edition / invalid-stored-key; signature forgery with a foreign key rejected; whitespace-in-paste tolerated; empty rejected; trial first-write-wins; service apply persists + reports licensed; wrong-edition rejected at apply without displacing a good key; expiry after the window. Offscreen Qt: About + License dialogs build and round-trip an activation; `RegisterWindow` builds with the expired-trial nag + Help menu and shows the title cue. `tools/license_tool.py` mint → `cli license-check` valid (exit 0) / garbage (exit 1); `git check-ignore` confirms the dev private key can't be committed.
+
+### Not done here (still open in workstream C)
+Merchant-of-Record integration + real key delivery (C2), the production keypair swap, and the `BUY_URL` / website (W1). The license *model* and on-device enforcement are complete; these are fulfilment/commerce wiring.

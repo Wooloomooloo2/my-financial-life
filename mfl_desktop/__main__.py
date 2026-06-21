@@ -25,6 +25,7 @@ from mfl_desktop.prices import (
 )
 from mfl_desktop.ui.register_window import RegisterWindow
 from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
+from mfl_desktop.version import __version__
 
 
 class _FxRefreshRunnable(QRunnable):
@@ -141,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     # are what a no-arg QSettings() keys off for app-level state (ADR-092).
     app.setOrganizationName(APP_NAME)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)  # ADR-079: surfaced in About + diagnostics
 
     # Resolve which database to open (ADR-050 rule 2 + ADR-016 + ADR-092).
     # Precedence, highest first:
