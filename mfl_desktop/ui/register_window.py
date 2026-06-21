@@ -2152,6 +2152,11 @@ class RegisterWindow(QMainWindow):
         self._service = ImportService(new_repo)
         self._categories = new_repo.list_categories_flat()
         self._account = None
+        # The Home dashboard holds its own repo reference (ADR-075); repoint it
+        # at the newly-opened file and rebuild, otherwise it keeps reading the
+        # old — now closed — repo and shows stale data until restart.
+        self._home_view.set_repo(new_repo)
+        self._home_view.refresh()
         # _reload_sidebar pulls fresh data via self._repo (= new_repo) and
         # selects an item; the sidebar's selection_changed signal then drives
         # _show_account / _show_all_transactions which rebuild the model.

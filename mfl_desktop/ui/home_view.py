@@ -165,6 +165,12 @@ class HomeView(QWidget):
         outer.addWidget(self._scroll)
         self._container: Optional[QWidget] = None
 
+    def set_repo(self, repo) -> None:
+        """Point the dashboard at a different file (File ▸ Open swaps the live
+        repo — ADR-092). Without this the view keeps reading the old, now-closed
+        repo and shows stale data until restart. Caller refreshes after."""
+        self._repo = repo
+
     # ── build ──
 
     def refresh(self) -> None:

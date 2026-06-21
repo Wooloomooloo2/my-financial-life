@@ -76,3 +76,11 @@ Closed accounts are already excluded (`include_closed=False`); an account merely
 ## Verification
 
 Offscreen: `gather_home_data` on a seeded multi-account file returns the right net-worth total (FX-excluded accounts noted), the current-month budget planned/spent, top-5 payees/categories for the month, the latest-N recent rows, upcoming/overdue bills, and per-security top gains/losses aggregated across investment accounts; empty-file and no-budget/no-investment paths degrade to hidden cards. Offscreen Qt: the Home view builds from `HomeData`, the sidebar exposes a Home row emitting `("home", None)`, the register window defaults to the Home page on launch and switches to the register page on account/report selection, and card click signals reach the existing navigation handlers.
+
+---
+
+## Amendment — 2026-06-21 (Home follows File ▸ Open)
+
+**Bug:** opening another file (File ▸ Open) while one was open updated the register/sidebar but left the **Home dashboard showing the old file's data** until restart. `HomeView` keeps its own `repo` reference; the swap (`_adopt_repository`) repointed `RegisterWindow._repo` but not the view's. Worse, `_teardown_repository` then **closes** the old repo, and `HomeView.refresh()` early-returns on a closed repo — so Home could never recover, even on re-activation.
+
+**Fix:** `HomeView.set_repo(repo)` repoints the view, and `_adopt_repository` now calls it + `refresh()` so the dashboard rebuilds against the newly-opened file. **Verified** offscreen: open file A (net worth £2.68M) → File ▸ Open the demo file → Home repoints to the open new repo and shows £489,897.
