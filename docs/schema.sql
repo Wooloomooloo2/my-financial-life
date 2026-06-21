@@ -41,14 +41,16 @@ CREATE TABLE account (
     id               INTEGER PRIMARY KEY,
     iri              TEXT UNIQUE NOT NULL,   -- e.g. 'mrl:CashAccount_1'
     name             TEXT NOT NULL,
-    type             TEXT NOT NULL,          -- 'cash_std' | 'savings_std' | 'credit_std' | 'investment_std' | 'property_std' | 'vehicle_std'
-    family           TEXT NOT NULL,          -- 'cash' | 'credit' | 'investment' | 'property' | 'vehicle' (derived from type, denormalised for fast filtering)
+    type             TEXT NOT NULL,          -- 'cash_std' | 'savings_std' | 'credit_std' | 'investment_std' | 'property_std' | 'vehicle_std' | 'loan_std'
+    family           TEXT NOT NULL,          -- 'cash' | 'credit' | 'investment' | 'property' | 'vehicle' | 'loan' (derived from type, denormalised for fast filtering)
     currency         TEXT NOT NULL,
     is_liability     INTEGER NOT NULL DEFAULT 0 CHECK(is_liability IN (0,1)),
     opening_balance  INTEGER NOT NULL DEFAULT 0,   -- pence
     opened_on        TEXT,                          -- ISO 8601 date
     archived_at      TEXT,                          -- ISO 8601 timestamp; NULL = active
-    CHECK (type IN ('cash_std','savings_std','credit_std','investment_std','property_std','vehicle_std'))
+    -- credit_limit (ADR-058 R4a) + the loan terms table (ADR-095) are added by
+    -- later migrations; loan_std is an amortizing-loan liability.
+    CHECK (type IN ('cash_std','savings_std','credit_std','investment_std','property_std','vehicle_std','loan_std'))
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
