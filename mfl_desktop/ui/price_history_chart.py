@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 _COLOR_LINE = QColor("#2563eb")    # blue-600
 _COLOR_DOT = QColor("#2563eb")
@@ -141,7 +142,7 @@ class PriceHistoryChart(QWidget):
 
     def _paint_y_labels(self, painter, chart, ymax, step) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
@@ -156,7 +157,7 @@ class PriceHistoryChart(QWidget):
 
     def _paint_x_labels(self, painter, chart) -> None:
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
@@ -197,7 +198,7 @@ class PriceHistoryChart(QWidget):
     def _paint_single(self, painter) -> None:
         iso, price = self._points[0]
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         fm = QFontMetrics(font)
         cx, cy = self.width() / 2, self.height() / 2
@@ -211,7 +212,7 @@ class PriceHistoryChart(QWidget):
 
     def _paint_empty(self, painter, message: str) -> None:
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)

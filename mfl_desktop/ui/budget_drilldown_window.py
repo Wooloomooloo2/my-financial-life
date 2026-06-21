@@ -83,7 +83,7 @@ class BudgetDrillDownWindow(QMainWindow):
         self.resize(1040, 600)
 
         heading = QLabel(title)
-        heading.setStyleSheet("font-size: 13pt; font-weight: bold; padding: 2px;")
+        heading.setStyleSheet("font-size: 17px; font-weight: bold; padding: 2px;")
 
         self._table = QTableView()
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)

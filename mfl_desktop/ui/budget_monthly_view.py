@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import budget_calc as bc
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.ui_fonts import set_pt
 
 _MONTH_ABBR = [
     "", "January", "February", "March", "April", "May", "June",
@@ -173,7 +174,7 @@ class BudgetMonthlyView(QWidget):
         self._month_lbl.setAlignment(Qt.AlignCenter)
         mf = QFont()
         mf.setBold(True)
-        mf.setPointSize(11)
+        set_pt(mf, 11)
         self._month_lbl.setFont(mf)
         self._month_lbl.setMinimumWidth(170)
         sel.addWidget(self._prev)
@@ -301,7 +302,7 @@ class BudgetMonthlyView(QWidget):
         lbl = QLabel(title.upper())
         f = QFont()
         f.setBold(True)
-        f.setPointSize(9)
+        set_pt(f, 9)
         lbl.setFont(f)
         tokens.themed(lbl, "color:{muted_strong}; background:{surface_alt}; padding:4px 6px;")
         return lbl

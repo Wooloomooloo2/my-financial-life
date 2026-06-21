@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import fmt_currency
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 
 @dataclass(frozen=True)
@@ -194,7 +195,7 @@ class DonutChart(QWidget):
         max_w = int(2 * r_hole - 10)
         if self._center_label:
             f = QFont(p.font())
-            f.setPointSize(9)
+            set_pt(f, 9)
             p.setFont(f)
             p.setPen(QPen(QColor(_ch.chart_axis_ink())))
             fm = QFontMetrics(f)
@@ -203,7 +204,7 @@ class DonutChart(QWidget):
                        int(cy - 4), text)
         if self._center_sub:
             f = QFont(p.font())
-            f.setPointSize(12)
+            set_pt(f, 12)
             f.setBold(True)
             p.setFont(f)
             p.setPen(QPen(QColor(_ch.chart_ink())))
@@ -214,7 +215,7 @@ class DonutChart(QWidget):
 
     def _paint_empty(self, p: QPainter, message: str) -> None:
         f = QFont(p.font())
-        f.setPointSize(10)
+        set_pt(f, 10)
         p.setFont(f)
         p.setPen(QPen(QColor(_ch.chart_faint())))
         fm = QFontMetrics(f)

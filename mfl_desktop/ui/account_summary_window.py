@@ -90,6 +90,7 @@ from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow,
     TxnListFilter,
 )
+from mfl_desktop.ui.ui_fonts import set_pt
 
 
 # Tailwind v3 vocabulary — kept local because these are screen-level
@@ -210,7 +211,7 @@ class _TopNList(QWidget):
         if not self._rows:
             painter.setPen(QPen(QColor(tokens.c("subtle"))))
             font = QFont(painter.font())
-            font.setPointSize(10)
+            set_pt(font, 10)
             painter.setFont(font)
             painter.drawText(
                 self.rect(), Qt.AlignCenter, self._empty_message,
@@ -221,7 +222,7 @@ class _TopNList(QWidget):
         n = len(self._rows)
         row_h = max(22, min(34, int(self.height() / max(n, 1))))
         font = QFont(painter.font())
-        font.setPointSize(10)
+        set_pt(font, 10)
         painter.setFont(font)
 
         # Right-side amount column gets enough width for the largest value.
@@ -480,12 +481,12 @@ class AccountSummaryWindow(QMainWindow):
         layout.setSpacing(8)
 
         header = QLabel("PORTFOLIO VALUE OVER TIME")
-        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
+        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 12px;")
         layout.addWidget(header)
 
         # The unpriced/valuations banner lives here on the Overview tab.
         self._non_cash_banner = QLabel("")
-        tokens.themed(self._non_cash_banner, "color: {warning}; background-color: {accent_subtle}; padding: 6px 10px; border-radius: 4px; font-size: 9pt;")
+        tokens.themed(self._non_cash_banner, "color: {warning}; background-color: {accent_subtle}; padding: 6px 10px; border-radius: 4px; font-size: 12px;")
         self._non_cash_banner.setWordWrap(True)
         self._non_cash_banner.hide()
         layout.addWidget(self._non_cash_banner)
@@ -526,7 +527,7 @@ class AccountSummaryWindow(QMainWindow):
         layout.setSpacing(8)
 
         header = QLabel("ACCOUNT BALANCE")
-        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
+        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 12px;")
         layout.addWidget(header)
 
         # Banner for non-cash families: investment / property / vehicle.
@@ -534,7 +535,7 @@ class AccountSummaryWindow(QMainWindow):
         self._non_cash_banner = QLabel(
             "Balance reflects recorded transactions; valuations not yet wired."
         )
-        tokens.themed(self._non_cash_banner, "color: {warning}; background-color: {accent_subtle}; padding: 6px 10px; border-radius: 4px; font-size: 9pt;")
+        tokens.themed(self._non_cash_banner, "color: {warning}; background-color: {accent_subtle}; padding: 6px 10px; border-radius: 4px; font-size: 12px;")
         self._non_cash_banner.setWordWrap(True)
         self._non_cash_banner.hide()
         layout.addWidget(self._non_cash_banner)
@@ -560,7 +561,7 @@ class AccountSummaryWindow(QMainWindow):
             btn = QPushButton(PERIOD_LABELS[key])
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
-            tokens.themed(btn, "QPushButton { padding: 5px 12px; border: 1px solid {border_strong}; border-radius: 14px; background-color: {surface}; color: {heading}; font-size: 9pt; }QPushButton:checked { background-color: {accent}; color: {surface}; border-color: {accent}; font-weight: bold; }QPushButton:hover:!checked { background-color: {surface_alt}; }")
+            tokens.themed(btn, "QPushButton { padding: 5px 12px; border: 1px solid {border_strong}; border-radius: 14px; background-color: {surface}; color: {heading}; font-size: 12px; }QPushButton:checked { background-color: {accent}; color: {surface}; border-color: {accent}; font-weight: bold; }QPushButton:hover:!checked { background-color: {surface_alt}; }")
             btn.clicked.connect(
                 lambda _checked=False, k=key: self._on_period_selected(k)
             )
@@ -579,7 +580,7 @@ class AccountSummaryWindow(QMainWindow):
         layout.setSpacing(4)
 
         self._report_header = QLabel("REPORT: ")
-        tokens.themed(self._report_header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
+        tokens.themed(self._report_header, "color: {muted}; letter-spacing: 1px; font-size: 12px;")
         layout.addWidget(self._report_header)
 
         self._report_opening_lbl = QLabel("£0")
@@ -608,7 +609,7 @@ class AccountSummaryWindow(QMainWindow):
         layout.addLayout(
             self._kv_row("Recorded Balance", self._recorded_balance_lbl, bold=True),
         )
-        tokens.themed(self._scheduled_note_lbl, "color: {muted}; font-size: 9pt;")
+        tokens.themed(self._scheduled_note_lbl, "color: {muted}; font-size: 12px;")
         layout.addWidget(self._scheduled_note_lbl)
 
         layout.addWidget(self._build_separator())
@@ -631,7 +632,7 @@ class AccountSummaryWindow(QMainWindow):
         self._upcoming_container.setSpacing(4)
         layout.addLayout(self._upcoming_container)
         self._upcoming_empty_lbl = QLabel("None upcoming.")
-        tokens.themed(self._upcoming_empty_lbl, "color: {muted}; font-size: 9pt;")
+        tokens.themed(self._upcoming_empty_lbl, "color: {muted}; font-size: 12px;")
         layout.addWidget(self._upcoming_empty_lbl)
 
         layout.addStretch(1)
@@ -655,11 +656,11 @@ class AccountSummaryWindow(QMainWindow):
 
         header_row = QHBoxLayout()
         title = QLabel("HOLDINGS")
-        tokens.themed(title, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
+        tokens.themed(title, "color: {muted}; letter-spacing: 1px; font-size: 12px;")
         header_row.addWidget(title)
         header_row.addStretch(1)
         self._holdings_totals_lbl = QLabel("")
-        tokens.themed(self._holdings_totals_lbl, "color: {text}; font-size: 9pt;")
+        tokens.themed(self._holdings_totals_lbl, "color: {text}; font-size: 12px;")
         header_row.addWidget(self._holdings_totals_lbl)
         layout.addLayout(header_row)
 
@@ -753,7 +754,7 @@ class AccountSummaryWindow(QMainWindow):
 
         header_row = QHBoxLayout()
         header = QLabel("PORTFOLIO")
-        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
+        tokens.themed(header, "color: {muted}; letter-spacing: 1px; font-size: 12px;")
         header_row.addWidget(header)
         header_row.addStretch(1)
         header_row.addWidget(QLabel("View:"))
@@ -942,12 +943,12 @@ class AccountSummaryWindow(QMainWindow):
         h.setSpacing(8)
 
         self._statements_status_lbl = QLabel("NO STATEMENTS")
-        tokens.themed(self._statements_status_lbl, "color: {muted}; letter-spacing: 1px; font-size: 9pt; background: transparent; border: none;")
+        tokens.themed(self._statements_status_lbl, "color: {muted}; letter-spacing: 1px; font-size: 12px; background: transparent; border: none;")
         h.addWidget(self._statements_status_lbl)
         h.addStretch(1)
 
         reconcile_btn = QPushButton("RECONCILE ›")
-        tokens.themed(reconcile_btn, "QPushButton { color: {accent}; background: transparent; border: none; font-weight: bold; font-size: 9pt; }QPushButton:hover { color: {accent_hover}; }")
+        tokens.themed(reconcile_btn, "QPushButton { color: {accent}; background: transparent; border: none; font-weight: bold; font-size: 12px; }QPushButton:hover { color: {accent_hover}; }")
         reconcile_btn.setCursor(Qt.PointingHandCursor)
         reconcile_btn.clicked.connect(self._on_reconcile_clicked)
         h.addWidget(reconcile_btn)
@@ -986,7 +987,7 @@ class AccountSummaryWindow(QMainWindow):
 
     def _section_header(self, text: str) -> QLabel:
         lbl = QLabel(text)
-        tokens.themed(lbl, "color: {muted}; letter-spacing: 1px; font-size: 9pt;")
+        tokens.themed(lbl, "color: {muted}; letter-spacing: 1px; font-size: 12px;")
         return lbl
 
     def _kv_row(
@@ -1213,7 +1214,7 @@ class AccountSummaryWindow(QMainWindow):
         h.setSpacing(8)
 
         when = QLabel(self._describe_when(row.days_until, row.next_due_date))
-        tokens.themed(when, "color: {muted}; font-size: 9pt;")
+        tokens.themed(when, "color: {muted}; font-size: 12px;")
         when.setFixedWidth(86)
         h.addWidget(when)
 

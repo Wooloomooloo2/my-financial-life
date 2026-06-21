@@ -127,7 +127,7 @@ def legend_chip(name: str, colour: QColor) -> QWidget:
         f"background-color: {colour.name()}; border-radius: 2px;"
     )
     label = QLabel(name)
-    tokens.themed(label, "color: {heading}; font-size: 9pt;")
+    tokens.themed(label, "color: {heading}; font-size: 12px;")
     h.addWidget(swatch)
     h.addWidget(label)
     return chip

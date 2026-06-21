@@ -360,7 +360,7 @@ _CHIP_STYLE = (
     "QFrame#filterChip { background-color: #e2e8f0; "
     "border: 1px solid #cbd5e1; border-radius: 12px; }"
     "QFrame#filterChip QLabel { background: transparent; border: none; "
-    "color: #1e293b; font-size: 9pt; }"
+    "color: #1e293b; font-size: 12px; }"
     "QFrame#filterChip QPushButton { background: transparent; border: none; "
     "color: #475569; font-weight: bold; padding: 0 2px; }"
     "QFrame#filterChip QPushButton:hover { color: #0f172a; }"
@@ -460,7 +460,7 @@ class TransactionsListWindow(QMainWindow):
             btn = QPushButton(PERIOD_LABELS[key])
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
-            tokens.themed(btn, "QPushButton { padding: 5px 12px; border: 1px solid {border_strong}; border-radius: 14px; background-color: {surface}; color: {heading}; font-size: 9pt; }QPushButton:checked { background-color: {accent}; color: {surface}; border-color: {accent}; font-weight: bold; }QPushButton:hover:!checked { background-color: {surface_alt}; }")
+            tokens.themed(btn, "QPushButton { padding: 5px 12px; border: 1px solid {border_strong}; border-radius: 14px; background-color: {surface}; color: {heading}; font-size: 12px; }QPushButton:checked { background-color: {accent}; color: {surface}; border-color: {accent}; font-weight: bold; }QPushButton:hover:!checked { background-color: {surface_alt}; }")
             btn.clicked.connect(
                 lambda _checked=False, k=key: self._on_period_selected(k)
             )

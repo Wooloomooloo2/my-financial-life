@@ -9,12 +9,24 @@ switch is live.
 """
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from mfl_desktop.ui import tokens
 
 SETTING_KEY = "ui_theme"
+
+# Base UI font size. We force the Fusion style cross-platform (ADR-076), so the
+# base size has to be set explicitly. Points scale with logical DPI, which
+# differs by OS: at Windows' 96 DPI the `10pt` base came out ~13px (which reads
+# naturally), but at macOS' 72 DPI the same `10pt` rendered at ~10px — about 25%
+# smaller than the native macOS UI text (13px), so the app looked undersized and
+# un-Mac-like. Pin macOS to 13px (matches the native control text and the
+# Windows size) and leave Windows/Linux on the unchanged 10pt.
+# (ADR-076 amendment 2026-06-21.)
+_BASE_FONT_SIZE = "13px" if sys.platform == "darwin" else "10pt"
 
 
 def apply_theme(app: QApplication, theme: str = "light") -> None:
@@ -63,7 +75,7 @@ def _qss() -> str:
     return f"""
 * {{
     font-family: -apple-system, "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
-    font-size: 10pt;
+    font-size: {_BASE_FONT_SIZE};
 }}
 
 QToolTip {{

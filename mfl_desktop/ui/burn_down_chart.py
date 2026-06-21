@@ -35,6 +35,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 from mfl_desktop.budget_calc import BurnDownData
 from mfl_desktop.ui.chart_helpers import fmt_currency, nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 # Series colours — local to this chart, not the GROUP_PALETTE.
 _COLOR_ACTUAL = "#dc2626"   # red-600 — spend
@@ -98,7 +99,7 @@ class BurnDownChart(QWidget):
     def _paint_empty(self, painter: QPainter, msg: str) -> None:
         painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         font = QFont(painter.font())
-        font.setPointSize(10)
+        set_pt(font, 10)
         painter.setFont(font)
         painter.drawText(self.rect(), Qt.AlignCenter, msg)
 
@@ -152,7 +153,7 @@ class BurnDownChart(QWidget):
 
     def _paint_y_labels(self, painter, chart, ymax, step) -> None:
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         painter.setFont(font)
         painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
@@ -167,7 +168,7 @@ class BurnDownChart(QWidget):
 
     def _paint_x_labels(self, painter, chart, data, x_min, x_span) -> None:
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         painter.setFont(font)
         painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
@@ -194,7 +195,7 @@ class BurnDownChart(QWidget):
         painter.setPen(pen)
         painter.drawLine(int(chart.left()), int(y), int(chart.right()), int(y))
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_COLOR_BUDGET)))
         painter.drawText(int(chart.left() + 4), int(y - 3), "Budget")
@@ -210,7 +211,7 @@ class BurnDownChart(QWidget):
         painter.drawLine(int(x), int(chart.top()), int(x), int(chart.bottom()))
 
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         font.setBold(True)
         painter.setFont(font)
         fm = QFontMetrics(font)
@@ -258,7 +259,7 @@ class BurnDownChart(QWidget):
 
     def _paint_legend(self, painter, legend) -> None:
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         painter.setFont(font)
         fm = QFontMetrics(font)
         entries = [

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 from mfl_desktop.reports.payee_report import PayeeSpendRow
 from mfl_desktop.ui.chart_helpers import fmt_currency
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 _COLOR_BAR     = "#2563eb"   # blue-600 — app accent
 
@@ -121,9 +122,9 @@ class PayeeChart(QWidget):
             return
 
         name_font = QFont(painter.font())
-        name_font.setPointSize(9)
+        set_pt(name_font, 9)
         value_font = QFont(painter.font())
-        value_font.setPointSize(9)
+        set_pt(value_font, 9)
         name_fm = QFontMetrics(name_font)
         value_fm = QFontMetrics(value_font)
 
@@ -170,7 +171,7 @@ class PayeeChart(QWidget):
 
     def _paint_empty(self, painter: QPainter, message: str) -> None:
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)

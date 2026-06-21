@@ -38,6 +38,7 @@ from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 _COLOR_BASE = QColor("#93c5fd")   # blue-300 — cost-basis / invested tone
 _COLOR_GAIN = QColor("#16a34a")   # green-600 — appreciation tip
@@ -157,7 +158,7 @@ class ValueChart(QWidget):
 
     def _paint_y_labels(self, painter, chart, ymax, step) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
@@ -172,7 +173,7 @@ class ValueChart(QWidget):
 
     def _paint_x_labels(self, painter, chart) -> None:
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
@@ -268,7 +269,7 @@ class ValueChart(QWidget):
 
     def _paint_legend(self, painter, legend) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         fm = QFontMetrics(font)
         items = [("Cost basis", _COLOR_BASE), ("Gain", _COLOR_GAIN), ("Loss", _COLOR_LOSS)]
@@ -287,7 +288,7 @@ class ValueChart(QWidget):
     def _paint_empty(self, painter) -> None:
         message = self._empty_message or "No holdings to chart."
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 from mfl_desktop.account_summary import BalanceFlowSeries
 from mfl_desktop.ui.chart_helpers import fmt_currency, nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 
 # Series colours — local to this chart, not the GROUP_PALETTE. Picked
@@ -253,7 +254,7 @@ class BalanceFlowChart(QWidget):
         if axis.step <= 0:
             return
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
@@ -286,7 +287,7 @@ class BalanceFlowChart(QWidget):
         if axis.step <= 0:
             return
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_COLOR_BALANCE)))
         fm = QFontMetrics(font)
@@ -314,7 +315,7 @@ class BalanceFlowChart(QWidget):
         self, painter: QPainter, chart: QRectF, data: BalanceFlowSeries,
     ) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)
@@ -481,7 +482,7 @@ class BalanceFlowChart(QWidget):
 
     def _paint_legend(self, painter: QPainter, legend: QRectF) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         fm = QFontMetrics(font)
 
@@ -527,7 +528,7 @@ class BalanceFlowChart(QWidget):
 
     def _paint_empty(self, painter: QPainter, message: str) -> None:
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
         fm = QFontMetrics(font)

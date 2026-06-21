@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QToolTip, QWidget
 from mfl_desktop.ui.chart_helpers import colour_for
 import mfl_desktop.ui.chart_helpers as _ch
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.ui_fonts import set_pt
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,7 @@ class TreemapChart(QWidget):
 
         self._hitmap = []
         font = QFont(painter.font())
-        font.setPointSize(8)
+        set_pt(font, 8)
         fm = QFontMetrics(font)
         for i, (tile, rect) in enumerate(zip(self._tiles, rects)):
             colour = colour_for(i)
@@ -187,7 +188,7 @@ class TreemapChart(QWidget):
 
     def _paint_empty(self, painter, message: str) -> None:
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)

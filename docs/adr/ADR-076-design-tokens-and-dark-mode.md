@@ -84,3 +84,22 @@ The bulk of the inline-style conversion (~140 call sites across ~30 files) was d
 ## Verification
 
 Offscreen: tokens resolve per theme; `themed()` re-formats registered widgets on `set_theme` and prunes dead ones; `apply_theme`/`set_theme` apply light and dark palettes + QSS without error; the register window, home dashboard, and a sample of report/summary windows build in **both** themes; charts build and repaint on `ThemeNotifier.changed`; the `ui_theme` setting round-trips and is honoured on launch.
+
+---
+
+## Amendment — 2026-06-21 (platform-native base font size)
+
+**Reported:** on macOS the UI text looked noticeably small and "not native"; the same build on Windows read naturally.
+
+**Cause:** the global QSS set `font-size: 10pt` for everything. Because we force the **Fusion** style cross-platform, that base size is what every widget inherits — and points scale with *logical DPI*, which differs by OS. At Windows' 96 DPI `10pt` ≈ 13px (natural); at macOS' 72 DPI the same `10pt` renders at ~10px — about 25% smaller than the native macOS control text (13px), so the app looked undersized.
+
+**Fix (two parts):**
+
+1. **Base text** — the global `*` font-size is now platform-aware: **13px on macOS** (matching native control text and the Windows visual size), **unchanged `10pt` on Windows/Linux** (`theme._BASE_FONT_SIZE`).
+2. **Chart labels + point-sized accents** — the same skew hit custom chart-painter labels (`QFont.setPointSize(...)` across the `*_chart.py` painters and a few display fonts) and a handful of inline `Npt` QSS accents. A new helper `ui/ui_fonts.set_pt(font, pt)` sizes a font to the visual size of `pt` points **at 96 DPI** — pinning the equivalent pixel size on macOS (`pt × 96/72`) and keeping points elsewhere — so Windows/Linux stay byte-for-byte unchanged while macOS matches. All 51 absolute `setPointSize(N)` painter/display calls were converted to `set_pt`, and the inline `font-size: 9pt`/`13pt` QSS accents were rewritten to their px equivalents (`12px`/`17px`, identical to `9pt`/`13pt` at 96 DPI so Windows is unaffected).
+
+The **relative** font bumps (`setPointSize(font.pointSize() + N)` on the Net-Worth / Account-Summary hero numbers, and the sidebar header `×0.85`) are deliberately left as-is: they derive from the larger macOS system base font, so they aren't the "small" problem, and rebasing them risks the Windows look.
+
+Pixels are DPI-consistent, so the whole approach pins the size rather than letting it drift by platform.
+
+**Verified:** the generated QSS carries `font-size: 13px` on macOS (`sys.platform == "darwin"`) and `10pt` elsewhere; `set_pt(_, 9)` yields a 12px font on macOS; every `ui/` module imports cleanly after the conversion, and the register, net-worth, and report/summary windows build *and paint* (exercising the chart painters' `set_pt` calls) against the demo file — confirmed by rendering the register to an image.

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import fmt_currency
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 
 @dataclass
@@ -304,7 +305,7 @@ class SankeyChart(QWidget):
         amount = self._amount_label(n.value, side_total)
         text = f"{n.label}  {amount}" if col != 0 else n.label
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_INK)))
         cy = n._rect.center().y()
@@ -318,7 +319,7 @@ class SankeyChart(QWidget):
     def _paint_spine_caption(self, painter: QPainter, spine: SankeyNode) -> None:
         rect = spine._rect
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_INK)))
@@ -332,7 +333,7 @@ class SankeyChart(QWidget):
     def _paint_empty(self, painter: QPainter) -> None:
         painter.setPen(QPen(QColor(_MUTED)))
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         painter.drawText(self.rect(), Qt.AlignCenter, self._empty_message)
 

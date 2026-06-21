@@ -34,6 +34,7 @@ from PySide6.QtWidgets import QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency, nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
+from mfl_desktop.ui.ui_fonts import set_pt
 
 
 class SpendingChart(QWidget):
@@ -193,7 +194,7 @@ class SpendingChart(QWidget):
         self, painter: QPainter, chart: QRectF, ymax: float, step: float
     ) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
@@ -212,7 +213,7 @@ class SpendingChart(QWidget):
 
     def _paint_x_labels(self, painter: QPainter, chart: QRectF) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
@@ -326,7 +327,7 @@ class SpendingChart(QWidget):
 
         # Pill label at the right end.
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         font.setBold(True)
         painter.setFont(font)
         fm = QFontMetrics(font)
@@ -351,7 +352,7 @@ class SpendingChart(QWidget):
 
     def _paint_legend(self, painter: QPainter, legend: QRectF) -> None:
         font = QFont(painter.font())
-        font.setPointSize(9)
+        set_pt(font, 9)
         painter.setFont(font)
         fm = QFontMetrics(font)
 
@@ -399,7 +400,7 @@ class SpendingChart(QWidget):
     def _paint_empty(self, painter: QPainter) -> None:
         message = self._empty_message or ""
         font = QFont(painter.font())
-        font.setPointSize(11)
+        set_pt(font, 11)
         painter.setFont(font)
         painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
