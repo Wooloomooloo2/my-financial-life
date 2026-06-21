@@ -31,7 +31,6 @@ from mfl_desktop.ui.chart_helpers import nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
 from mfl_desktop.ui.ui_fonts import set_pt
 
-_COLOR_INVESTED = QColor("#2563eb")   # blue-600
 _COLOR_GAIN_FILL = QColor(22, 163, 74, 40)   # green, translucent
 _COLOR_LOSS_FILL = QColor(220, 38, 38, 40)   # red, translucent
 
@@ -204,7 +203,7 @@ class ValueHistoryChart(QWidget):
             painter.setBrush(QBrush(_COLOR_GAIN_FILL if gain >= 0 else _COLOR_LOSS_FILL))
             painter.drawPolygon(poly)
 
-        self._draw_polyline(painter, invested_pts, _COLOR_INVESTED)
+        self._draw_polyline(painter, invested_pts, QColor(_ch.chart_accent()))
         self._draw_polyline(painter, value_pts, QColor(_ch.chart_axis_ink()))
 
     def _draw_polyline(self, painter, pts: list[QPointF], colour: QColor) -> None:
@@ -227,7 +226,7 @@ class ValueHistoryChart(QWidget):
         set_pt(font, 9)
         painter.setFont(font)
         fm = QFontMetrics(font)
-        items = [("Invested", _COLOR_INVESTED), ("Market value", QColor(_ch.chart_axis_ink()))]
+        items = [("Invested", QColor(_ch.chart_accent())), ("Market value", QColor(_ch.chart_axis_ink()))]
         x = legend.left()
         y_text = legend.top() + (legend.height() - fm.height()) / 2 + fm.ascent()
         y_line = legend.top() + legend.height() / 2

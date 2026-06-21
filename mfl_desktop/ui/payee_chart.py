@@ -31,7 +31,6 @@ from mfl_desktop.ui.chart_helpers import fmt_currency
 import mfl_desktop.ui.chart_helpers as _ch
 from mfl_desktop.ui.ui_fonts import set_pt
 
-_COLOR_BAR     = "#2563eb"   # blue-600 — app accent
 
 
 class PayeeChart(QWidget):
@@ -131,7 +130,7 @@ class PayeeChart(QWidget):
         for i, row in enumerate(self._rows):
             slot_top = area_top + i * slot_h
             bar_top = slot_top + (slot_h - bar_h) / 2
-            colour = QColor(_COLOR_BAR)
+            colour = QColor(_ch.chart_accent())
 
             # Faint full-width track so short bars still read as a row.
             painter.setPen(Qt.NoPen)

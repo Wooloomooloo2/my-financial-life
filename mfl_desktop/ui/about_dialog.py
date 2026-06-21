@@ -59,7 +59,9 @@ class AboutDialog(QDialog):
 
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        tokens.themed(line, "QFrame { color: {border}; }")
+        # Brand-gold rule (ADR-100) — a contrast-safe gold accent (a divider,
+        # not text) tying the About box to the app icon's gold mark.
+        tokens.themed(line, "QFrame { color: {brand_gold}; }")
 
         # License state — filled by _refresh().
         self._state_lbl = QLabel("")

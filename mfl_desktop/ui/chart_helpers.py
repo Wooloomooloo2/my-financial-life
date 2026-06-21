@@ -50,6 +50,15 @@ def colour_for(index: int) -> QColor:
 # colours (plot background, gridlines, axis text, …) follow the active
 # light/dark theme via the design tokens, read fresh at paint time.
 
+def chart_accent() -> str:
+    """The app accent (brand teal, ADR-100), resolved live so accent-semantic
+    chart elements — a balance/net line, a today marker, the single-series
+    report bar — follow the active light/dark theme (the dark accent runs
+    brighter for contrast). Categorical data palettes use ``GROUP_PALETTE``,
+    not this."""
+    return tokens.c("accent")
+
+
 def chart_surface() -> str:
     """Plot background, and the thin separators between stacked segments."""
     return tokens.c("surface")

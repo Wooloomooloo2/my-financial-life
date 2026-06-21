@@ -31,8 +31,6 @@ from mfl_desktop.ui.chart_helpers import nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
 from mfl_desktop.ui.ui_fonts import set_pt
 
-_COLOR_LINE = QColor("#2563eb")    # blue-600
-_COLOR_DOT = QColor("#2563eb")
 
 
 class PriceHistoryChart(QWidget):
@@ -181,7 +179,7 @@ class PriceHistoryChart(QWidget):
             x = self._x_for(i, chart)
             self._x_positions.append((x, i))
             pts.append(QPointF(x, self._y_for(float(price), ymax, chart)))
-        pen = QPen(_COLOR_LINE)
+        pen = QPen(QColor(_ch.chart_accent()))
         pen.setWidth(2)
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
@@ -203,7 +201,7 @@ class PriceHistoryChart(QWidget):
         fm = QFontMetrics(font)
         cx, cy = self.width() / 2, self.height() / 2
         painter.setPen(Qt.NoPen)
-        painter.setBrush(_COLOR_DOT)
+        painter.setBrush(QColor(_ch.chart_accent()))
         painter.drawEllipse(QPointF(cx, cy), 4, 4)
         text = f"{self._date_label(iso)}  {self._fmt(price)}"
         tw = fm.horizontalAdvance(text)

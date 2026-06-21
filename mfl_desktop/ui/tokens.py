@@ -44,11 +44,17 @@ _TOKENS: dict[str, tuple[str, str]] = {
     "muted_strong":    ("#475569", "#cbd5e1"),
     "subtle":          ("#94a3b8", "#64748b"),  # faint / placeholder
     "disabled":        ("#9ca3af", "#64748b"),
-    # accent
-    "accent":          ("#2563eb", "#3b82f6"),
-    "accent_hover":    ("#1d4ed8", "#2563eb"),
-    "accent_subtle":   ("#dbeafe", "#2a3a55"),  # selection background (muted in dark)
+    # accent — brand teal (ADR-100, re-toned from blue-600 to the app-icon
+    # petrol teal). Dark values run a touch brighter for contrast on the dark
+    # surface. The accent re-tones the whole token-driven UI (buttons,
+    # selection, links, focus, menu highlight) in one place.
+    "accent":          ("#1f6e78", "#39a0aa"),
+    "accent_hover":    ("#185860", "#2f8893"),
+    "accent_subtle":   ("#d8edef", "#1f4248"),  # selection background (muted in dark)
     "on_accent":       ("#ffffff", "#ffffff"),
+    # brand gold (ADR-100) — the app icon's mark colour, used sparingly for
+    # brand moments (hero numbers, About) — NOT for money (green/red own that).
+    "brand_gold":      ("#c9a23a", "#dcbb55"),
     # state
     "positive":        ("#16a34a", "#22c55e"),
     "positive_strong": ("#15803d", "#22c55e"),  # green-700 — strong surplus / income-beat / goal-met

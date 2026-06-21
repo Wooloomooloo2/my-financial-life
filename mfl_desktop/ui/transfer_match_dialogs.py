@@ -407,12 +407,12 @@ class BulkTransferReviewDialog(QDialog):
             f"<b>{len(analyses)}</b> transaction"
             f"{'s' if len(analyses) != 1 else ''} to convert to transfers "
             f"with <b>{other_account_name}</b>:"
-            f"<br>• <span style='color:#16A34A'>{will_link}</span> match an existing transaction"
-            f"<br>• <span style='color:#2563EB'>{will_create}</span> create a new partner"
+            f"<br>• <span style='color:{tokens.c('positive')}'>{will_link}</span> match an existing transaction"
+            f"<br>• <span style='color:{tokens.c('accent')}'>{will_create}</span> create a new partner"
         )
         if ambiguous:
             summary_html += (
-                f"<br>• <span style='color:#F59E0B'>{ambiguous}</span> need a choice"
+                f"<br>• <span style='color:{tokens.c('caution')}'>{ambiguous}</span> need a choice"
             )
         summary = QLabel(summary_html)
         summary.setTextFormat(Qt.RichText)

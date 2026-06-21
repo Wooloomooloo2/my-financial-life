@@ -36,7 +36,6 @@ from mfl_desktop.ui.ui_fonts import set_pt
 
 _COLOR_INCOME  = "#10b981"   # emerald-500 — income (matches BalanceFlowChart)
 _COLOR_EXPENSE = "#ef4444"   # red-500 — expense
-_COLOR_NET     = "#2563eb"   # blue-600 — app accent, net line
 
 
 class _AxisRange:
@@ -402,7 +401,7 @@ class IncomeExpenseChart(QWidget):
             y = axis.y_to_px(float(b.net), chart)
             points.append(QPointF(x, y))
 
-        pen = QPen(QColor(_COLOR_NET))
+        pen = QPen(QColor(_ch.chart_accent()))
         pen.setWidth(2)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
@@ -411,7 +410,7 @@ class IncomeExpenseChart(QWidget):
             painter.drawLine(points[i - 1], points[i])
 
         if slot_w >= 40:
-            painter.setBrush(QBrush(QColor(_COLOR_NET)))
+            painter.setBrush(QBrush(QColor(_ch.chart_accent())))
             painter.setPen(Qt.NoPen)
             for p in points:
                 painter.drawEllipse(p, 2.5, 2.5)
@@ -438,7 +437,7 @@ class IncomeExpenseChart(QWidget):
             x += 16 + fm.horizontalAdvance(label) + 18
 
         # Net — line swatch.
-        line_pen = QPen(QColor(_COLOR_NET))
+        line_pen = QPen(QColor(_ch.chart_accent()))
         line_pen.setWidth(2)
         painter.setPen(line_pen)
         painter.drawLine(

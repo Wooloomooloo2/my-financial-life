@@ -45,7 +45,6 @@ _COLOR_ACTUAL = "#dc2626"   # red-600 — spend
 _COLOR_IDEAL = "#6b7280"    # slate-500 — ideal pacing
 _COLOR_PROJECT = "#f59e0b"  # amber-500 — forward projection
 _COLOR_BUDGET = "#94a3b8"   # slate-400 — budget reference line
-_COLOR_TODAY = "#2563eb"    # blue-600 — the app accent
 
 
 class BurnDownChart(QWidget):
@@ -207,7 +206,7 @@ class BurnDownChart(QWidget):
         if data.today_day < x_min or data.today_day > data.x_days[-1]:
             return
         x = self._x_to_px(data.today_day, chart, x_min, x_span)
-        pen = QPen(QColor(_COLOR_TODAY))
+        pen = QPen(QColor(_ch.chart_accent()))
         pen.setWidth(1)
         pen.setStyle(Qt.DotLine)
         painter.setPen(pen)
@@ -224,7 +223,7 @@ class BurnDownChart(QWidget):
         pill_left = min(chart.right() - tw, max(chart.left(), x - tw / 2))
         pill = QRectF(pill_left, chart.top() - 4, tw, th)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(_COLOR_TODAY)))
+        painter.setBrush(QBrush(QColor(_ch.chart_accent())))
         painter.drawRoundedRect(pill, th / 2, th / 2)
         painter.setPen(QPen(QColor("#ffffff")))
         painter.drawText(int(pill.left() + 6),

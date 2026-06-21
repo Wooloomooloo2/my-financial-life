@@ -43,7 +43,6 @@ from mfl_desktop.ui.ui_fonts import set_pt
 # from the same Tailwind v3 ramp as the rest of the palette (ADR-026).
 _COLOR_INCOME   = "#10b981"   # emerald-500 — positive flow
 _COLOR_SPENDING = "#ef4444"   # red-500 — negative flow
-_COLOR_BALANCE  = "#2563eb"   # blue-600 — app accent
 
 
 class _AxisRange:
@@ -289,7 +288,7 @@ class BalanceFlowChart(QWidget):
         font = QFont(painter.font())
         set_pt(font, 9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_BALANCE)))
+        painter.setPen(QPen(QColor(_ch.chart_accent())))
         fm = QFontMetrics(font)
 
         def draw(value: float) -> None:
@@ -463,7 +462,7 @@ class BalanceFlowChart(QWidget):
             y = axis.y_to_px(float(b.closing_balance), chart)
             points.append(QPointF(x, y))
 
-        pen = QPen(QColor(_COLOR_BALANCE))
+        pen = QPen(QColor(_ch.chart_accent()))
         pen.setWidth(2)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
@@ -475,7 +474,7 @@ class BalanceFlowChart(QWidget):
         # the trajectory; skipped at <40px slot width to avoid clutter on
         # long-period zooms.
         if slot_w >= 40:
-            painter.setBrush(QBrush(QColor(_COLOR_BALANCE)))
+            painter.setBrush(QBrush(QColor(_ch.chart_accent())))
             painter.setPen(Qt.NoPen)
             for p in points[1:]:
                 painter.drawEllipse(p, 2.5, 2.5)
@@ -507,7 +506,7 @@ class BalanceFlowChart(QWidget):
         x += 16 + fm.horizontalAdvance("Spending (left axis)") + 18
 
         # Balance — line swatch (longer rectangle so it reads as a line).
-        line_pen = QPen(QColor(_COLOR_BALANCE))
+        line_pen = QPen(QColor(_ch.chart_accent()))
         line_pen.setWidth(2)
         painter.setPen(line_pen)
         painter.drawLine(

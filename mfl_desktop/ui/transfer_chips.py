@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 # ``transfer_reconcile.py`` only ever emits these three labels; an unknown
 # label falls back to the muted slate.
 CHIP_COLOURS: dict[str, str] = {
-    "Strong":   "#2563EB",   # blue-600
+    "Strong":   "#1f6e78",   # brand teal (ADR-100, was blue-600 = the app accent)
     "Good":     "#F59E0B",   # amber-500
     "Possible": "#64748B",   # slate-500
 }
