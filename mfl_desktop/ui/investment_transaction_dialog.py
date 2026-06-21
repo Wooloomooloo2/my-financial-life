@@ -1,33 +1,41 @@
-"""Investment transaction dialog — create + edit (ADR-048).
+"""Investment transaction dialog — create + edit (ADR-048, ADR-093).
 
 The single edit surface for investment-account transactions — opened by
 **New Transaction** on an investment account (create) and by **double-clicking**
 an investment row (edit). Deliberately investment-shaped, not the cash form:
-the fields are **Date · Action · Symbol · Security · Qty · Price · Commission ·
-Total cost · Status · Memo** (no Payee / standing cash-amount box). The visible
-fields adapt to the action so you only ever see what's relevant.
+the fields are **Date · Action · Instrument · Symbol · Security · (per-class
+metadata) · Qty · Price · Commission · Accrued · Total cost · Status · Memo**
+(no Payee / standing cash-amount box). The visible fields adapt to the action
+**and the instrument class** so you only ever see what's relevant.
 
 Field flow:
   * **Symbol drives Security.** Type a ticker and the Security name fills in —
     from an existing security with that symbol, or (when online with a Tiingo
     key) from a Tiingo metadata lookup. Picking an existing Security fills the
-    Symbol the other way. A typed name with no match creates a new security.
+    Symbol the other way, plus its instrument class + metadata. A typed name
+    with no match creates a new security of the chosen class.
+  * **Instrument** (Stock / Bond / Option, ADR-093) governs the value maths via
+    a per-security **price multiplier** (cash value of one unit at price = 1):
+    a **bond** quotes as a % of par and trades in par multiples — multiplier =
+    face / 100; an **option** trades in contracts of a multiplier (100) priced
+    as a premium per share — multiplier = contract size; a **stock** is 1.
   * **Buy / Sell** — Quantity, Price and **Total cost** form a tri-field group:
-    enter any **two** and the dialog fills the third. An optional **Commission**
-    is the fourth term — Total = qty × price + commission (Buy) / − commission
-    (Sell) — and editing it re-solves the leg you left blank. The signed cash
-    impact is the total (`∓ total`), which already nets the fee in, so an
-    imported amount that carries commission survives a re-save unchanged.
+    enter any **two** and the dialog fills the third. Total = qty × price ×
+    multiplier ± commission. **Accrued interest** (bonds) is a separate cash
+    term — paid to the seller on a buy, received on a sell — that is part of the
+    cash but NOT the bond's cost basis (it nets against the first coupon). The
+    signed cash impact is `∓ (total + accrued)`.
     **Reinvested dividend / Shares in-out** — Qty (+ optional Price for basis);
     cash impact 0. **Dividend / Interest / Cap-gain** — an Amount-in field
     replaces Qty/Price. **Cash in/out** — an Amount field only, no security.
 
 The stored ``txn.amount`` is always the SIGNED CASH IMPACT, so cash balance =
-SUM(amount) holds (ADR-043). When editing a trade whose Qty/Price are
-unchanged, the original stored amount is preserved (so a re-save never drifts a
-penny off the imported figure). The dialog writes through the Repository and
-calls ``accept()``; the caller reloads. Transfer actions (XIn/XOut) and stock
-splits are out of scope for v1.
+SUM(amount) holds (ADR-043); ``txn.accrued_interest`` (ADR-093) carries the bond
+accrued, which the holdings engine subtracts back out of basis/proceeds. When
+editing a trade whose Qty/Price are unchanged, the original stored amount is
+preserved (so a re-save never drifts a penny off the imported figure). The
+dialog writes through the Repository and calls ``accept()``; the caller reloads.
+Transfer actions (XIn/XOut) and option exercise/assignment are out of scope.
 """
 from __future__ import annotations
 
@@ -50,7 +58,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.db.repository import AccountSummary, Repository, TransactionRow
+from mfl_desktop.db.repository import AccountSummary, Repository, SecurityRow, TransactionRow
 from mfl_desktop.import_engine.qif_actions import is_reinvest
 from mfl_desktop.prices import lookup_symbol_name
 from mfl_desktop.ui import tokens
@@ -75,11 +83,20 @@ _ACTIONS: list[tuple[str, str]] = [
     ("Cash in / out", "Cash"),
 ]
 
+# Instrument classes (label, stored instrument_type) — ADR-093.
+_INSTRUMENTS: list[tuple[str, str]] = [
+    ("Stock / ETF / fund", "stock"),
+    ("Bond", "bond"),
+    ("Option", "option"),
+]
+
 _STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
 # The system income category an income/reinvest action routes to — mirrors
 # qif_parser._INCOME_CATEGORY ("Income:Investment income").
 _INCOME_PATH = ["Income", "Investment income"]
+
+_DEFAULT_CONTRACT_SIZE = 100.0   # shares per option contract (ADR-093)
 
 
 def _kind(action: str) -> str:
@@ -143,6 +160,14 @@ class InvestmentTransactionDialog(QDialog):
         self._action.currentIndexChanged.connect(self._on_action_changed)
         self._form.addRow("Action:", self._action)
 
+        # Instrument class (ADR-093) — drives the per-class metadata rows, the
+        # price label, and the value multiplier.
+        self._instrument = QComboBox()
+        for label, value in _INSTRUMENTS:
+            self._instrument.addItem(label, value)
+        self._instrument.currentIndexChanged.connect(self._on_instrument_changed)
+        self._form.addRow("Instrument:", self._instrument)
+
         # Symbol drives Security (typed ticker → name lookup).
         self._symbol = QLineEdit()
         self._symbol.setPlaceholderText("ticker, e.g. TSLA (blank = untickered)")
@@ -158,12 +183,53 @@ class InvestmentTransactionDialog(QDialog):
         self._security.completer().setCaseSensitivity(Qt.CaseInsensitive)
         self._security.addItem("", None)   # blank first entry
         self._symbol_by_sid: dict[int, str] = {}
+        self._security_by_id: dict[int, SecurityRow] = {}   # ADR-093 metadata cache
         for s in self._repo.list_securities():
             self._security.addItem(s.name, s.id)
             self._symbol_by_sid[s.id] = s.symbol or ""
+            self._security_by_id[s.id] = s
         self._security.setEditText("")
         self._security.currentIndexChanged.connect(self._on_security_changed)
         self._form.addRow("Security:", self._security)
+
+        # ── Option metadata (ADR-093) ──
+        self._underlying = QLineEdit()
+        self._underlying.setPlaceholderText("underlying ticker, e.g. AAPL")
+        self._form.addRow("Underlying:", self._underlying)
+
+        self._strike = QLineEdit()
+        self._strike.setPlaceholderText("strike price")
+        self._form.addRow("Strike:", self._strike)
+
+        self._expiry = make_date_edit()
+        self._form.addRow("Expiry:", self._expiry)
+
+        self._opt_kind = QComboBox()
+        self._opt_kind.addItem("Call", "call")
+        self._opt_kind.addItem("Put", "put")
+        self._form.addRow("Type:", self._opt_kind)
+
+        self._contract = QLineEdit()
+        self._contract.setPlaceholderText("shares per contract (usually 100)")
+        self._contract.textChanged.connect(self._on_multiplier_field_changed)
+        self._form.addRow("Contract size:", self._contract)
+
+        # ── Bond metadata (ADR-093) ──
+        self._face = QLineEdit()
+        self._face.setPlaceholderText("par per bond, e.g. 1000")
+        self._face.textChanged.connect(self._on_multiplier_field_changed)
+        self._form.addRow("Face value:", self._face)
+
+        self._coupon = QLineEdit()
+        self._coupon.setPlaceholderText("annual coupon %, e.g. 4")
+        self._form.addRow("Coupon %:", self._coupon)
+
+        self._maturity = make_date_edit()
+        self._form.addRow("Maturity:", self._maturity)
+
+        self._cusip = QLineEdit()
+        self._cusip.setPlaceholderText("CUSIP / ISIN (optional)")
+        self._form.addRow("CUSIP / ISIN:", self._cusip)
 
         self._qty = QLineEdit()
         self._qty.setPlaceholderText("shares")
@@ -176,18 +242,26 @@ class InvestmentTransactionDialog(QDialog):
         self._form.addRow("Price:", self._price)
 
         # Commission / fee (Buy/Sell only) — capitalised into the total cash, so
-        # Total = quantity × price ± commission. Blank = no fee. Editing it
-        # re-solves whichever of qty/price/total the user left for the dialog.
+        # Total = quantity × price × multiplier ± commission. Blank = no fee.
+        # Editing it re-solves whichever of qty/price/total the user left.
         self._commission = QLineEdit()
         self._commission.setPlaceholderText("fee (optional)")
         self._commission.textChanged.connect(self._on_commission_changed)
         self._form.addRow("Commission:", self._commission)
 
-        # Total cost (Buy/Sell only) — the third leg of the qty × price = total
-        # relationship (net of commission). Enter any two of qty/price/total and
-        # the dialog fills the rest.
+        # Accrued interest (bond Buy/Sell only, ADR-093) — paid to the seller on
+        # a buy / received on a sell; part of the cash, NOT of cost basis.
+        self._accrued = QLineEdit()
+        self._accrued.setPlaceholderText("accrued interest (optional)")
+        self._accrued.textChanged.connect(self._recompute_hint)
+        self._form.addRow("Accrued interest:", self._accrued)
+
+        # Total cost (Buy/Sell only) — the third leg of the
+        # qty × price × multiplier = total relationship (net of commission, and
+        # excluding accrued). Enter any two of qty/price/total and the dialog
+        # fills the rest.
         self._total = QLineEdit()
-        self._total.setPlaceholderText("total cash (incl. commission)")
+        self._total.setPlaceholderText("principal (qty × price × size ± fee)")
         self._total.textChanged.connect(lambda *_: self._on_trade_field_changed("total"))
         self._form.addRow("Total cost:", self._total)
 
@@ -254,6 +328,11 @@ class InvestmentTransactionDialog(QDialog):
         if label is not None:
             label.setVisible(visible)
 
+    def _set_label(self, field: QWidget, text: str) -> None:
+        label = self._form.labelForField(field)
+        if label is not None:
+            label.setText(text)
+
     # ── population ──
 
     def _populate_from_seed(self, seed: TransactionRow) -> None:
@@ -269,6 +348,7 @@ class InvestmentTransactionDialog(QDialog):
             si = self._security.findData(seed.security_id)
             if si >= 0:
                 self._security.setCurrentIndex(si)
+            self._load_instrument_from_security(seed.security_id)
         self._symbol.setText(seed.security_symbol or "")
         self._last_lookup_symbol = (seed.security_symbol or "").strip().upper()
         try:
@@ -284,12 +364,15 @@ class InvestmentTransactionDialog(QDialog):
                 self._qty.setText(_trim(seed.quantity))
         if seed.price is not None:
             self._price.setText(_trim(seed.price))
-        # For a Buy/Sell, the stored amount IS the total cash cost (incl. any
-        # imported commission); seed it + the commission straight in so a re-save
-        # never drifts. The Total = qty × price ± commission relationship holds
-        # for imported rows because that's how the amount was computed.
+        # For a Buy/Sell, the stored amount IS the total cash (incl. any imported
+        # commission AND accrued); back out accrued to seed the principal Total
+        # so a re-save never drifts. Total = ∓amount − accrued (in magnitude).
         if _kind(seed.action or "") in ("buy", "sell"):
-            self._total.setText(f"{abs(seed.amount):.2f}")
+            accrued = seed.accrued_interest or Decimal("0")
+            if seed.accrued_interest is not None:
+                self._accrued.setText(f"{seed.accrued_interest:.2f}")
+            principal = abs(seed.amount) - abs(accrued)
+            self._total.setText(f"{principal:.2f}")
             if seed.commission is not None:
                 self._commission.setText(f"{seed.commission:.2f}")
         self._amount.setText(f"{seed.amount:.2f}")
@@ -300,18 +383,71 @@ class InvestmentTransactionDialog(QDialog):
         # touched flag — the per-action default won't clobber it on edit.
         self._set_category(seed.category_id)
 
-    # ── action-driven field rules ──
+    def _load_instrument_from_security(self, security_id: int) -> None:
+        """Set the Instrument combo + per-class metadata from a stored security
+        (ADR-093). Signals are not blocked here — callers run while ``_loading``
+        is True, so handlers self-suppress."""
+        s = self._security_by_id.get(security_id)
+        if s is None:
+            return
+        idx = self._instrument.findData(s.instrument_type or "stock")
+        if idx >= 0:
+            self._instrument.setCurrentIndex(idx)
+        if s.face_value is not None:
+            self._face.setText(_trim(s.face_value))
+        if s.coupon_rate is not None:
+            self._coupon.setText(_trim(s.coupon_rate))
+        if s.maturity_date:
+            self._maturity.setDate(QDate.fromString(s.maturity_date, "yyyy-MM-dd"))
+        self._cusip.setText(s.cusip or "")
+        self._underlying.setText(s.underlying_symbol or "")
+        if s.strike is not None:
+            self._strike.setText(_trim(s.strike))
+        if s.expiry_date:
+            self._expiry.setDate(QDate.fromString(s.expiry_date, "yyyy-MM-dd"))
+        if s.option_type:
+            oi = self._opt_kind.findData(s.option_type)
+            if oi >= 0:
+                self._opt_kind.setCurrentIndex(oi)
+        self._contract.setText(
+            _trim(s.contract_size) if s.contract_size is not None else ""
+        )
+
+    # ── action / instrument-driven field rules ──
+
+    def _current_instrument(self) -> str:
+        return self._instrument.currentData() or "stock"
+
+    def _on_instrument_changed(self, _idx: int) -> None:
+        self._apply_action_rules()
+        # Multiplier may have changed (stock↔bond↔option) — re-solve the total.
+        if not self._loading and _kind(self._current_action()) in ("buy", "sell"):
+            self._solve_trade_field(self._trade_edit_order[-1])
+
+    def _on_multiplier_field_changed(self, *_args) -> None:
+        """Face value / contract size edited — the multiplier moved, so re-solve
+        the tri-field group and refresh the hint."""
+        if (
+            not self._loading and not self._recomputing
+            and _kind(self._current_action()) in ("buy", "sell")
+        ):
+            self._solve_trade_field(self._trade_edit_order[-1])
+        self._recompute_hint()
 
     def _on_action_changed(self, _idx: int) -> None:
         self._apply_action_rules()
 
     def _apply_action_rules(self) -> None:
         kind = _kind(self._current_action())
+        instrument = self._current_instrument()
+        is_bond = instrument == "bond"
+        is_option = instrument == "option"
         show_sec = kind != "cash"
         show_qty = kind in ("buy", "sell", "reinvest", "shares")
         show_price = kind in ("buy", "sell", "reinvest", "shares")
         show_total = kind in ("buy", "sell")
         show_commission = kind in ("buy", "sell")
+        show_accrued = is_bond and kind in ("buy", "sell")
         show_amount = kind in ("income", "cash")
         show_ratio = kind == "split"
         # ADR-086 + ADR-089: cash income/expense **and** reinvests are
@@ -319,15 +455,37 @@ class InvestmentTransactionDialog(QDialog):
         # income report's reinvested-dividend valuation, never the cash totals).
         show_category = kind in ("income", "cash", "reinvest")
 
+        # Instrument shown whenever an instrument is involved (not pure cash).
+        self._set_row_visible(self._instrument, show_sec)
         self._set_row_visible(self._symbol, show_sec)
         self._set_row_visible(self._security, show_sec)
+        # Option metadata.
+        for w in (self._underlying, self._strike, self._expiry,
+                  self._opt_kind, self._contract):
+            self._set_row_visible(w, show_sec and is_option)
+        # Bond metadata.
+        for w in (self._face, self._coupon, self._maturity, self._cusip):
+            self._set_row_visible(w, show_sec and is_bond)
         self._set_row_visible(self._qty, show_qty)
         self._set_row_visible(self._price, show_price)
         self._set_row_visible(self._commission, show_commission)
+        self._set_row_visible(self._accrued, show_accrued)
         self._set_row_visible(self._total, show_total)
         self._set_row_visible(self._amount, show_amount)
         self._set_row_visible(self._ratio, show_ratio)
         self._set_row_visible(self._category, show_category)
+
+        # Per-instrument labels on the shared Quantity / Price rows.
+        if is_bond:
+            self._set_label(self._qty, "Quantity (bonds):")
+            self._set_label(self._price, "Price (% of par):")
+        elif is_option:
+            self._set_label(self._qty, "Contracts:")
+            self._set_label(self._price, "Premium / share:")
+        else:
+            self._set_label(self._qty, "Quantity:")
+            self._set_label(self._price, "Price:")
+
         # On create, default income actions to *Investment income* and the
         # manual Cash action to Uncategorised — until the user picks otherwise.
         # Edit mode keeps the row's stored category (seeded in _populate_from_seed).
@@ -348,6 +506,23 @@ class InvestmentTransactionDialog(QDialog):
 
     def _current_action(self) -> str:
         return self._action.currentData() or ""
+
+    def _multiplier(self) -> Decimal:
+        """Value multiplier for the chosen instrument (ADR-093): stock → 1;
+        bond → face / 100; option → contract size (default 100). Falls back to 1
+        when the driving field is blank/invalid so the maths stays well-defined."""
+        instrument = self._current_instrument()
+        if instrument == "bond":
+            face = _to_decimal(self._face.text())
+            if face is not None and face > 0:
+                return face / Decimal(100)
+            return Decimal(1)
+        if instrument == "option":
+            size = _to_decimal(self._contract.text())
+            if size is not None and size > 0:
+                return size
+            return Decimal(str(_DEFAULT_CONTRACT_SIZE))
+        return Decimal(1)
 
     # ── category (ADR-086) ──
 
@@ -394,8 +569,8 @@ class InvestmentTransactionDialog(QDialog):
         self._recompute_hint()
 
     def _on_commission_changed(self, *_args) -> None:
-        """Commission is the fourth term (Total = qty × price ± commission). A
-        change re-solves whichever leg the user last left for the dialog."""
+        """Commission is the fourth term (Total = qty × price × mult ±
+        commission). A change re-solves whichever leg the user last left."""
         if (
             not self._loading
             and not self._recomputing
@@ -406,34 +581,43 @@ class InvestmentTransactionDialog(QDialog):
 
     def _solve_trade_field(self, target: str) -> None:
         """Fill `target` from the other two of {qty, price, total} plus the
-        commission, if both legs are present (and the divisor is non-zero).
-        Total = qty × price + s·commission, where s = +1 for a Buy (the fee adds
-        to the cash out) and −1 for a Sell (the fee nets off the proceeds).
-        No-op when a needed value is missing."""
+        commission and the instrument multiplier, if both legs are present (and
+        the divisor is non-zero). Total = qty × price × m + s·commission, where
+        m is the value multiplier and s = +1 for a Buy (the fee adds to the cash
+        out) and −1 for a Sell (the fee nets off the proceeds). No-op when a
+        needed value is missing."""
         qty = _to_decimal(self._qty.text())
         price = _to_decimal(self._price.text())
         total = _to_decimal(self._total.text())
         comm = _to_decimal(self._commission.text()) or Decimal(0)
+        m = self._multiplier()
         s = Decimal(1) if _kind(self._current_action()) == "buy" else Decimal(-1)
         self._recomputing = True
         try:
             if target == "total" and qty is not None and price is not None:
-                self._total.setText(_money(qty * price + s * comm))
-            elif target == "price" and qty not in (None, Decimal(0)) and total is not None:
-                self._price.setText(_trim((total - s * comm) / qty))
-            elif target == "qty" and price not in (None, Decimal(0)) and total is not None:
-                self._qty.setText(_trim((total - s * comm) / price))
+                self._total.setText(_money(qty * price * m + s * comm))
+            elif (
+                target == "price" and qty not in (None, Decimal(0))
+                and total is not None and m != 0
+            ):
+                self._price.setText(_trim((total - s * comm) / (qty * m)))
+            elif (
+                target == "qty" and price not in (None, Decimal(0))
+                and total is not None and m != 0
+            ):
+                self._qty.setText(_trim((total - s * comm) / (price * m)))
         finally:
             self._recomputing = False
 
     def _recompute_hint(self, *_args) -> None:
         kind = _kind(self._current_action())
+        instrument = self._current_instrument()
         if kind == "buy":
-            base = ("Buy — enter any two of quantity, price, total cost; the third "
-                    "fills in. Total = quantity × price + commission; cash out = −total.")
+            base = ("Buy — enter any two of quantity, price, total; the third "
+                    "fills in. Total = quantity × price × size + commission.")
         elif kind == "sell":
-            base = ("Sell — enter any two of quantity, price, total cost; the third "
-                    "fills in. Total = quantity × price − commission; cash in = +total.")
+            base = ("Sell — enter any two of quantity, price, total; the third "
+                    "fills in. Total = quantity × price × size − commission.")
         elif kind == "reinvest":
             base = "Reinvested dividend — no cash moves; counts as income."
         elif kind == "shares":
@@ -449,11 +633,19 @@ class InvestmentTransactionDialog(QDialog):
         else:  # cash
             base = "Enter the signed cash amount (− for money out)."
         if kind in ("buy", "sell"):
+            if instrument == "bond":
+                base += (" Price is a % of par; size = face ÷ 100. Accrued "
+                         "interest is cash, not cost basis.")
+            elif instrument == "option":
+                base += " Premium per share; size = contract size (×100)."
             total = _to_decimal(self._total.text())
+            accrued = _to_decimal(self._accrued.text()) or Decimal(0)
             if total is not None:
-                gross = abs(total)
+                gross = abs(total) + abs(accrued)
                 signed = -gross if kind == "buy" else gross
-                base += f"  →  {signed:,.2f}"
+                base += f"  →  cash {signed:,.2f}"
+            if instrument == "option" and kind == "sell":
+                base += "  ·  Expire worthless = a Sell at price 0."
         if kind != "cash":
             base += "  ·  Type a ticker to auto-fill the security name (online)."
         self._hint.setText(base)
@@ -461,12 +653,21 @@ class InvestmentTransactionDialog(QDialog):
     # ── symbol ⇄ security ──
 
     def _on_security_changed(self, idx: int) -> None:
-        """Selecting an existing security mirrors its stored ticker into Symbol."""
+        """Selecting an existing security mirrors its stored ticker into Symbol
+        and loads its instrument class + metadata (ADR-093)."""
         sid = self._security.itemData(idx)
         if sid is not None:
-            sym = self._symbol_by_sid.get(int(sid), "")
+            sid = int(sid)
+            sym = self._symbol_by_sid.get(sid, "")
             self._symbol.setText(sym)
             self._last_lookup_symbol = sym.strip().upper()
+            was_loading = self._loading
+            self._loading = True
+            try:
+                self._load_instrument_from_security(sid)
+            finally:
+                self._loading = was_loading
+            self._apply_action_rules()
 
     def _on_symbol_finished(self) -> None:
         """Resolve the typed ticker to a Security: an existing security with
@@ -498,11 +699,54 @@ class InvestmentTransactionDialog(QDialog):
 
     # ── save ──
 
+    def _instrument_metadata(self) -> dict:
+        """The instrument-class metadata to persist on the security (ADR-093).
+        Every column is explicit (value or None) so a class switch clears the
+        columns that no longer apply, and ``price_multiplier`` always matches."""
+        instrument = self._current_instrument()
+        meta = {
+            "instrument_type": instrument,
+            "price_multiplier": float(self._multiplier()),
+            "face_value": None, "coupon_rate": None, "maturity_date": None,
+            "cusip": None, "underlying_symbol": None, "strike": None,
+            "expiry_date": None, "option_type": None, "contract_size": None,
+        }
+        if instrument == "bond":
+            face = _to_decimal(self._face.text())
+            coupon = _to_decimal(self._coupon.text())
+            meta["face_value"] = float(face) if face is not None else None
+            meta["coupon_rate"] = float(coupon) if coupon is not None else None
+            meta["maturity_date"] = self._maturity.date().toString("yyyy-MM-dd")
+            meta["cusip"] = self._cusip.text().strip() or None
+        elif instrument == "option":
+            strike = _to_decimal(self._strike.text())
+            size = _to_decimal(self._contract.text())
+            meta["underlying_symbol"] = self._underlying.text().strip() or None
+            meta["strike"] = float(strike) if strike is not None else None
+            meta["expiry_date"] = self._expiry.date().toString("yyyy-MM-dd")
+            meta["option_type"] = self._opt_kind.currentData()
+            meta["contract_size"] = (
+                float(size) if size is not None and size > 0
+                else _DEFAULT_CONTRACT_SIZE
+            )
+        return meta
+
     def _on_save(self) -> None:
         action = self._current_action()
         kind = _kind(action)
+        instrument = self._current_instrument()
 
-        # Security (+ its ticker, which lives on the security master).
+        # Bond sanity: a face value is what makes the %-of-par maths meaningful.
+        if instrument == "bond" and kind in ("buy", "sell"):
+            face = _to_decimal(self._face.text())
+            if face is None or face <= 0:
+                QMessageBox.warning(
+                    self, "Save transaction",
+                    "Enter the bond's face value (par per bond, e.g. 1000).",
+                )
+                return
+
+        # Security (+ its ticker + instrument metadata, on the security master).
         security_id: Optional[int] = None
         if kind != "cash":
             sid, name = self._resolve_security()
@@ -512,17 +756,25 @@ class InvestmentTransactionDialog(QDialog):
                     "Pick or type a security for this action.",
                 )
                 return
+            meta = self._instrument_metadata()
             typed_symbol = self._symbol.text().strip()
             if sid is not None:
                 security_id = sid
-                if typed_symbol != (self._symbol_by_sid.get(sid, "") or ""):
-                    try:
-                        self._repo.update_security(sid, symbol=typed_symbol)
-                    except ValueError as e:
-                        QMessageBox.warning(self, "Save transaction", str(e))
-                        return
+                try:
+                    self._repo.update_security(
+                        sid,
+                        symbol=(typed_symbol
+                                if typed_symbol != (self._symbol_by_sid.get(sid, "") or "")
+                                else None),
+                        **meta,
+                    )
+                except ValueError as e:
+                    QMessageBox.warning(self, "Save transaction", str(e))
+                    return
             else:
-                security_id = self._repo.get_or_create_security(name, typed_symbol)
+                security_id = self._repo.get_or_create_security(
+                    name, typed_symbol, **meta,
+                )
 
         # Quantity / price (only relevant to share-moving actions). A stock
         # split carries its RATIO in the quantity field (new shares per old).
@@ -542,12 +794,25 @@ class InvestmentTransactionDialog(QDialog):
             if qty is None or qty <= 0:
                 QMessageBox.warning(self, "Save transaction", "Enter a positive quantity.")
                 return
-        if kind in ("buy", "sell", "reinvest"):
+        if kind in ("buy", "reinvest"):
+            # A Sell-to-close at price 0 is a legitimate option expiry, so only
+            # require a positive price on buys and reinvests.
             if price is None or price <= 0:
                 QMessageBox.warning(self, "Save transaction", "Enter a positive price.")
                 return
+        if kind == "sell":
+            if price is None or price < 0:
+                QMessageBox.warning(
+                    self, "Save transaction",
+                    "Enter a price (0 is allowed for an expired option).",
+                )
+                return
 
-        amount = self._compute_amount(kind, qty, price)
+        accrued = (
+            _to_decimal(self._accrued.text())
+            if (instrument == "bond" and kind in ("buy", "sell")) else None
+        )
+        amount = self._compute_amount(kind, qty, price, accrued)
         if amount is None:
             QMessageBox.warning(self, "Save transaction", "Enter a cash amount.")
             return
@@ -560,9 +825,7 @@ class InvestmentTransactionDialog(QDialog):
         # ADR-086 + ADR-089: the categorisable actions — cash income/expense
         # **and** reinvests — take the chosen category (defaulting to
         # *Investment income* for the income-like ones); all other actions stay
-        # Uncategorised. A reinvest is zero-cash, so its category never reaches
-        # the cash totals — it only feeds the income report's reinvest valuation.
-        kind = _kind(action)
+        # Uncategorised.
         if kind in ("income", "cash", "reinvest"):
             category_id = selected_category_id(self._category)
             if category_id is None:
@@ -575,15 +838,14 @@ class InvestmentTransactionDialog(QDialog):
             category_id = self._repo.uncategorised_id()
 
         # ADR-089: filing a reinvest under a category makes it the default for
-        # future reinvests (import + dialog). The repo getter validates it's a
-        # live income-kind category, so a stray non-income pick self-heals.
+        # future reinvests (import + dialog).
         if kind == "reinvest" and category_id != self._repo.uncategorised_id():
             self._repo.set_reinvest_dividend_category_id(category_id)
         posted_date = self._date.date().toString("yyyy-MM-dd")
         status = self._status.currentText()
         memo = self._memo.text().strip()
         # Commission is a Buy/Sell-only field; already folded into `amount`, so
-        # it's stored purely as metadata (basis uses abs(amount)). None elsewhere.
+        # it's stored purely as metadata (basis uses abs(amount) − accrued).
         commission = (
             _to_decimal(self._commission.text()) if kind in ("buy", "sell") else None
         )
@@ -605,6 +867,7 @@ class InvestmentTransactionDialog(QDialog):
                     quantity=qty,
                     price=price,
                     commission=commission,
+                    accrued_interest=accrued,
                 )
                 self._repo.commit()
             else:
@@ -621,6 +884,7 @@ class InvestmentTransactionDialog(QDialog):
                     quantity=qty,
                     price=price,
                     commission=commission,
+                    accrued_interest=accrued,
                 )
             if security_id is not None:
                 self._repo.seed_prices_from_transactions(security_ids=[security_id])
@@ -635,27 +899,29 @@ class InvestmentTransactionDialog(QDialog):
 
     def _compute_amount(
         self, kind: str, qty: Optional[Decimal], price: Optional[Decimal],
+        accrued: Optional[Decimal],
     ) -> Optional[Decimal]:
-        """The signed cash impact for this row. For Buy/Sell it is the **total
-        cost** field (the authoritative leg of qty × price = total) — seeded from
-        the stored amount on edit, so a re-save never drifts off the imported
-        figure (incl. commission); share transfers / reinvests are zero; income /
-        cash are user-entered. Falls back to qty × price if total is left blank."""
+        """The signed cash impact for this row. For Buy/Sell it is
+        ``∓ (total + accrued)`` — the principal (qty × price × multiplier ±
+        commission, the authoritative Total leg) plus any bond accrued interest
+        (paid on a buy, received on a sell). Both already net commission in; the
+        holdings engine subtracts accrued back out of basis/proceeds (ADR-093).
+        Share transfers / reinvests are zero; income / cash are user-entered.
+        Falls back to qty × price × multiplier if Total is left blank."""
         if kind in ("income", "cash"):
             return _to_decimal(self._amount.text())
         if kind in ("reinvest", "shares", "split"):
             return Decimal("0.00")
-        # buy / sell — total cost field drives the signed cash impact. It already
-        # nets commission in (Total = qty × price ± commission); fall back to that
-        # formula only if the user left Total blank.
+        # buy / sell — the Total field is the principal driving the cash impact.
         total = _to_decimal(self._total.text())
         if total is None and qty is not None and price is not None:
             comm = _to_decimal(self._commission.text()) or Decimal(0)
+            m = self._multiplier()
             s = Decimal(1) if kind == "buy" else Decimal(-1)
-            total = qty * price + s * comm
+            total = qty * price * m + s * comm
         if total is None:
             return None
-        gross = abs(total)
+        gross = abs(total) + abs(accrued or Decimal(0))
         return (-gross if kind == "buy" else gross).quantize(Decimal("0.01"))
 
     def _resolve_security(self) -> tuple[Optional[int], str]:

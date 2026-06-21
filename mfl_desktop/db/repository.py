@@ -133,6 +133,11 @@ class TransactionRow:
     # `amount` already includes it (cost basis uses abs(amount), holdings.py);
     # surfaced here so the edit dialog can show + preserve it. Decimal or None.
     commission: Optional[Decimal] = None
+    # Accrued interest paid at a bond purchase (ADR-093, `txn.accrued_interest`,
+    # pence). Part of the cash (so `amount` includes it), but NOT part of cost
+    # basis — the holdings engine subtracts it back out. None on every non-bond
+    # row. Decimal or None.
+    accrued_interest: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +190,25 @@ class SecurityRow:
     symbol: str
     type: str
     earliest_txn_date: Optional[str] = None
+    # Instrument class + per-class metadata (ADR-093). Default to a plain equity
+    # so every pre-093 construction site reads back exactly as before. The
+    # value-math source of truth is ``price_multiplier`` (cash value of one unit
+    # at price = 1: stock 1.0; bond face/100; option contract_size); the
+    # descriptive fields drive it at entry time and feed display + future coupon
+    # scheduling. Only the dialog-feeding queries (``list_securities`` /
+    # ``list_securities_for_accounts`` / ``get_security``) populate them; the
+    # Tiingo pricing queries leave them at the defaults (they don't need them).
+    instrument_type: str = "stock"
+    price_multiplier: float = 1.0
+    face_value: Optional[float] = None
+    coupon_rate: Optional[float] = None
+    maturity_date: Optional[str] = None
+    cusip: Optional[str] = None
+    underlying_symbol: Optional[str] = None
+    strike: Optional[float] = None
+    expiry_date: Optional[str] = None
+    option_type: Optional[str] = None
+    contract_size: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -338,6 +362,11 @@ class BudgetLine:
     role: str                   # bills / saving / discretionary
     rollover: str               # none / accumulate
     sort_order: int
+    # ADR-094: when set, this envelope is a *bill* backed by a scheduled_txn —
+    # the schedule owns the date/cadence/amount/account, and the burn-down
+    # projects its occurrences (flattening once amount-matched as paid). NULL =
+    # an ordinary envelope.
+    scheduled_txn_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -1248,10 +1277,13 @@ class Repository:
             sid: (p.price, p.price_date)
             for sid, p in self.latest_prices().items()
         }
+        multipliers = self.security_multipliers()   # ADR-093: bond/option scaling
         values = dict(balances)
         for acct in investment:
             txns = self.list_transactions_for_account(acct.id)
-            view = compute_holdings_view(txns, acct.opening_balance, price_map)
+            view = compute_holdings_view(
+                txns, acct.opening_balance, price_map, multipliers,
+            )
             values[acct.id] = view.account_value
         return values
 
@@ -1884,8 +1916,30 @@ class Repository:
 
     # ── Securities (ADR-043) ──
 
+    # Instrument-metadata columns set on a security create/edit (ADR-093). The
+    # value-math column ``price_multiplier`` plus the descriptive per-class
+    # fields. ``instrument_type`` is handled separately (it has a NOT NULL
+    # default, so it's only written when supplied).
+    _INSTRUMENT_META_COLS = (
+        "price_multiplier", "face_value", "coupon_rate", "maturity_date",
+        "cusip", "underlying_symbol", "strike", "expiry_date", "option_type",
+        "contract_size",
+    )
+
     def get_or_create_security(
         self, name: str, symbol: str = "", type_: str = "",
+        *,
+        instrument_type: Optional[str] = None,
+        price_multiplier: Optional[float] = None,
+        face_value: Optional[float] = None,
+        coupon_rate: Optional[float] = None,
+        maturity_date: Optional[str] = None,
+        cusip: Optional[str] = None,
+        underlying_symbol: Optional[str] = None,
+        strike: Optional[float] = None,
+        expiry_date: Optional[str] = None,
+        option_type: Optional[str] = None,
+        contract_size: Optional[float] = None,
     ) -> Optional[int]:
         """Upsert a security by its (unique) name — the QIF `Y` reference.
 
@@ -1894,6 +1948,11 @@ class Repository:
         symbol/type supplied here backfills any blank columns (so a later
         import that carries the ticker can fill in one mastered earlier
         without it) but never overwrites a value already on file.
+
+        The instrument-class kwargs (ADR-093) are applied **on create only**;
+        editing an existing security's class/metadata goes through
+        ``update_security`` (the dialog has the id by then). Omitted (None) ⇒
+        the column keeps its schema default (stock / 1.0 / NULL).
         """
         clean = (name or "").strip()
         if not clean:
@@ -1922,27 +1981,89 @@ class Repository:
                     (clean_type, row["id"]),
                 )
             return row["id"]
+        # Base columns + any instrument-class metadata supplied on create.
+        cols = ["iri", "name", "symbol", "type"]
+        vals: list = [new_security_iri(), clean, clean_symbol or None,
+                      clean_type or None]
+        if instrument_type is not None:
+            cols.append("instrument_type")
+            vals.append(instrument_type)
+        meta = {
+            "price_multiplier": price_multiplier, "face_value": face_value,
+            "coupon_rate": coupon_rate, "maturity_date": maturity_date,
+            "cusip": cusip, "underlying_symbol": underlying_symbol,
+            "strike": strike, "expiry_date": expiry_date,
+            "option_type": option_type, "contract_size": contract_size,
+        }
+        for col in self._INSTRUMENT_META_COLS:
+            if meta[col] is not None:
+                cols.append(col)
+                vals.append(meta[col])
+        placeholders = ", ".join("?" for _ in cols)
         cur = self._conn.execute(
-            "INSERT INTO security (iri, name, symbol, type) VALUES (?, ?, ?, ?)",
-            (new_security_iri(), clean, clean_symbol or None, clean_type or None),
+            f"INSERT INTO security ({', '.join(cols)}) VALUES ({placeholders})",
+            vals,
         )
         return cur.lastrowid
+
+    # The full security column list (ADR-093) — instrument class + metadata, for
+    # the queries that feed the transaction/stock-record dialogs. The Tiingo
+    # pricing queries select a narrower set and leave the metadata at defaults.
+    _SECURITY_COLS = (
+        "id, iri, name, COALESCE(symbol, '') AS symbol, "
+        "COALESCE(type, '') AS type, "
+        "instrument_type, price_multiplier, face_value, coupon_rate, "
+        "maturity_date, cusip, underlying_symbol, strike, expiry_date, "
+        "option_type, contract_size"
+    )
+
+    @staticmethod
+    def _security_row(r) -> SecurityRow:
+        """Build a fully-populated SecurityRow from a row selected with
+        ``_SECURITY_COLS`` (ADR-093)."""
+        return SecurityRow(
+            id=r["id"], iri=r["iri"], name=r["name"],
+            symbol=r["symbol"], type=r["type"],
+            instrument_type=r["instrument_type"] or "stock",
+            price_multiplier=(
+                r["price_multiplier"] if r["price_multiplier"] is not None else 1.0
+            ),
+            face_value=r["face_value"], coupon_rate=r["coupon_rate"],
+            maturity_date=r["maturity_date"], cusip=r["cusip"],
+            underlying_symbol=r["underlying_symbol"], strike=r["strike"],
+            expiry_date=r["expiry_date"], option_type=r["option_type"],
+            contract_size=r["contract_size"],
+        )
 
     def list_securities(self) -> list[SecurityRow]:
         """Every non-archived security, sorted by name."""
         cur = self._conn.execute(
-            "SELECT id, iri, name, COALESCE(symbol, '') AS symbol, "
-            "       COALESCE(type, '') AS type "
+            f"SELECT {self._SECURITY_COLS} "
             "FROM security WHERE archived_at IS NULL "
             "ORDER BY name COLLATE NOCASE"
         )
-        return [
-            SecurityRow(
-                id=r["id"], iri=r["iri"], name=r["name"],
-                symbol=r["symbol"], type=r["type"],
-            )
+        return [self._security_row(r) for r in cur]
+
+    def get_security(self, security_id: int) -> Optional[SecurityRow]:
+        """One fully-populated security by id (ADR-093), or None if missing."""
+        r = self._conn.execute(
+            f"SELECT {self._SECURITY_COLS} FROM security WHERE id = ?",
+            (security_id,),
+        ).fetchone()
+        return self._security_row(r) if r is not None else None
+
+    def security_multipliers(self) -> dict[int, float]:
+        """security_id → price_multiplier for every security (ADR-093). The
+        holdings engine multiplies each ``shares × price`` value site by this so
+        a bond (face/100) or option (contract_size) values correctly; a stock is
+        1.0. Securities absent from the map default to 1.0 in the engine."""
+        cur = self._conn.execute(
+            "SELECT id, price_multiplier FROM security"
+        )
+        return {
+            r["id"]: (r["price_multiplier"] if r["price_multiplier"] is not None else 1.0)
             for r in cur
-        ]
+        }
 
     def list_securities_with_symbol(self) -> list[SecurityRow]:
         """Non-archived securities that carry a ticker symbol — the ones a
@@ -1961,9 +2082,12 @@ class Repository:
             return []
         placeholders = ",".join("?" for _ in account_ids)
         cur = self._conn.execute(
-            "SELECT DISTINCT s.id, s.iri, s.name, "
-            "       COALESCE(s.symbol, '') AS symbol, "
-            "       COALESCE(s.type, '') AS type "
+            "SELECT DISTINCT "
+            "  s.id, s.iri, s.name, COALESCE(s.symbol, '') AS symbol, "
+            "  COALESCE(s.type, '') AS type, "
+            "  s.instrument_type, s.price_multiplier, s.face_value, "
+            "  s.coupon_rate, s.maturity_date, s.cusip, s.underlying_symbol, "
+            "  s.strike, s.expiry_date, s.option_type, s.contract_size "
             "FROM security s "
             "JOIN txn t ON t.security_id = s.id "
             f"WHERE t.account_id IN ({placeholders}) "
@@ -1971,28 +2095,37 @@ class Repository:
             "ORDER BY s.name COLLATE NOCASE",
             list(account_ids),
         )
-        return [
-            SecurityRow(
-                id=r["id"], iri=r["iri"], name=r["name"],
-                symbol=r["symbol"], type=r["type"],
-            )
-            for r in cur
-        ]
+        return [self._security_row(r) for r in cur]
 
     def update_security(
         self, security_id: int, *,
         name: Optional[str] = None,
         symbol: Optional[str] = None,
         type_: Optional[str] = None,
+        instrument_type: Optional[str] = None,
+        price_multiplier=_UNSET,
+        face_value=_UNSET,
+        coupon_rate=_UNSET,
+        maturity_date=_UNSET,
+        cusip=_UNSET,
+        underlying_symbol=_UNSET,
+        strike=_UNSET,
+        expiry_date=_UNSET,
+        option_type=_UNSET,
+        contract_size=_UNSET,
     ) -> None:
-        """Edit a security's master fields (ADR-047, Stock Record screen).
+        """Edit a security's master fields (ADR-047 Stock Record, ADR-093
+        instrument class/metadata).
 
-        ``None`` means 'leave unchanged'; pass an empty string for ``symbol`` or
-        ``type_`` to clear it to NULL. Setting a symbol on a previously
-        untickered security re-enables Tiingo for it (and surfaces it to the
-        launch-time auto-backfill). Raises ``ValueError`` on a blank name or a
-        name that collides with another security (``name`` is the unique QIF
-        reference). Commits.
+        For ``name`` / ``symbol`` / ``type_`` / ``instrument_type``: ``None``
+        means 'leave unchanged'; pass an empty string for ``symbol`` / ``type_``
+        to clear it to NULL. For the instrument-metadata kwargs (ADR-093) the
+        convention is the class-level ``_UNSET`` sentinel — omit to leave the
+        column untouched, pass ``None`` to clear it, a value to set it (so a
+        bond→stock switch can null the bond columns out). Setting a symbol on a
+        previously untickered security re-enables Tiingo for it. Raises
+        ``ValueError`` on a blank name or a name that collides with another
+        security. Commits.
         """
         sets: list[str] = []
         params: list = []
@@ -2016,6 +2149,26 @@ class Repository:
         if type_ is not None:
             sets.append("type = ?")
             params.append(type_.strip() or None)
+        if instrument_type is not None:
+            sets.append("instrument_type = ?")
+            params.append(instrument_type)
+        # Instrument metadata (ADR-093): _UNSET = leave, None = clear, else set.
+        meta = {
+            "price_multiplier": price_multiplier, "face_value": face_value,
+            "coupon_rate": coupon_rate, "maturity_date": maturity_date,
+            "cusip": cusip, "underlying_symbol": underlying_symbol,
+            "strike": strike, "expiry_date": expiry_date,
+            "option_type": option_type, "contract_size": contract_size,
+        }
+        for col in self._INSTRUMENT_META_COLS:
+            value = meta[col]
+            if value is not self._UNSET:
+                sets.append(f"{col} = ?")
+                # price_multiplier is NOT NULL — a cleared (None) multiplier
+                # falls back to the stock default of 1.0.
+                if col == "price_multiplier" and value is None:
+                    value = 1.0
+                params.append(value)
         if not sets:
             return
         params.append(security_id)
@@ -3242,19 +3395,24 @@ class Repository:
         quantity: Optional[Decimal] = None,
         price: Optional[Decimal] = None,
         commission: Optional[Decimal] = None,
+        accrued_interest: Optional[Decimal] = None,
     ) -> int:
         """Insert a transaction. The investment kwargs (ADR-043) default to
         None so every existing cash caller is unaffected; when supplied,
         `amount` is still the SIGNED CASH IMPACT (Buy negative, Sell/Div
         positive, share-only actions zero) so cash balance = SUM(amount)
-        holds. `quantity`/`price` are stored as REAL; `commission` as pence."""
+        holds. `quantity`/`price` are stored as REAL; `commission` and
+        `accrued_interest` (a bond purchase's prepaid coupon, ADR-093) as
+        pence. `amount` already includes accrued_interest in the cash; cost
+        basis subtracts it back out in holdings.py."""
         iri = new_transaction_iri()
         cur = self._conn.execute(
             "INSERT INTO txn "
             "(iri, account_id, posted_date, amount, payee_id, category_id, "
             " status, memo, import_hash, import_batch_id, "
-            " action, security_id, quantity, price, commission) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " action, security_id, quantity, price, commission, "
+            " accrued_interest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 iri, account_id, posted_date, decimal_to_pence(amount),
                 payee_id, category_id, status, memo or None,
@@ -3263,6 +3421,8 @@ class Repository:
                 float(quantity) if quantity is not None else None,
                 float(price) if price is not None else None,
                 decimal_to_pence(commission) if commission is not None else None,
+                decimal_to_pence(accrued_interest)
+                if accrued_interest is not None else None,
             ),
         )
         return cur.lastrowid
@@ -3280,16 +3440,20 @@ class Repository:
         quantity: Optional[Decimal],
         price: Optional[Decimal],
         commission: Optional[Decimal],
+        accrued_interest: Optional[Decimal] = None,
     ) -> None:
         """Update every editable field of one investment transaction in a single
         write (ADR-048 — the Investment Transaction edit dialog). ``amount`` is
         the SIGNED CASH IMPACT, the same contract as ``insert_transaction`` (Buy
         negative, Sell/Div positive, share-only actions zero), so cash balance =
-        SUM(amount) stays correct. Commits."""
+        SUM(amount) stays correct. ``accrued_interest`` (ADR-093) is a bond
+        purchase's prepaid coupon in pence — included in ``amount``'s cash but
+        held out of cost basis by the holdings engine. Commits."""
         self._conn.execute(
             "UPDATE txn SET posted_date = ?, amount = ?, payee_id = ?, "
             "  category_id = ?, status = ?, memo = ?, action = ?, "
-            "  security_id = ?, quantity = ?, price = ?, commission = ? "
+            "  security_id = ?, quantity = ?, price = ?, commission = ?, "
+            "  accrued_interest = ? "
             "WHERE id = ?",
             (
                 posted_date, decimal_to_pence(amount), payee_id,
@@ -3298,6 +3462,8 @@ class Repository:
                 float(quantity) if quantity is not None else None,
                 float(price) if price is not None else None,
                 decimal_to_pence(commission) if commission is not None else None,
+                decimal_to_pence(accrued_interest)
+                if accrued_interest is not None else None,
                 txn_id,
             ),
         )
@@ -3700,6 +3866,7 @@ class Repository:
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
             "       t.action, t.security_id, t.quantity, t.price, t.commission, "
+            "       t.accrued_interest, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol, "
             "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
@@ -3742,6 +3909,10 @@ class Repository:
                     pence_to_decimal(r["commission"])
                     if r["commission"] is not None else None
                 ),
+                accrued_interest=(
+                    pence_to_decimal(r["accrued_interest"])
+                    if r["accrued_interest"] is not None else None
+                ),
             ))
         return rows
 
@@ -3764,6 +3935,7 @@ class Repository:
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
             "       t.action, t.security_id, t.quantity, t.price, t.commission, "
+            "       t.accrued_interest, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol, "
             "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
@@ -3802,6 +3974,10 @@ class Repository:
                     pence_to_decimal(r["commission"])
                     if r["commission"] is not None else None
                 ),
+                accrued_interest=(
+                    pence_to_decimal(r["accrued_interest"])
+                    if r["accrued_interest"] is not None else None
+                ),
             )
             for r in cur
         ]
@@ -3834,6 +4010,7 @@ class Repository:
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
             "       t.action, t.security_id, t.quantity, t.price, t.commission, "
+            "       t.accrued_interest, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol, "
             "       COALESCE(sp.c, 0) AS split_count, sp.cids AS split_cids "
@@ -3869,6 +4046,10 @@ class Repository:
                     pence_to_decimal(r["commission"])
                     if r["commission"] is not None else None
                 ),
+                accrued_interest=(
+                    pence_to_decimal(r["accrued_interest"])
+                    if r["accrued_interest"] is not None else None
+                ),
             )
             for r in cur
         ]
@@ -3888,6 +4069,7 @@ class Repository:
             "       t.status, COALESCE(t.memo, '') AS memo, "
             "       t.transfer_id, "
             "       t.action, t.security_id, t.quantity, t.price, t.commission, "
+            "       t.accrued_interest, "
             "       COALESCE(s.name, '') AS security_name, "
             "       COALESCE(s.symbol, '') AS security_symbol "
             "FROM txn t "
@@ -3916,6 +4098,10 @@ class Repository:
                 commission=(
                     pence_to_decimal(r["commission"])
                     if r["commission"] is not None else None
+                ),
+                accrued_interest=(
+                    pence_to_decimal(r["accrued_interest"])
+                    if r["accrued_interest"] is not None else None
                 ),
             )
             for r in cur
@@ -7370,7 +7556,7 @@ class Repository:
         "c.name AS category_name, "
         "COALESCE(p.name, '') AS category_parent_name, "
         "c.kind AS category_kind, "
-        "bl.role, bl.rollover, bl.sort_order"
+        "bl.role, bl.rollover, bl.sort_order, bl.scheduled_txn_id"
     )
 
     def _row_to_budget_line(self, row) -> BudgetLine:
@@ -7382,6 +7568,7 @@ class Repository:
             category_kind=row["category_kind"],
             role=row["role"], rollover=row["rollover"],
             sort_order=int(row["sort_order"]),
+            scheduled_txn_id=row["scheduled_txn_id"],
         )
 
     def list_budget_lines(self, budget_id: int) -> list[BudgetLine]:
@@ -7407,11 +7594,14 @@ class Repository:
         category_id: int,
         role: str = "discretionary",
         rollover: Optional[str] = None,
+        scheduled_txn_id: Optional[int] = None,
     ) -> int:
         """Add an envelope for ``category_id``. ``rollover`` defaults to
         'accumulate' for expense categories, 'none' otherwise (ADR-058 D3).
-        Idempotent on UNIQUE(budget_id, category_id) — updates role/rollover
-        if the line already exists. Returns the line id."""
+        ``scheduled_txn_id`` (ADR-094) marks the line as a bill backed by that
+        schedule. Idempotent on UNIQUE(budget_id, category_id) — updates
+        role/rollover (and the schedule link when supplied) if the line already
+        exists. Returns the line id."""
         if role not in BUDGET_ROLES:
             raise ValueError(f"Invalid role {role!r}; expected {BUDGET_ROLES}.")
         if rollover is None:
@@ -7430,10 +7620,13 @@ class Repository:
         try:
             self._conn.execute(
                 "INSERT INTO budget_line "
-                "(budget_id, category_id, role, rollover) VALUES (?, ?, ?, ?) "
+                "(budget_id, category_id, role, rollover, scheduled_txn_id) "
+                "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(budget_id, category_id) DO UPDATE SET "
-                "  role = excluded.role, rollover = excluded.rollover",
-                (budget_id, category_id, role, rollover),
+                "  role = excluded.role, rollover = excluded.rollover, "
+                "  scheduled_txn_id = COALESCE(excluded.scheduled_txn_id, "
+                "                              budget_line.scheduled_txn_id)",
+                (budget_id, category_id, role, rollover, scheduled_txn_id),
             )
             self.commit()
         except Exception:
@@ -7444,6 +7637,100 @@ class Repository:
             (budget_id, category_id),
         ).fetchone()
         return int(row["id"])
+
+    def set_budget_line_schedule(
+        self, line_id: int, scheduled_txn_id: Optional[int],
+    ) -> None:
+        """Link (or, with None, unlink) a budget line to a scheduled_txn — i.e.
+        mark it as a bill or demote it back to a plain envelope (ADR-094)."""
+        try:
+            self._conn.execute(
+                "UPDATE budget_line SET scheduled_txn_id = ? WHERE id = ?",
+                (scheduled_txn_id, line_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def list_bill_schedules_for_budget(self, budget_id: int) -> list[dict]:
+        """The schedule recurrence behind each bill line in a budget (ADR-094) —
+        ``{category_id, cadence, anchor_date, amount, end_date}`` for every line
+        with a live (non-archived) linked schedule. ``amount`` is the schedule's
+        signed estimated amount. Feeds ``bill_occurrences_in_month`` so the
+        burn-down can project + amount-match the bills."""
+        cur = self._conn.execute(
+            "SELECT bl.category_id, s.cadence, s.anchor_date, "
+            "       s.estimated_amount, s.end_date "
+            "FROM budget_line bl "
+            "JOIN scheduled_txn s ON s.id = bl.scheduled_txn_id "
+            "WHERE bl.budget_id = ? AND s.archived_at IS NULL",
+            (budget_id,),
+        )
+        return [
+            {
+                "category_id": r["category_id"],
+                "cadence": r["cadence"],
+                "anchor_date": r["anchor_date"],
+                "amount": pence_to_decimal(r["estimated_amount"]),
+                "end_date": r["end_date"],
+            }
+            for r in cur
+        ]
+
+    def list_schedules_not_in_budget(self, budget_id: int) -> list["ScheduledTxnRow"]:
+        """Active expense/transfer schedules whose category isn't yet an
+        envelope in this budget (ADR-094) — the candidates for the setup-time
+        "add scheduled transactions" picker. Income schedules are excluded
+        (bills are outflows)."""
+        budgeted = {
+            r["category_id"] for r in self._conn.execute(
+                "SELECT category_id FROM budget_line WHERE budget_id = ?",
+                (budget_id,),
+            )
+        }
+        return [
+            s for s in self.list_scheduled_txns(include_archived=False)
+            if s.category_kind in ("expense", "transfer")
+            and s.category_id not in budgeted
+        ]
+
+    def add_bill_line_from_schedule(
+        self, *, budget_id: int, schedule_id: int, seed_allocations: bool = True,
+    ) -> int:
+        """Create (or update) a budget line for a schedule's category and link it
+        as a bill (ADR-094). When ``seed_allocations`` is set, each month's
+        allocation is seeded from the schedule's expected occurrences that month
+        (a monthly bill → its amount; a weekly bill → ~4–5×), so the envelope's
+        plan matches the bill out of the box. Returns the line id."""
+        sched = self.get_scheduled_txn(schedule_id)
+        if sched is None:
+            raise ValueError(f"No schedule with id {schedule_id}.")
+        role = "bills" if sched.category_kind == "expense" else "discretionary"
+        line_id = self.add_budget_line(
+            budget_id=budget_id, category_id=sched.category_id,
+            role=role, scheduled_txn_id=schedule_id,
+        )
+        if seed_allocations:
+            # Lazy import: budget_calc imports from this module (circular at top).
+            from mfl_desktop.budget_calc import (
+                BillSchedule, bill_occurrences_in_month,
+            )
+            budget = self.get_budget(budget_id)
+            if budget is not None:
+                bs = BillSchedule(
+                    category_id=sched.category_id, cadence=sched.cadence,
+                    anchor_date=sched.anchor_date,
+                    amount=abs(sched.estimated_amount), end_date=sched.end_date,
+                )
+                for month in budget.months():
+                    occ = bill_occurrences_in_month([bs], month)
+                    total = sum((o.amount for o in occ), Decimal("0.00"))
+                    if total > 0:
+                        self.set_line_allocation(
+                            line_id, month, total, scope="one",
+                        )
+        return line_id
 
     def update_budget_line(
         self,

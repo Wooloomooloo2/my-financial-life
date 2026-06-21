@@ -423,6 +423,25 @@ class BudgetMonthlyView(QWidget):
             self._budget.id, f"{month}-01", f"{month}-31",
         )
         kind_map = self._repo.category_kind_map()
+        # ADR-094: expand this budget's linked bill schedules into the month's
+        # occurrences so the burn-down steps + amount-matches them.
+        bills = [
+            bc.BillSchedule(
+                category_id=d["category_id"], cadence=d["cadence"],
+                anchor_date=d["anchor_date"], amount=d["amount"],
+                end_date=d["end_date"],
+            )
+            for d in self._repo.list_bill_schedules_for_budget(self._budget.id)
+        ]
+        occ = bc.bill_occurrences_in_month(bills, month)
+        # Bucketing maps are now needed for both scopes (to classify bill vs
+        # discretionary actuals), not just the single-category scope.
+        parent_map = self._repo.category_parent_map()
+        budgeted_ids = {
+            r.category_id
+            for s in self._matrix.sections for r in s.rows
+            if not r.is_unbudgeted and r.category_id is not None
+        }
         if self._scope_cat is None:
             exp = next(
                 (s for s in self._matrix.sections if s.kind == "expense"), None
@@ -430,22 +449,20 @@ class BudgetMonthlyView(QWidget):
             total = exp.subtotal[mi].available if exp else _ZERO
             data = bc.compute_burndown(
                 perimeter_txns=ptxns, month=month, total_planned=total,
+                parent_map=parent_map, budgeted_ids=budgeted_ids,
                 kind_map=kind_map, scope_label="Whole budget",
+                bill_occurrences=occ,
             )
         else:
             row = self._expense_row(self._scope_cat)
             total = row.cells[mi].available if row else _ZERO
-            budgeted_ids = {
-                r.category_id
-                for s in self._matrix.sections for r in s.rows
-                if not r.is_unbudgeted and r.category_id is not None
-            }
             data = bc.compute_burndown(
                 perimeter_txns=ptxns, month=month, total_planned=total,
                 target_category_id=self._scope_cat,
-                parent_map=self._repo.category_parent_map(),
+                parent_map=parent_map,
                 budgeted_ids=budgeted_ids, kind_map=kind_map,
                 scope_label=row.label if row else "",
+                bill_occurrences=occ,
             )
         self._chart.set_data(data)
 

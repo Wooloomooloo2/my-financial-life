@@ -351,13 +351,14 @@ def _investment_perf(repo, display_ccy, today_iso, top_n):
     price_map = {
         sid: (p.price, p.price_date) for sid, p in repo.latest_prices().items()
     }
+    multipliers = repo.security_multipliers()   # ADR-093: bond/option scaling
     # Aggregate unrealized gain per security across all investment accounts,
     # converting each holding to the display currency first (ADR-055 — a USD
     # holding's gain must not be par-added into a GBP total or mislabelled).
     agg: dict[int, dict] = {}
     for acct in investment:
         txns = repo.list_transactions_for_account(acct.id)
-        view = compute_holdings_view(txns, acct.opening_balance, price_map)
+        view = compute_holdings_view(txns, acct.opening_balance, price_map, multipliers)
         for h in view.holdings:
             if not h.priced or h.unrealized_gain is None:
                 continue

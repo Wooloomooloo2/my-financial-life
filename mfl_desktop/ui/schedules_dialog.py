@@ -230,7 +230,7 @@ class SchedulesDialog(QDialog):
         if values is None:
             return
         try:
-            self._repo.create_scheduled_txn(
+            new_id = self._repo.create_scheduled_txn(
                 account_id=values.account_id,
                 payee_name=values.payee_name,
                 category_id=values.category_id,
@@ -253,6 +253,38 @@ class SchedulesDialog(QDialog):
             return
         self._reload_table()
         self.schedules_changed.emit()
+        self._maybe_add_to_budget(new_id)
+
+    def _maybe_add_to_budget(self, schedule_id: int) -> None:
+        """ADR-094: when a new expense/transfer schedule isn't yet covered by a
+        budget, offer to add it as a bill line (the owner chose 'ask each
+        time'). Skips income schedules and categories already budgeted."""
+        sched = self._repo.get_scheduled_txn(schedule_id)
+        if sched is None or sched.category_kind not in ("expense", "transfer"):
+            return
+        budgets = self._repo.list_budgets()
+        if not budgets:
+            return
+        # Offer the first budget whose perimeter doesn't already cover the
+        # category (the common single-budget case = list_budgets()[0]).
+        for budget in budgets:
+            covered = {
+                ln.category_id for ln in self._repo.list_budget_lines(budget.id)
+            }
+            if sched.category_id in covered:
+                continue
+            if QMessageBox.question(
+                self, "Add to budget?",
+                f"Add ‘{sched.category_name}’ to the budget “{budget.name}” as a "
+                f"bill? Its monthly amounts will be seeded from this schedule.",
+            ) == QMessageBox.Yes:
+                try:
+                    self._repo.add_bill_line_from_schedule(
+                        budget_id=budget.id, schedule_id=schedule_id,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    QMessageBox.critical(self, "Add to budget", str(e))
+            return
 
     def _on_edit(self) -> None:
         ids = self._selected_ids()

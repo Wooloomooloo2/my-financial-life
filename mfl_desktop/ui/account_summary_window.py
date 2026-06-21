@@ -892,7 +892,9 @@ class AccountSummaryWindow(QMainWindow):
             sid: [(p.price_date, p.price) for p in self._repo.price_series(sid)]
             for sid in sec_ids
         }
-        points = compute_value_history(txns, samples, price_series)
+        points = compute_value_history(
+            txns, samples, price_series, self._repo.security_multipliers(),
+        )
         if len(points) < 2:
             self._value_history_chart.show_empty("Not enough history to chart yet.")
             return
@@ -1093,7 +1095,9 @@ class AccountSummaryWindow(QMainWindow):
             sid: (p.price, p.price_date)
             for sid, p in self._repo.latest_prices().items()
         }
-        view = compute_holdings_view(txns, opening_balance, prices)
+        view = compute_holdings_view(
+            txns, opening_balance, prices, self._repo.security_multipliers(),
+        )
         self._update_holdings_panel(view)   # stores view + renders table (search-aware)
         self._render_portfolio()            # treemap (default) + cost-vs-value bars
         self._render_value_history(txns)

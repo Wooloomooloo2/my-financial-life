@@ -664,6 +664,7 @@ class InvestmentReturnsWindow(QMainWindow):
 
         results = []   # (currency, ReturnsResult)
         all_series: dict[int, list[tuple[str, float]]] = {}
+        multipliers = self._repo.security_multipliers()   # ADR-093: bond/option scaling
         for ccy, g in by_ccy.items():
             pser = {
                 sid: [(p.price_date, p.price) for p in self._repo.price_series(sid)]
@@ -671,7 +672,10 @@ class InvestmentReturnsWindow(QMainWindow):
             }
             all_series.update(pser)            # reused by the performer panel
             results.append(
-                (ccy, compute_returns(g["txns"], samples, pser, window_start, security_ids))
+                (ccy, compute_returns(
+                    g["txns"], samples, pser, window_start, security_ids,
+                    multipliers,
+                ))
             )
 
         # Aggregate points by sample index (all results share samples_iso).

@@ -129,6 +129,13 @@ class StockRecordDialog(QDialog):
         form.addRow("Name:", self._name_edit)
         form.addRow("Ticker symbol:", self._symbol_edit)
         form.addRow("Type:", self._type_edit)
+        # Instrument class + metadata (ADR-093) — read-only here; edited on a
+        # trade in the Investment Transaction dialog. Hidden for plain stocks.
+        self._instrument_label = QLabel("")
+        self._instrument_label.setWordWrap(True)
+        tokens.themed(self._instrument_label, "QLabel { color: {muted_strong}; }")
+        self._instrument_row_label = QLabel("Instrument:")
+        form.addRow(self._instrument_row_label, self._instrument_label)
 
         btn_row = QHBoxLayout()
         self._save_btn = QPushButton("Save details")
@@ -286,6 +293,48 @@ class StockRecordDialog(QDialog):
                 self._security = s
                 break
         self.setWindowTitle(f"Stock record — {self._security.name}")
+        self._update_instrument_summary()
+
+    def _update_instrument_summary(self) -> None:
+        """Show the bond/option metadata as a read-only line (ADR-093); hide the
+        row entirely for a plain stock."""
+        summary = self._instrument_summary(self._security)
+        visible = bool(summary)
+        self._instrument_label.setText(summary)
+        self._instrument_label.setVisible(visible)
+        self._instrument_row_label.setVisible(visible)
+
+    @staticmethod
+    def _instrument_summary(s: SecurityRow) -> str:
+        kind = (s.instrument_type or "stock").lower()
+        if kind == "bond":
+            parts = ["Bond"]
+            if s.face_value is not None:
+                parts.append(f"par {_fmt_num(s.face_value, 2)}")
+            if s.coupon_rate is not None:
+                parts.append(f"{_fmt_num(s.coupon_rate, 3)}% coupon")
+            if s.maturity_date:
+                parts.append(f"matures {s.maturity_date}")
+            if s.cusip:
+                parts.append(f"CUSIP {s.cusip}")
+            return "  ·  ".join(parts)
+        if kind == "option":
+            parts = ["Option"]
+            head = " ".join(
+                p for p in (
+                    s.underlying_symbol or "",
+                    _fmt_num(s.strike, 2) if s.strike is not None else "",
+                    (s.option_type or "").capitalize(),
+                ) if p
+            ).strip()
+            if head:
+                parts.append(head)
+            if s.expiry_date:
+                parts.append(f"expires {s.expiry_date}")
+            if s.contract_size is not None:
+                parts.append(f"×{_fmt_num(s.contract_size, 0)}")
+            return "  ·  ".join(parts)
+        return ""   # plain stock → row hidden
 
     def _reload_prices(self) -> None:
         series = self._repo.price_series(self._sid)
@@ -308,7 +357,9 @@ class StockRecordDialog(QDialog):
         txns = self._repo.list_transactions_for_security(self._sid)
         pr = self._repo.latest_price_for_security(self._sid)
         latest = {self._sid: (pr.price, pr.price_date)} if pr is not None else {}
-        view = compute_holdings_view(txns, Decimal("0"), latest)
+        view = compute_holdings_view(
+            txns, Decimal("0"), latest, self._repo.security_multipliers(),
+        )
         holding = next(
             (h for h in view.holdings if h.security_id == self._sid), None,
         )

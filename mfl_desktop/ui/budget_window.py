@@ -1181,6 +1181,24 @@ class BudgetWindow(QMainWindow):
                 group.addAction(act)
                 role_menu.addAction(act)
 
+        # ADR-094: bill — link this envelope to a scheduled transaction (or
+        # unlink). Only on the spending side (income isn't a bill).
+        if mr.kind != "income":
+            menu.addSeparator()
+            if mr.scheduled_txn_id is None:
+                bill = QAction("Make this a bill…", menu)
+                bill.triggered.connect(
+                    lambda _c=False, lid=line_id, cid=mr.category_id:
+                    self._make_bill(lid, cid)
+                )
+                menu.addAction(bill)
+            else:
+                unbill = QAction("Remove bill (keep schedule)", menu)
+                unbill.triggered.connect(
+                    lambda _c=False, lid=line_id: self._unlink_bill(lid)
+                )
+                menu.addAction(unbill)
+
         menu.addSeparator()
         remove = QAction("Remove from budget", menu)
         remove.triggered.connect(
@@ -1190,6 +1208,54 @@ class BudgetWindow(QMainWindow):
         menu.addAction(remove)
 
         menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _make_bill(self, line_id: int, category_id: Optional[int]) -> None:
+        """Mark a budget line as a bill (ADR-094): collect the schedule in the
+        full Schedule dialog (seeded from the line's category), create it, and
+        link it to the line. The paying account is chosen there."""
+        from mfl_desktop.ui.schedule_dialog import ScheduleDialog, ScheduleSeed
+        accounts = self._repo.list_accounts()
+        if not accounts:
+            QMessageBox.information(
+                None, "Make this a bill",
+                "Create an account before scheduling a bill.",
+            )
+            return
+        seed = ScheduleSeed(category_id=category_id, cadence="monthly")
+        dlg = ScheduleDialog(
+            accounts=accounts, categories=self._repo.list_categories_flat(),
+            seed=seed, parent=None,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        v = dlg.values()
+        if v is None:
+            return
+        try:
+            sid = self._repo.create_scheduled_txn(
+                account_id=v.account_id, payee_name=v.payee_name,
+                category_id=v.category_id,
+                transfer_to_account_id=v.transfer_to_account_id,
+                estimated_amount=v.estimated_amount, variable=v.variable,
+                memo=v.memo, cadence=v.cadence, anchor_date=v.anchor_date,
+                next_due_date=v.next_due_date, end_date=v.end_date,
+                auto_post=v.auto_post, notes=v.notes,
+            )
+            self._repo.set_budget_line_schedule(line_id, sid)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(None, "Make this a bill", str(e))
+            return
+        self._render()
+
+    def _unlink_bill(self, line_id: int) -> None:
+        """Demote a bill line back to a plain envelope; the schedule survives
+        (manage it in Manage ▸ Schedules)."""
+        try:
+            self._repo.set_budget_line_schedule(line_id, None)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(None, "Remove bill", str(e))
+            return
+        self._render()
 
     def _set_rollover(self, line_id: int, on: bool) -> None:
         try:

@@ -1,27 +1,29 @@
-"""Projected burn-down chart for the budget monthly view (ADR-058 R3).
+"""Projected burn-down chart for the budget monthly view (ADR-058 R3, ADR-094).
 
-A hand-rolled paintEvent chart (ADR-026) showing one month's spend
-depletion for a scope (the whole budget, or a single category):
+A hand-rolled paintEvent chart (ADR-026) showing one month's spend depletion
+for a scope (the whole budget, or a single category) as a **staircase**
+(ADR-094) — spend holds flat then jumps at each transaction; the ideal +
+projection step at known bill due days rather than sloping diagonally:
 
-- **Actual** — cumulative outflow magnitude through today (solid red).
-- **Ideal** — the linear pacing line to the planned total (grey dashed).
-- **Projected** — the forward projection that makes this *better than
-  Pocketsmith* (principle 12): from today to month-end it extends the
-  observed average daily rate, so an overspending scope keeps climbing
-  and visibly **crosses the budget early** instead of going flat at today
-  (amber dashed).
-- A faint horizontal **Budget** reference at ``total_planned`` so the
-  crossing is legible, plus a vertical **Today** marker.
+- **Actual** — cumulative outflow magnitude through today, a solid filled
+  step area.
+- **Ideal** — the planned pacing: bills as steps at their due days, the
+  discretionary remainder spread linearly (light grey dashed steps).
+- **Projected** — the forward projection: unpaid bills as steps at their due
+  days + the discretionary run-rate, so an overspending scope keeps climbing
+  and crosses the budget early, while a fully-paid bill goes flat (amber
+  dashed steps).
+- A faint horizontal **Budget** reference at ``total_planned``, plus a vertical
+  **Today** marker.
 
-Rebuilds the ADR-025/026 ``burn_down_chart.py`` that R1 removed; same
-paintEvent idiom as the Spending Over Time chart. Stateless — call
+Same paintEvent idiom as the Spending Over Time chart. Stateless — call
 ``set_data(BurnDownData)`` to render.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -29,6 +31,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QPainter,
     QPen,
+    QPolygonF,
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
@@ -228,34 +231,65 @@ class BurnDownChart(QWidget):
                          int(pill.top() + fm.ascent() + 1), text)
 
     def _paint_series(self, painter, chart, data, ymax, x_min, x_span) -> None:
-        # Ideal first (back), then projection, then actual on top.
-        self._polyline(painter, data.ideal_x, data.ideal, chart, ymax,
-                       x_min, x_span, colour=QColor(_COLOR_IDEAL),
-                       width=2, style=Qt.DashLine)
-        self._polyline(painter, data.proj_x, data.proj, chart, ymax,
-                       x_min, x_span, colour=QColor(_COLOR_PROJECT),
-                       width=2, style=Qt.DashLine)
-        self._polyline(painter, data.actual_x, data.actual, chart, ymax,
-                       x_min, x_span, colour=QColor(_COLOR_ACTUAL),
-                       width=2, style=Qt.SolidLine)
+        # All three series are STEP functions (ADR-094): spend holds flat then
+        # jumps at each transaction; the ideal + projection step at bill due
+        # days. Ideal + projection are light dashed guides behind; the actual is
+        # a solid filled staircase on top.
+        self._step_line(painter, data.ideal_x, data.ideal, chart, ymax,
+                        x_min, x_span, colour=QColor(_COLOR_IDEAL),
+                        width=1, style=Qt.DashLine)
+        self._step_line(painter, data.proj_x, data.proj, chart, ymax,
+                        x_min, x_span, colour=QColor(_COLOR_PROJECT),
+                        width=2, style=Qt.DashLine)
+        self._step_fill(painter, data.actual_x, data.actual, chart, ymax,
+                        x_min, x_span)
+        self._step_line(painter, data.actual_x, data.actual, chart, ymax,
+                        x_min, x_span, colour=QColor(_COLOR_ACTUAL),
+                        width=3, style=Qt.SolidLine)
 
-    def _polyline(self, painter, xs, ys, chart, ymax, x_min, x_span,
-                  *, colour, width, style) -> None:
-        if len(xs) < 2:
+    def _step_pts(self, xs, ys, chart, ymax, x_min, x_span) -> list:
+        """Pixel points tracing a staircase through (xs, ys): hold each value
+        flat to the next x, then jump vertically — so a cumulative-spend series
+        reads as discrete steps rather than a diagonal."""
+        if not xs:
+            return []
+        pts = [(self._x_to_px(xs[0], chart, x_min, x_span),
+                self._y_to_px(float(ys[0]), chart, ymax))]
+        for i in range(1, len(xs)):
+            x = self._x_to_px(xs[i], chart, x_min, x_span)
+            y_prev = self._y_to_px(float(ys[i - 1]), chart, ymax)
+            y = self._y_to_px(float(ys[i]), chart, ymax)
+            pts.append((x, y_prev))   # horizontal hold
+            pts.append((x, y))        # vertical jump
+        return pts
+
+    def _step_line(self, painter, xs, ys, chart, ymax, x_min, x_span,
+                   *, colour, width, style) -> None:
+        pts = self._step_pts(xs, ys, chart, ymax, x_min, x_span)
+        if len(pts) < 2:
             return
         pen = QPen(colour)
         pen.setWidth(width)
         pen.setStyle(style)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setJoinStyle(Qt.MiterJoin)
         painter.setPen(pen)
-        prev_x = self._x_to_px(xs[0], chart, x_min, x_span)
-        prev_y = self._y_to_px(float(ys[0]), chart, ymax)
-        for i in range(1, len(xs)):
-            x = self._x_to_px(xs[i], chart, x_min, x_span)
-            y = self._y_to_px(float(ys[i]), chart, ymax)
-            painter.drawLine(int(prev_x), int(prev_y), int(x), int(y))
-            prev_x, prev_y = x, y
+        for i in range(1, len(pts)):
+            painter.drawLine(int(pts[i - 1][0]), int(pts[i - 1][1]),
+                             int(pts[i][0]), int(pts[i][1]))
+
+    def _step_fill(self, painter, xs, ys, chart, ymax, x_min, x_span) -> None:
+        pts = self._step_pts(xs, ys, chart, ymax, x_min, x_span)
+        if len(pts) < 2:
+            return
+        base_y = chart.bottom()
+        poly = QPolygonF([QPointF(x, y) for x, y in pts])
+        poly.append(QPointF(pts[-1][0], base_y))
+        poly.append(QPointF(pts[0][0], base_y))
+        fill = QColor(_COLOR_ACTUAL)
+        fill.setAlpha(38)           # soft translucent area under the staircase
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(fill))
+        painter.drawPolygon(poly)
 
     def _paint_legend(self, painter, legend) -> None:
         font = QFont(painter.font())

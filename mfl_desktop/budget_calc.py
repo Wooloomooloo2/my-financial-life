@@ -80,6 +80,8 @@ class MatrixRow:
     cells: list[MonthCell]
     alloc_total: Decimal
     actual_total: Decimal
+    # ADR-094: the linked schedule when this line is a bill (else None).
+    scheduled_txn_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,7 @@ def compute_matrix(
             kind=ln.category_kind, role=ln.role, rollover=ln.rollover,
             is_unbudgeted=False, cells=cells,
             alloc_total=_round2(alloc_total), actual_total=_round2(actual_total),
+            scheduled_txn_id=getattr(ln, "scheduled_txn_id", None),
         ))
 
     # ── 3. Unbudgeted rows — one per section, only if there's activity. ──
@@ -409,6 +412,85 @@ def _month_bounds(month: str) -> tuple[date, date, int]:
     return start, end, (end - start).days + 1
 
 
+# ── Bills (ADR-094) ─────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class BillSchedule:
+    """A bill's recurrence, as seen by the budget engine (ADR-094) — the subset
+    of a linked ``scheduled_txn`` needed to expand its occurrences. ``amount`` is
+    a positive magnitude (the estimated outflow per occurrence)."""
+    category_id: int
+    cadence: str                 # weekly / biweekly / monthly / quarterly / annual
+    anchor_date: str             # 'YYYY-MM-DD' — first occurrence
+    amount: Decimal
+    end_date: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class BillOccurrence:
+    """One expected occurrence of a bill within a month (ADR-094). ``day`` is
+    1-indexed day-of-month; ``amount`` is the positive estimated magnitude."""
+    category_id: int
+    day: int
+    amount: Decimal
+
+
+def _occurrence_days(
+    cadence: str, anchor_date: str, month: str, end_date: Optional[str],
+) -> list[int]:
+    """Day-of-month numbers for every occurrence of a schedule that lands in
+    ``month`` ('YYYY-MM'), anchored at ``anchor_date`` (the first occurrence).
+    Mirrors Repository.compute_next_due_date's anchor rule: weekly/biweekly step
+    by 7/14 days; monthly/quarterly/annual recur every 1/3/12 months on the
+    anchor day (clamped to the month length). Occurrences before the anchor or
+    after ``end_date`` are excluded."""
+    start, end, period_days = _month_bounds(month)
+    try:
+        anchor = date.fromisoformat(anchor_date)
+    except ValueError:
+        return []
+    end_d = date.fromisoformat(end_date) if end_date else None
+    days: list[int] = []
+    if cadence in ("weekly", "biweekly"):
+        step = 7 if cadence == "weekly" else 14
+        d = anchor
+        if d < start:
+            # Jump forward to the first occurrence on/after the month start.
+            n = (start - d).days // step
+            d = anchor + timedelta(days=n * step)
+            while d < start:
+                d += timedelta(days=step)
+        while d <= end:
+            if d >= anchor and (end_d is None or d <= end_d):
+                days.append(d.day)
+            d += timedelta(days=step)
+    elif cadence in ("monthly", "quarterly", "annual"):
+        step = {"monthly": 1, "quarterly": 3, "annual": 12}[cadence]
+        y, m = int(month[:4]), int(month[5:7])
+        total = (y - anchor.year) * 12 + (m - anchor.month)
+        if total >= 0 and total % step == 0:
+            day = min(anchor.day, period_days)
+            occ = date(y, m, day)
+            if occ >= anchor and (end_d is None or occ <= end_d):
+                days.append(day)
+    return sorted(days)
+
+
+def bill_occurrences_in_month(
+    bills: list[BillSchedule], month: str,
+) -> list[BillOccurrence]:
+    """Expand every bill schedule into its occurrences within ``month`` (pure,
+    ADR-094). A monthly bill yields one occurrence; a weekly bill yields ~4–5."""
+    out: list[BillOccurrence] = []
+    for b in bills:
+        for day in _occurrence_days(b.cadence, b.anchor_date, month, b.end_date):
+            out.append(BillOccurrence(
+                category_id=b.category_id, day=day, amount=abs(b.amount),
+            ))
+    return out
+
+
 def compute_burndown(
     *,
     perimeter_txns: list[PerimeterTxn],
@@ -420,6 +502,7 @@ def compute_burndown(
     parent_map: Optional[dict[int, Optional[int]]] = None,
     budgeted_ids: Optional[set[int]] = None,
     kind_map: Optional[dict[int, str]] = None,
+    bill_occurrences: Optional[list[BillOccurrence]] = None,
 ) -> BurnDownData:
     """Build the burn-down series for one month and one scope (pure).
 
@@ -429,33 +512,22 @@ def compute_burndown(
     series reconciles with the matrix's Actual cell). Without it the scope is
     the whole budget: every **expense-kind** outflow counts (income inflows
     and transfers are excluded — this is a spending-depletion chart).
+
+    ``bill_occurrences`` (ADR-094) are the scope's scheduled-bill occurrences in
+    the month (expanded via ``bill_occurrences_in_month``). When present the
+    **ideal** becomes a staircase (each bill a step at its due day, the
+    discretionary remainder spread linearly) and the **projection** = actual +
+    the *unpaid* bill occurrences (amount-matched against actuals, an overdue
+    one stepping at today) + the discretionary run-rate on non-bill spend only.
+    A paid bill drops out, so its line goes flat. With no bills this is the old
+    behaviour exactly (linear ideal, run-rate projection).
     """
     today = today or date.today()
     parent_map = parent_map or {}
     budgeted_ids = budgeted_ids or set()
     kind_map = kind_map or {}
+    bill_occurrences = list(bill_occurrences or [])
     start, end, period_days = _month_bounds(month)
-
-    # Outflow magnitude by day-of-month for the chosen scope.
-    by_day: dict[int, Decimal] = {}
-    for txn in perimeter_txns:
-        if txn.amount >= 0:               # depletion = outflows only
-            continue
-        if txn.posted_date[:7] != month:
-            continue
-        if target_category_id is None:
-            if kind_map.get(txn.category_id, "expense") != "expense":
-                continue
-        else:
-            bucket = nearest_budgeted_ancestor(
-                txn.category_id, parent_map, budgeted_ids,
-            )
-            if bucket != target_category_id:
-                continue
-        day_idx = (date.fromisoformat(txn.posted_date) - start).days + 1
-        if day_idx < 1 or day_idx > period_days:
-            continue
-        by_day[day_idx] = by_day.get(day_idx, _ZERO) + (-txn.amount)
 
     if today < start:
         today_day = 0
@@ -464,13 +536,62 @@ def compute_burndown(
     else:
         today_day = (today - start).days + 1
 
-    x_days = list(range(1, period_days + 1))
-    ideal = [
-        _round2(total_planned * Decimal(d) / Decimal(period_days))
-        for d in x_days
-    ]
+    # A single-category scope only sees its own bills.
+    if target_category_id is not None:
+        bill_occurrences = [
+            o for o in bill_occurrences if o.category_id == target_category_id
+        ]
+    bill_cats = {o.category_id for o in bill_occurrences}
+    bills_total = sum((o.amount for o in bill_occurrences), _ZERO)
 
-    # Actual cumulative outflow, only through today (no future actuals exist).
+    # Outflow magnitude by day for the scope (total), split bill vs discretionary.
+    by_day: dict[int, Decimal] = {}
+    disc_by_day: dict[int, Decimal] = {}            # non-bill spend (run-rate base)
+    bill_actual_by_cat: dict[int, Decimal] = {}     # bill-category actual through today
+    for txn in perimeter_txns:
+        if txn.amount >= 0:               # depletion = outflows only
+            continue
+        if txn.posted_date[:7] != month:
+            continue
+        bucket = nearest_budgeted_ancestor(
+            txn.category_id, parent_map, budgeted_ids,
+        )
+        if target_category_id is None:
+            if kind_map.get(txn.category_id, "expense") != "expense":
+                continue
+        elif bucket != target_category_id:
+            continue
+        day_idx = (date.fromisoformat(txn.posted_date) - start).days + 1
+        if day_idx < 1 or day_idx > period_days:
+            continue
+        amt = -txn.amount
+        by_day[day_idx] = by_day.get(day_idx, _ZERO) + amt
+        if bucket in bill_cats:
+            if day_idx <= today_day:
+                bill_actual_by_cat[bucket] = (
+                    bill_actual_by_cat.get(bucket, _ZERO) + amt
+                )
+        else:
+            disc_by_day[day_idx] = disc_by_day.get(day_idx, _ZERO) + amt
+
+    x_days = list(range(1, period_days + 1))
+
+    # ── Ideal: staircase of planned bills + linear discretionary remainder. ──
+    bill_step_by_day: dict[int, Decimal] = {}
+    for o in bill_occurrences:
+        bill_step_by_day[o.day] = bill_step_by_day.get(o.day, _ZERO) + o.amount
+    disc_planned = total_planned - bills_total
+    if disc_planned < _ZERO:
+        disc_planned = _ZERO
+    ideal: list[Decimal] = []
+    bills_cum = _ZERO
+    for d in x_days:
+        bills_cum += bill_step_by_day.get(d, _ZERO)
+        ideal.append(_round2(
+            bills_cum + disc_planned * Decimal(d) / Decimal(period_days)
+        ))
+
+    # ── Actual: cumulative total outflow through today (no future actuals). ──
     actual_x: list[int] = []
     actual: list[Decimal] = []
     running = _ZERO
@@ -478,16 +599,47 @@ def compute_burndown(
         running += by_day.get(d, _ZERO)
         actual_x.append(d)
         actual.append(_round2(running))
+    actual_to_date = actual[-1] if actual else _ZERO
 
-    # Projection: extend the observed average daily rate to month-end.
+    # ── Unpaid bills: amount-match each occurrence against its category's actual.
+    unpaid: list[tuple[int, Decimal]] = []   # (effective_day, unpaid_amount)
+    for cat in bill_cats:
+        budget_left = bill_actual_by_cat.get(cat, _ZERO)
+        for o in sorted(
+            (o for o in bill_occurrences if o.category_id == cat),
+            key=lambda o: o.day,
+        ):
+            if budget_left >= o.amount:
+                budget_left -= o.amount                      # fully paid
+            else:
+                unpaid_amt = o.amount - (budget_left if budget_left > _ZERO else _ZERO)
+                budget_left = _ZERO
+                eff_day = max(o.day, today_day)               # overdue → step at today
+                unpaid.append((eff_day, _round2(unpaid_amt)))
+    unpaid_cum_by_day: dict[int, Decimal] = {}
+    for eff_day, amt in unpaid:
+        unpaid_cum_by_day[eff_day] = unpaid_cum_by_day.get(eff_day, _ZERO) + amt
+
+    # ── Discretionary run-rate (non-bill spend only). ──
+    disc_to_date = sum(
+        (v for d, v in disc_by_day.items() if d <= today_day), _ZERO,
+    )
+    disc_rate = (
+        disc_to_date / Decimal(today_day) if today_day > 0 else _ZERO
+    )
+
+    # ── Projection: actual + unpaid bill steps + discretionary run-rate. ──
     proj_x: list[int] = []
     proj: list[Decimal] = []
-    if 1 <= today_day < period_days and actual:
-        spent = actual[-1]
-        rate = spent / Decimal(today_day)
+    if 1 <= today_day < period_days:
+        bills_added = _ZERO
         for d in range(today_day, period_days + 1):
+            bills_added += unpaid_cum_by_day.get(d, _ZERO)
             proj_x.append(d)
-            proj.append(_round2(spent + rate * Decimal(d - today_day)))
+            proj.append(_round2(
+                actual_to_date + bills_added
+                + disc_rate * Decimal(d - today_day)
+            ))
 
     projected_end = (
         proj[-1] if proj else (actual[-1] if actual else _ZERO)

@@ -72,6 +72,10 @@ class _PendingLine:
     seed_from_history: bool
     existing: bool             # already saved (vs newly added this session)
     line_id: Optional[int]     # set when existing
+    # ADR-094: a schedule this line should be a *bill* for. Set on lines pulled
+    # in from the "Add bills from schedules…" picker (and on existing bills so
+    # the marker shows); a new bill line is created via add_bill_line_from_schedule.
+    scheduled_txn_id: Optional[int] = None
 
 
 class BudgetSetupDialog(QDialog):
@@ -188,6 +192,7 @@ class BudgetSetupDialog(QDialog):
                 category_id=ln.category_id, label=label, kind=ln.category_kind,
                 role=ln.role, rollover=ln.rollover, seed_from_history=False,
                 existing=True, line_id=ln.id,
+                scheduled_txn_id=ln.scheduled_txn_id,
             ))
         self._removed_line_ids: list[int] = []
 
@@ -210,12 +215,20 @@ class BudgetSetupDialog(QDialog):
         populate_btn.clicked.connect(self._on_populate)
         add_btn = QPushButton("Add…")
         add_btn.clicked.connect(self._on_add)
+        bills_btn = QPushButton("Add bills from schedules…")
+        bills_btn.setToolTip(
+            "Pull your scheduled transactions in as bill envelopes (ADR-094) — "
+            "each gets a due date on the schedule and its monthly amounts seeded "
+            "from the schedule. The burn-down then projects it and stops once paid."
+        )
+        bills_btn.clicked.connect(self._on_add_bills)
         edit_btn = QPushButton("Edit…")
         edit_btn.clicked.connect(self._on_edit)
         rm_btn = QPushButton("Remove")
         rm_btn.clicked.connect(self._on_remove)
         btn_row.addWidget(populate_btn)
         btn_row.addWidget(add_btn)
+        btn_row.addWidget(bills_btn)
         btn_row.addWidget(edit_btn)
         btn_row.addWidget(rm_btn)
         btn_row.addStretch(1)
@@ -229,11 +242,48 @@ class BudgetSetupDialog(QDialog):
         for pl in self._pending:
             r = self._table.rowCount()
             self._table.insertRow(r)
-            self._table.setItem(r, 0, QTableWidgetItem(pl.label))
+            # ADR-094: a clock marker flags a bill (scheduled-backed) line.
+            label = f"⏰ {pl.label}" if pl.scheduled_txn_id is not None else pl.label
+            self._table.setItem(r, 0, QTableWidgetItem(label))
             role_text = "—" if pl.kind == "income" else _ROLE_LABELS[pl.role]
             self._table.setItem(r, 1, QTableWidgetItem(role_text))
             roll = "Rolls over" if pl.rollover == "accumulate" else "Resets"
             self._table.setItem(r, 2, QTableWidgetItem(roll))
+
+    def _on_add_bills(self) -> None:
+        """ADR-094: pull existing schedules into the budget as bill lines. The
+        user multi-selects from the schedules not already budgeted; fields are
+        seeded from each schedule (and stay adjustable in the matrix afterwards)."""
+        candidates = self._repo.list_schedules_not_in_budget(self._budget.id)
+        # Don't re-offer schedules already queued as pending bills this session.
+        pending_sids = {
+            pl.scheduled_txn_id for pl in self._pending
+            if pl.scheduled_txn_id is not None
+        }
+        candidates = [s for s in candidates if s.id not in pending_sids]
+        if not candidates:
+            QMessageBox.information(
+                self, "Add bills from schedules",
+                "No schedules left to add — every active expense/transfer "
+                "schedule is already in this budget.",
+            )
+            return
+        dlg = _PickSchedulesDialog(candidates, parent=None)
+        if dlg.exec() != QDialog.Accepted or not dlg.selected:
+            return
+        for s in dlg.selected:
+            label = (
+                f"{s.category_name} ({s.category_parent_name})"
+                if getattr(s, "category_parent_name", "") else s.category_name
+            )
+            self._pending.append(_PendingLine(
+                category_id=s.category_id, label=label, kind=s.category_kind,
+                role="bills" if s.category_kind == "expense" else "discretionary",
+                rollover="accumulate" if s.category_kind == "expense" else "none",
+                seed_from_history=False, existing=False, line_id=None,
+                scheduled_txn_id=s.id,
+            ))
+        self._reload_table()
 
     def _on_add(self) -> None:
         existing_ids = {pl.category_id for pl in self._pending}
@@ -309,6 +359,14 @@ class BudgetSetupDialog(QDialog):
             today = date.today().isoformat()
             first_month = self._budget.months()[0]
             for pl in self._pending:
+                # ADR-094: a newly-pulled bill creates a scheduled-backed line
+                # with its allocations seeded from the schedule.
+                if not pl.existing and pl.scheduled_txn_id is not None:
+                    self._repo.add_bill_line_from_schedule(
+                        budget_id=self._budget.id,
+                        schedule_id=pl.scheduled_txn_id,
+                    )
+                    continue
                 line_id = self._repo.add_budget_line(
                     budget_id=self._budget.id, category_id=pl.category_id,
                     role=pl.role, rollover=pl.rollover,
@@ -573,5 +631,52 @@ class _LineDialog(QDialog):
             seed_from_history=self._seed_cb.isChecked() and self._edit is None,
             existing=self._edit.existing if self._edit else False,
             line_id=self._edit.line_id if self._edit else None,
+            # Preserve the bill link across an Edit… (ADR-094).
+            scheduled_txn_id=self._edit.scheduled_txn_id if self._edit else None,
         )
+        self.accept()
+
+
+class _PickSchedulesDialog(QDialog):
+    """Multi-select picker of schedules to pull into the budget as bills
+    (ADR-094). Each row is a checkable schedule; ``selected`` holds the chosen
+    ``ScheduledTxnRow``s on accept."""
+
+    def __init__(self, schedules, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add bills from schedules")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        self._schedules = schedules
+        self.selected: list = []
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(
+            "Tick the scheduled transactions to add as bill envelopes. Their "
+            "monthly amounts are seeded from the schedule and stay adjustable."
+        ))
+        self._list = QListWidget()
+        for s in schedules:
+            mag = abs(s.estimated_amount)
+            item = QListWidgetItem(
+                f"{s.category_name}  ·  {s.payee_name or '—'}  ·  "
+                f"{mag:,.2f}  ·  {s.cadence}"
+            )
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setData(Qt.UserRole, s)
+            self._list.addItem(item)
+        lay.addWidget(self._list)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_ok)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _on_ok(self) -> None:
+        self.selected = [
+            self._list.item(i).data(Qt.UserRole)
+            for i in range(self._list.count())
+            if self._list.item(i).checkState() == Qt.Checked
+        ]
         self.accept()

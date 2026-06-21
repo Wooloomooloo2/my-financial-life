@@ -214,12 +214,19 @@ def compute_holdings_view(
     txns: list[TransactionRow],
     opening_balance: Decimal,
     latest_prices: dict[int, tuple[float, str]],
+    multipliers: Optional[dict[int, float]] = None,
 ) -> HoldingsView:
     """Replay an investment account's transactions into a HoldingsView.
 
     ``latest_prices`` maps security_id → (price, as_of_date 'YYYY-MM-DD').
     Securities absent from the map are 'unpriced' (market value shown as —).
+
+    ``multipliers`` maps security_id → price multiplier (ADR-093): every
+    ``shares × price`` value site is scaled by it, so a bond (face/100) or an
+    option (contract_size) values correctly while a stock (the default 1.0,
+    used for any security absent from the map) is unchanged.
     """
+    mults = multipliers or {}
     # FIFO lot queues + realized-gain accumulators, keyed by security_id.
     lots: dict[int, deque[_Lot]] = {}
     pending: dict[int, deque[_Lot]] = {}    # transfer pen: ShrsOut → matching ShrsIn
@@ -258,10 +265,16 @@ def compute_holdings_view(
                 # Any shares beyond a matching transfer-out fall through to the
                 # explicit-price / unknown-basis handling for the remainder.
             known = True
+            accrued = (
+                float(t.accrued_interest) if t.accrued_interest is not None else 0.0
+            )
             if t.action.strip().lower() in _CASH_BUY_ACTIONS and t.amount != 0:
-                lot_cost = float(abs(t.amount))        # true net cash (incl. commission)
+                # True net cash (incl. commission) less prepaid accrued interest,
+                # which is reclaimed at the first coupon and isn't cost (ADR-093).
+                lot_cost = float(abs(t.amount)) - accrued
             elif t.price is not None:
-                lot_cost = float(t.price) * remaining_in  # reinvest / shares-in with a price
+                # reinvest / shares-in with a price — × multiplier (ADR-093).
+                lot_cost = float(t.price) * remaining_in * mults.get(sid, 1.0)
             else:
                 lot_cost = 0.0                           # transferred-in, basis unknown
                 known = False
@@ -283,7 +296,13 @@ def compute_holdings_view(
                 if unmatched > _EPS:
                     incomplete[sid] = True
                 continue
-            proceeds = float(abs(t.amount))
+            # Accrued interest received on a bond sale is interest, not capital
+            # proceeds — exclude it from the realized-gain calc (ADR-093), the
+            # mirror of excluding it from a buy's basis.
+            sell_accrued = (
+                float(t.accrued_interest) if t.accrued_interest is not None else 0.0
+            )
+            proceeds = float(abs(t.amount)) - sell_accrued
             remaining = qty
             cost_removed = 0.0
             queue = lots[sid]
@@ -339,7 +358,9 @@ def compute_holdings_view(
         price_entry = latest_prices.get(sid)
         if price_entry is not None:
             price, price_date = price_entry
-            market_value = _to_money(shares * price)
+            # Value scales by the security's multiplier (bond %-of-par / option
+            # contract size); the displayed last_price stays the raw quote.
+            market_value = _to_money(shares * price * mults.get(sid, 1.0))
             unrealized = market_value - cost_basis
             pct = float(unrealized / cost_basis * 100) if cost_basis != 0 else None
             holdings_mv += market_value
@@ -404,14 +425,20 @@ class ValuePoint:
     fully_priced: bool
 
 
-def _lot_cost(action: str, amount: Decimal, price: Optional[float], qty: float) -> tuple[float, bool]:
+def _lot_cost(
+    action: str, amount: Decimal, price: Optional[float], qty: float,
+    mult: float = 1.0, accrued: float = 0.0,
+) -> tuple[float, bool]:
     """Per-lot total cost + whether the basis is known. Matches the rule in
-    compute_holdings_view: cash-funded buys use the true net cash; reinvests /
-    transfers-in use price × qty; an unknown price means basis 0 / unknown."""
+    compute_holdings_view: cash-funded buys use the true net cash (less any
+    accrued interest, which is prepaid coupon, not cost — ADR-093); reinvests /
+    transfers-in use price × qty × multiplier (the multiplier scales a bond's
+    %-of-par or an option's contract size, ADR-093); an unknown price means
+    basis 0 / unknown."""
     if action.strip().lower() in _CASH_BUY_ACTIONS and amount != 0:
-        return float(abs(amount)), True
+        return float(abs(amount)) - accrued, True
     if price is not None:
-        return float(price) * qty, True
+        return float(price) * qty * mult, True
     return 0.0, False
 
 
@@ -419,6 +446,7 @@ def compute_value_history(
     txns: list[TransactionRow],
     sample_dates: list,
     price_series_by_security: dict[int, list[tuple[str, float]]],
+    multipliers: Optional[dict[int, float]] = None,
 ) -> list[ValuePoint]:
     """Replay the account's investment transactions, snapshotting cost basis +
     market value at each ``sample_dates`` entry (date or 'YYYY-MM-DD' string).
@@ -426,7 +454,11 @@ def compute_value_history(
     ``price_series_by_security`` maps security_id → ascending ``(date, price)``
     pairs (e.g. Repository.price_series). Nearest-prior price per sample date is
     an in-memory bisect, so this is a single O(txns + securities×samples) pass.
+
+    ``multipliers`` (ADR-093) scales each ``shares × price`` value by the
+    security's bond/option multiplier; default 1.0 per security.
     """
+    mults = multipliers or {}
     samples = sorted({
         d.isoformat() if isinstance(d, date) else str(d) for d in sample_dates
     })
@@ -472,7 +504,14 @@ def compute_value_history(
                     )
                     if remaining_in <= _EPS:
                         continue
-                cost, known = _lot_cost(t.action, t.amount, t.price, remaining_in)
+                accrued = (
+                    float(t.accrued_interest)
+                    if t.accrued_interest is not None else 0.0
+                )
+                cost, known = _lot_cost(
+                    t.action, t.amount, t.price, remaining_in,
+                    mults.get(sid, 1.0), accrued,
+                )
                 lots[sid].append(
                     _Lot(qty=remaining_in, unit_cost=cost / remaining_in, known_basis=known)
                 )
@@ -504,7 +543,7 @@ def compute_value_history(
             invested += cost
             price = nearest_price(sid, sample)
             if price is not None:
-                market += shares * price
+                market += shares * price * mults.get(sid, 1.0)
             else:
                 market += cost
                 fully = False
@@ -608,6 +647,7 @@ def compute_returns(
     price_series_by_security: dict[int, list[tuple[str, float]]],
     window_start: str,
     security_ids: Optional[set[int]] = None,
+    multipliers: Optional[dict[int, float]] = None,
 ) -> ReturnsResult:
     """Replay one investment account's transactions into a total-return view.
 
@@ -622,9 +662,12 @@ def compute_returns(
     ``sample_dates`` are date/ISO points within the window (e.g. month-ends);
     ``price_series_by_security`` maps security_id → ascending ``(date, price)``
     pairs (Repository.price_series); ``security_ids`` (``None`` = all) restricts
-    the view to a subset of securities. Currency-agnostic — the caller converts
-    when aggregating accounts of differing currencies.
+    the view to a subset of securities. ``multipliers`` (ADR-093) scales each
+    ``shares × price`` / ``qty × price`` market-value site by the security's
+    bond/option multiplier (default 1.0). Currency-agnostic — the caller
+    converts when aggregating accounts of differing currencies.
     """
+    mults = multipliers or {}
     samples = sorted({
         d.isoformat() if isinstance(d, date) else str(d) for d in sample_dates
     })
@@ -682,7 +725,7 @@ def compute_returns(
                 continue
             price_ = nearest_price(sid_, on_date)
             if price_ is not None:
-                mv_ = shares_ * price_
+                mv_ = shares_ * price_ * mults.get(sid_, 1.0)
             else:
                 mv_ = sum(lot.qty * lot.unit_cost for lot in queue_)
                 fully = False
@@ -734,7 +777,7 @@ def compute_returns(
                         if in_window:
                             price = nearest_price(sid, t.posted_date)
                             if price is not None:
-                                mv = _to_money(qty * price)
+                                mv = _to_money(qty * price * mults.get(sid, 1.0))
                             else:
                                 mv = _to_money(_peek_fifo_cost(
                                     pending.setdefault(sid, deque()), qty))
@@ -746,7 +789,14 @@ def compute_returns(
                         )
                         if remaining_in <= _EPS:
                             continue
-                    cost, known = _lot_cost(t.action, t.amount, t.price, remaining_in)
+                    accrued = (
+                        float(t.accrued_interest)
+                        if t.accrued_interest is not None else 0.0
+                    )
+                    cost, known = _lot_cost(
+                        t.action, t.amount, t.price, remaining_in,
+                        mults.get(sid, 1.0), accrued,
+                    )
                     lots[sid].append(
                         _Lot(qty=remaining_in, unit_cost=cost / remaining_in, known_basis=known)
                     )
@@ -773,7 +823,7 @@ def compute_returns(
                         if in_window:
                             price = nearest_price(sid, t.posted_date)
                             if price is not None:
-                                mv = _to_money(qty * price)
+                                mv = _to_money(qty * price * mults.get(sid, 1.0))
                             else:
                                 mv = _to_money(_peek_fifo_cost(lots[sid], qty))
                                 irr_fully = False
@@ -781,7 +831,13 @@ def compute_returns(
                             add_flow(sid, t.posted_date, mv)
                         _transfer_out(lots[sid], qty, pending.setdefault(sid, deque()))
                         continue
-                    proceeds = float(abs(t.amount))
+                    # Accrued interest received on a bond sale is interest, not
+                    # capital proceeds (ADR-093) — exclude from realized gain.
+                    sell_accrued = (
+                        float(t.accrued_interest)
+                        if t.accrued_interest is not None else 0.0
+                    )
+                    proceeds = float(abs(t.amount)) - sell_accrued
                     remaining = qty
                     cost_removed = 0.0
                     queue = lots[sid]
@@ -818,7 +874,7 @@ def compute_returns(
             invested += cost
             price = nearest_price(sid, sample)
             if price is not None:
-                market += shares * price
+                market += shares * price * mults.get(sid, 1.0)
             else:
                 market += cost
                 fully = False
@@ -875,7 +931,7 @@ def compute_returns(
             tot_cost += cost_basis
             price = nearest_price(sid, last_sample)
             if price is not None:
-                market_value = _to_money(shares * price)
+                market_value = _to_money(shares * price * mults.get(sid, 1.0))
                 unrealized = market_value - cost_basis
                 priced = True
                 tot_mv += market_value
