@@ -47,6 +47,7 @@ from mfl_desktop.currencies import (
     ISO_4217_CURRENCIES,
     currency_label,
 )
+from mfl_desktop import resources
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui import tokens
 
@@ -72,9 +73,18 @@ class FirstRunDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setSpacing(14)
 
+        # Brand header: app icon (ADR-103) beside the welcome heading.
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(resources.app_pixmap(48))
+        icon_lbl.setFixedSize(48, 48)
+        icon_lbl.setScaledContents(True)
         heading = QLabel("Welcome to My Financial Life")
         tokens.themed(heading, "QLabel { font-size: 18px; font-weight: 600; color: {heading}; }")
-        outer.addWidget(heading)
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        header.addWidget(icon_lbl, 0, Qt.AlignVCenter)
+        header.addWidget(heading, 1, Qt.AlignVCenter)
+        outer.addLayout(header)
 
         intro = QLabel(
             "Your whole financial life — accounts, investments and budgets — "

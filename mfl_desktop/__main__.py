@@ -150,6 +150,13 @@ def main(argv: list[str] | None = None) -> int:
     from mfl_desktop import resources
     app.setWindowIcon(resources.app_icon())
 
+    # ADR-103: branded splash, shown before the slow launch work (DB open +
+    # migrations + window build) and closed when the main window appears.
+    from mfl_desktop.ui.splash import make_splash
+    splash = make_splash()
+    splash.show()
+    app.processEvents()  # paint it now, before we block on the DB
+
     # ADR-099: local rotating log + last-resort crash handler. Set up now the
     # app name (hence the log dir) is known, before any window or DB work, so
     # an early failure is still captured. No telemetry — the log is local only.
@@ -253,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
 
     win = RegisterWindow(repo, account_iri)
     win.show()
+    splash.finish(win)  # ADR-103: close the splash once the window is up
 
     # First-run onboarding (ADR-098): only when we just seeded a brand-new
     # file this launch. Lets the user pick a base currency + name the first

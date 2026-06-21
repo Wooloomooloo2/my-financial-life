@@ -15,12 +15,14 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QVBoxLayout,
     QWidget,
 )
 
 from mfl_desktop import license_service
+from mfl_desktop import resources
 from mfl_desktop.licensing import (
     STATE_EXPIRED,
     STATE_INVALID,
@@ -41,6 +43,12 @@ class AboutDialog(QDialog):
         self.setWindowTitle(f"About {APP_NAME}")
         self.setModal(True)
 
+        # Brand header: app icon (ADR-103) beside the name + version + build.
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(resources.app_pixmap(64))
+        icon_lbl.setFixedSize(64, 64)
+        icon_lbl.setScaledContents(True)
+
         title = QLabel(APP_NAME)
         tokens.themed(title, "QLabel { font-size: 20px; font-weight: 700; color: {heading}; }")
         version = QLabel(f"Version {__version__}")
@@ -49,6 +57,17 @@ class AboutDialog(QDialog):
         # in a packaged build. Surfaced here and in Help ▸ Export Diagnostics.
         build = QLabel(f"Build {build_revision()}")
         tokens.themed(build, "color: {subtle}; font-size: 11px;")
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        text_col.addWidget(title)
+        text_col.addWidget(version)
+        text_col.addWidget(build)
+        text_col.addStretch(1)
+        header = QHBoxLayout()
+        header.setSpacing(14)
+        header.addWidget(icon_lbl, 0, Qt.AlignTop)
+        header.addLayout(text_col, 1)
 
         tagline = QLabel(
             "Your whole financial life — accounts, investments and budgets — "
@@ -90,9 +109,7 @@ class AboutDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 16)
         layout.setSpacing(10)
-        layout.addWidget(title)
-        layout.addWidget(version)
-        layout.addWidget(build)
+        layout.addLayout(header)
         layout.addSpacing(4)
         layout.addWidget(tagline)
         layout.addWidget(line)

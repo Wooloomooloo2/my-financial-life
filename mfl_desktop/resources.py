@@ -48,3 +48,12 @@ def app_icon():
         if master.exists():
             icon.addFile(str(master))
     return icon
+
+
+def app_pixmap(size: int = 64):
+    """A crisp square ``QPixmap`` of the app icon at ``size`` px — for showing
+    the icon *inside* the UI (About box, first-run welcome, splash). Picks the
+    best source from the multi-resolution icon. May be a null pixmap if the
+    asset is missing (callers should guard with ``isNull()``)."""
+    from PySide6.QtCore import QSize
+    return app_icon().pixmap(QSize(size, size))
