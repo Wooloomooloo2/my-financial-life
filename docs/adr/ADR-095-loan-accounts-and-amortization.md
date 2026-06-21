@@ -58,7 +58,7 @@ The interest amount is dynamic (it shrinks as the balance falls), computed at po
 ### Surfaces
 
 - **Loan dialog** (create/edit) captures every field; the payment and rate can each be **typed or calculated** (a "Calculate from term" affordance), and the split-mode rows (paying account, interest source, interest category) reveal only in `split` mode.
-- **Amortization window** — the schedule **table** (date · payment · interest · principal · balance) + a **paintEvent chart** (declining balance with the interest/principal split per period) + a summary (payoff date, total interest). A **Record payment** action posts the next split.
+- **The amortization schedule lives on the Account Summary screen.** The summary window already swaps its layout by family (cash → cash-flow chart + Top-N; investment → holdings dashboard); a loan now gets a dedicated **`LoanScheduleWidget`** (`loan_schedule_view.py`) — a summary line (balance owed, payment, payoff date, remaining interest), a **paintEvent declining-balance chart**, the full **schedule table** (date · payment · interest · principal · balance), and a **Record payment** action that posts the next split. A loan deliberately has **no Top-Payees / Top-Categories panels** — it has no payees or spending categories to rank. Reached the way every account summary is: double-click the sidebar row, **Account ▸ Summary…**, or the sidebar context menu; **New Loan…** opens it on the new account.
 - **Net Worth** — loans are liabilities by family; they flow into the Debts side with no new code beyond the family.
 - **Home dashboard** — loans surface in the accounts-by-family card and the net-worth card (reusing ADR-075 compute).
 - **Budget** — on loan creation the app **offers to track the payoff** as an ADR-058 R4b **pay-down goal** (the loan account at 100%, target 0 by the payoff date), so the principal commitment shows in the budget's Goals section with its required monthly; the interest flows through as an expense when payments post. (Consistent with ADR-094's "ask before mutating the budget".)
@@ -72,7 +72,7 @@ Shipped: account + terms + dialog, amortization table + chart, split-aware **Rec
 ## Consequences
 
 - Loans are first-class: they amortize, show a schedule + chart, post payments that correctly split principal vs interest, count as debt in Net Worth, and surface on Home and in the budget.
-- New `loan` family + `loan_std` type, `loan` terms table (migration 0031), pure `loan_calc.py`, `Repository` loan CRUD + `post_loan_payment`, a loan dialog, and an amortization window. No change to existing accounts.
+- New `loan` family + `loan_std` type, `loan` terms table (migration 0031), pure `loan_calc.py`, `Repository` loan CRUD + `post_loan_payment`, a loan dialog, and a `LoanScheduleWidget` embedded in the Account Summary. No change to existing accounts.
 - The budget pay-down goal reuses ADR-058 R4b wholesale — no new budget object — and the payment split reuses ADR-020 transfers + ADR-051 splits, so the integrations rest on proven code.
 
 ### Rejected alternatives

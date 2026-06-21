@@ -1,21 +1,21 @@
-"""Amortization schedule window for a loan account (ADR-095).
+"""Loan amortization view — a reusable widget (ADR-095).
 
-Opened from a loan account (sidebar context menu / Account menu). Shows the
-loan's forward amortization — a summary (current balance, monthly payment,
-payoff date, total remaining interest), a **balance-decline chart**, and the
-full **schedule table** (payment · interest · principal · balance per month).
-A **Record payment** button posts the next split through
-``Repository.post_loan_payment``; **Edit loan…** reopens the loan dialog.
+The loan's forward amortization on one panel: a summary line (balance owed,
+monthly payment, payoff date, remaining interest), a **balance-decline chart**,
+the full **schedule table** (payment · interest · principal · balance per
+month), and **Record payment** / **Edit loan…** actions. Embedded in the
+Account Summary screen for loan-family accounts (where the owner expects it,
+alongside the other accounts' summaries) — the same view a cash account gets a
+cash-flow chart, an investment account gets a holdings dashboard, and a loan
+gets its amortization.
 
-Single instance per loan account, keyed in the register window. paintEvent
-chart per the ADR-026 chart-engine preference.
+paintEvent chart per the ADR-026 chart-engine preference.
 """
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF,
 )
@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMainWindow,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -51,8 +50,8 @@ class _BalanceChart(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._rows: list = []
-        self.setMinimumHeight(200)
-        self.setMaximumHeight(260)
+        self.setMinimumHeight(180)
+        self.setMaximumHeight(240)
 
     def set_rows(self, rows) -> None:
         self._rows = rows or []
@@ -77,7 +76,6 @@ class _BalanceChart(QWidget):
         def x(i): return rect.left() + (i / max(1, n - 1)) * rect.width()
         def y(v): return rect.bottom() - (v / ymax) * rect.height() if ymax else rect.bottom()
 
-        # gridlines + y labels
         p.setFont(self._small(p))
         steps = int(round(ymax / ystep)) if ystep > 0 else 0
         fm = QFontMetrics(p.font())
@@ -91,7 +89,6 @@ class _BalanceChart(QWidget):
             p.drawText(int(rect.left() - fm.horizontalAdvance(lbl) - 8),
                        int(yy + fm.ascent() / 2 - 2), lbl)
 
-        # filled balance area + line
         pts = [QPointF(x(i), y(float(r.balance))) for i, r in enumerate(rows)]
         poly = QPolygonF(pts)
         poly.append(QPointF(rect.right(), rect.bottom()))
@@ -103,14 +100,12 @@ class _BalanceChart(QWidget):
         for i in range(1, len(pts)):
             p.drawLine(pts[i - 1], pts[i])
 
-        # x labels (first / mid / last year)
         p.setPen(QPen(QColor(_ch.chart_axis_ink())))
         for i in (0, n // 2, n - 1):
             yr = rows[i].date[:4]
             xx = x(i)
             p.drawText(int(xx - fm.horizontalAdvance(yr) / 2),
                        int(rect.bottom() + fm.ascent() + 4), yr)
-        # baseline
         p.setPen(QPen(QColor(_ch.chart_axis_ink())))
         p.drawLine(int(rect.left()), int(rect.bottom()),
                    int(rect.right()), int(rect.bottom()))
@@ -120,19 +115,20 @@ class _BalanceChart(QWidget):
         f = QFont(p.font()); set_pt(f, 8); return f
 
 
-class AmortizationWindow(QMainWindow):
-    """Per-loan amortization schedule + chart + record-payment."""
+class LoanScheduleWidget(QWidget):
+    """Reusable amortization panel for a loan account. Call ``reload()`` after a
+    change. Emits ``changed`` when a payment is recorded or the loan is edited,
+    so a host (e.g. the Account Summary) can refresh sibling views."""
+
+    changed = Signal()
 
     def __init__(self, repo: Repository, account_id: int, parent=None) -> None:
         super().__init__(parent)
         self._repo = repo
         self._account_id = account_id
-        self.setMinimumSize(820, 600)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        v = QVBoxLayout(central)
-        v.setContentsMargins(14, 14, 14, 14)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(10)
 
         self._summary = QLabel("")
@@ -172,20 +168,19 @@ class AmortizationWindow(QMainWindow):
         btn_row.addStretch(1)
         v.addLayout(btn_row)
 
-        self._reload()
+        self.reload()
 
     # ── data ──
 
-    def _reload(self) -> None:
+    def reload(self) -> None:
         loan = self._repo.get_loan(self._account_id)
         acct = next(
             (a for a in self._repo.list_accounts(include_closed=True)
              if a.id == self._account_id), None,
         )
         if loan is None or acct is None:
-            self.setWindowTitle("Amortization")
+            self._summary.setText("Not a loan account.")
             return
-        self.setWindowTitle(f"Amortization — {acct.name}")
         sym = _CCY_SYMBOLS.get(acct.currency, acct.currency + " ")
         balance = self._repo.loan_current_balance(self._account_id)
         payment = self._repo.effective_payment(loan)
@@ -232,8 +227,7 @@ class AmortizationWindow(QMainWindow):
     # ── actions ──
 
     def _on_record(self) -> None:
-        loan = self._repo.get_loan(self._account_id)
-        if loan is None:
+        if self._repo.get_loan(self._account_id) is None:
             return
         if QMessageBox.question(
             self, "Record payment",
@@ -242,17 +236,19 @@ class AmortizationWindow(QMainWindow):
         ) != QMessageBox.Yes:
             return
         try:
+            from datetime import date
             self._repo.post_loan_payment(
-                account_id=self._account_id,
-                posted_date=__import__("datetime").date.today().isoformat(),
+                account_id=self._account_id, posted_date=date.today().isoformat(),
             )
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Record payment", str(e))
             return
-        self._reload()
+        self.reload()
+        self.changed.emit()
 
     def _on_edit(self) -> None:
         from mfl_desktop.ui.loan_dialog import LoanDialog
         dlg = LoanDialog(self._repo, account_id=self._account_id, parent=self)
         if dlg.exec() == QDialog.Accepted:
-            self._reload()
+            self.reload()
+            self.changed.emit()

@@ -383,6 +383,10 @@ class AccountSummaryWindow(QMainWindow):
         # chart + a roomy searchable Holdings tab — instead of the cash
         # account's single-page chart/info/top-N layout.
         self._is_investment = self._account.family == "investment"
+        # A loan account (ADR-095) gets its amortization schedule + chart instead
+        # of the cash account's chart / info / Top-N panels (a loan has no payees
+        # or spending categories to rank).
+        self._is_loan = self._account.family == "loan"
         # Value-chart selection state (investment only): which securities are
         # charted (None = all) and whether to collapse to one portfolio bar.
         self._chart_selected_ids: Optional[set[int]] = None
@@ -391,12 +395,15 @@ class AccountSummaryWindow(QMainWindow):
         # chart-selection controls can re-render without recomputing.
         self._holdings_view: Optional[HoldingsView] = None
 
-        info_panel = self._build_info_panel()
-        content = (
-            self._build_investment_tabs(info_panel)
-            if self._is_investment
-            else self._build_cash_layout(info_panel)
-        )
+        if self._is_loan:
+            content = self._build_loan_layout()
+        else:
+            info_panel = self._build_info_panel()
+            content = (
+                self._build_investment_tabs(info_panel)
+                if self._is_investment
+                else self._build_cash_layout(info_panel)
+            )
 
         container = QWidget()
         container.setObjectName("summaryRoot")
@@ -409,6 +416,22 @@ class AccountSummaryWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self.reload()
+
+    def _build_loan_layout(self) -> QWidget:
+        """A loan account's amortization schedule + balance chart (ADR-095). No
+        cash-flow chart, info panel, or Top-N — a loan has no payees or spending
+        categories to rank."""
+        from mfl_desktop.ui.loan_schedule_view import LoanScheduleWidget
+        self._loan_view = LoanScheduleWidget(self._repo, self._account_id)
+        self._loan_view.changed.connect(self._on_loan_changed)
+        return self._loan_view
+
+    def _on_loan_changed(self) -> None:
+        """A recorded payment / edit moved the balance — keep the cached account
+        (and so the title) current."""
+        self._account = (
+            self._repo.get_account_by_id(self._account_id) or self._account
+        )
 
     def _build_cash_layout(self, info_panel: QWidget) -> QWidget:
         """The original single-page layout (ADR-033/034): chart | info over a
@@ -1061,6 +1084,11 @@ class AccountSummaryWindow(QMainWindow):
             return
         self._account = account
         self.setWindowTitle(f"{account.name} · Summary")
+        # A loan has its own self-contained view (ADR-095) — none of the
+        # cash/investment info-panel, statements, or Top-N widgets exist.
+        if self._is_loan:
+            self._loan_view.reload()
+            return
         self._refresh_statements_row()
 
         txns = self._repo.list_transactions_for_account(self._account_id)
