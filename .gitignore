@@ -8,6 +8,10 @@ data/
 *.mfl
 *.mfl-wal
 *.mfl-shm
+# Exception: the fictional public demo file IS versioned (screenshots dataset).
+# Its transient -wal/-shm sidecars stay ignored — the generator checkpoints so
+# the committed .mfl is self-contained.
+!mfl_public.mfl
 .env
 dist/
 build/
