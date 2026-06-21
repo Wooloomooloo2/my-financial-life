@@ -215,12 +215,14 @@ def main(argv: list[str] | None = None) -> int:
     apply_theme(app, repo.get_setting(THEME_SETTING_KEY, "light") or "light")
 
     account_iri = args.account_iri
+    just_seeded = False
     if account_iri is None:
         row = repo.connection.execute(
             "SELECT iri FROM account ORDER BY id LIMIT 1"
         ).fetchone()
         if row is None and seed_if_empty:
             _seed_starter_db(repo)
+            just_seeded = True
             row = repo.connection.execute(
                 "SELECT iri FROM account ORDER BY id LIMIT 1"
             ).fetchone()
@@ -238,6 +240,19 @@ def main(argv: list[str] | None = None) -> int:
 
     win = RegisterWindow(repo, account_iri)
     win.show()
+
+    # First-run onboarding (ADR-098): only when we just seeded a brand-new
+    # file this launch. Lets the user pick a base currency + name the first
+    # account, and optionally jump straight into importing a statement.
+    if just_seeded:
+        from mfl_desktop.ui.first_run_dialog import FirstRunDialog
+        welcome = FirstRunDialog(repo, parent=win)
+        welcome.exec()
+        win.refresh_after_first_run()
+        if welcome.wants_import():
+            iri = welcome.starter_account_iri()
+            if iri is not None:
+                win.start_first_run_import(iri)
 
     # Background launch refresh of FX rates (ADR-035). No-op when no API
     # key is set, when the last refresh was less than 24h ago, or when

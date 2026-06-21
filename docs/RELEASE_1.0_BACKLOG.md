@@ -95,9 +95,10 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 - [ ] Iconography + app icon (needed anyway for stores). **Still open — needs design assets (also a K-workstream store requirement).**
 
 ### P5 — First-run onboarding & help
-- [ ] A short first-run flow: create/seed file, pick base currency, optional "import your first statement" nudge.
-- [ ] In-app **Help / Getting Started** (links to the website docs) + an **About** box (version, license, links, attributions).
-- [ ] Crash-safety review: confirm the ADR-057 snapshot/checkpoint story holds under the packaged (sandboxed?) file locations — see K-workstream sandbox note.
+**Status: DONE 2026-06-21 (ADR-098).**
+- [x] A short first-run flow: create/seed file, **pick base currency**, optional **"import your first statement" nudge** — `FirstRunDialog` (`first_run_dialog.py`), shown once when `__main__` just seeded a brand-new file. New `Repository.set_base_currency` (writes the `setting` the app reads + `person.base_currency` together); applies the chosen currency + name to the starter account; "Import a statement…" routes to `RegisterWindow.start_first_run_import`. Closes the long-standing GBP-hardcode gap.
+- [x] In-app **Help / Getting Started** (links to website docs) + an **About** box — Help ▸ Getting Started + Visit Website open `version.DOCS_URL`/`WEBSITE_URL` (placeholders on the launch domain until W1 ships); About box already shipped (ADR-079).
+- [x] Crash-safety review — **confirmed, no change needed for 1.0.** K0 = direct signed+notarised (non-sandboxed), so the ADR-057 Snapshots/Library-beside-the-file + appdata model works as-is; the sandbox conflict is a K3/1.1+ concern (already scoped there).
 
 ### P6 — Release engineering hygiene
 - [ ] Pin dependencies; produce a reproducible build env per OS.
@@ -284,7 +285,7 @@ K3 App Stores (sandbox work) → C3 store listings → F3 SimpleFIN/Plaid ship e
 - [x] **P1** one date-format + one period helper; no duplicated preset/label code. _(Part A ADR-082; Part B `make_date_edit`/`make_period_combo` adoption 2026-06-18.)_
 - [x] **P2** every report drills to the shared transactions view; no dead-end charts. _(ADR-083, 2026-06-18 — Net Worth drills to the Account Summary page per owner fork; Budget keeps its precise bespoke register.)_
 - [x] **P3** the four overlap candidates resolved (schedules entry points, filter-dialog base class, transfer-match unification, drill consistency). _(P3a ADR-084; P3b ADR-096; schedules + drill-consistency confirmed no-change.)_
-- [ ] **P4/P5** UI polished, dark-mode-complete, first-run + Help + About present.
+- [~] **P4/P5** UI polished, dark-mode-complete, first-run + Help + About present. _(P5 done ADR-098; P4 dark-mode + button audit done ADR-097 — typography-scale round + app icon still open.)_
 - [ ] **K1/K2** signed + notarised macOS DMG and signed Windows installer that pass Gatekeeper/SmartScreen, with working auto-update.
 - [ ] **B1/B2** company formed, Privacy Policy + ToS published at stable URLs.
 - [ ] **W1/W2** website live with showcase, download, buy, privacy, terms, support.

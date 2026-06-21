@@ -14,3 +14,10 @@ APP_NAME = "My Financial Life"
 
 # The major version a license must entitle to unlock this build (ADR-079).
 APP_EDITION = int(__version__.split(".", 1)[0])
+
+# Product links (ADR-098). Single source of truth for the website + docs URLs
+# the in-app Help menu and onboarding point at. Placeholders on the launch
+# domain (the same domain as license_service.BUY_URL) until the W-workstream
+# site is live; update here when it ships.
+WEBSITE_URL = "https://myfinancial.life"
+DOCS_URL = "https://myfinancial.life/docs/getting-started"

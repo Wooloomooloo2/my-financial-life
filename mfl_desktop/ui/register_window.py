@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop import data_library, snapshots
 from mfl_desktop import license_service
+from mfl_desktop import version
 from mfl_desktop.app_session import remember_last_db
 from mfl_desktop.licensing import STATE_EXPIRED, STATE_TRIAL
 from mfl_desktop.account_summary import bills_due_summary
@@ -526,6 +527,22 @@ class RegisterWindow(QMainWindow):
         self._import_latest_action.setEnabled(True)
         self._set_account_action_state(account_selected=True)
 
+    def refresh_after_first_run(self) -> None:
+        """Re-render the surfaces the onboarding dialog can change — the Home
+        dashboard (display currency) and the sidebar (account name + balance
+        currency label). Cheap; called once after the welcome dialog closes."""
+        self._home_view.refresh()
+        self._refresh_sidebar_balances()
+
+    def start_first_run_import(self, account_iri: str) -> None:
+        """Navigate to ``account_iri`` and open the import picker on it
+        (ADR-098 first-run "Import a statement…"). Imports always target a
+        specific account, so we select it first; ``_show_account`` enables
+        the import action, then we reuse the normal import handler."""
+        self._show_account(account_iri)
+        if self._account is not None:
+            self._on_import()
+
     def _show_all_transactions(self) -> None:
         self._main_stack.setCurrentIndex(1)
         self._account = None
@@ -969,8 +986,19 @@ class RegisterWindow(QMainWindow):
         self._dark_mode_action.toggled.connect(self._on_toggle_dark_mode)
         view_menu.addAction(self._dark_mode_action)
 
-        # ── Help ▸ About / licensing (ADR-079) ──
+        # ── Help ▸ Getting Started / About / licensing (ADR-079, ADR-098) ──
         help_menu = self.menuBar().addMenu("&Help")
+        getting_started_action = QAction("&Getting Started…", self)
+        getting_started_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(version.DOCS_URL))
+        )
+        help_menu.addAction(getting_started_action)
+        website_action = QAction("&Visit Website…", self)
+        website_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(version.WEBSITE_URL))
+        )
+        help_menu.addAction(website_action)
+        help_menu.addSeparator()
         about_action = QAction("&About My Financial Life…", self)
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)

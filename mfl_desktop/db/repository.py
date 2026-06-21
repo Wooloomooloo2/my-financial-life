@@ -6108,6 +6108,30 @@ class Repository:
             self.rollback()
             raise
 
+    def set_base_currency(self, code: str) -> None:
+        """Set the file's base (reporting) currency (ADR-098, first-run).
+
+        The app reads the base currency from the ``setting`` table key
+        ``base_currency`` (Home dashboard, Net Worth, sidebar, FX refresh),
+        with the seed also stamping ``person.base_currency``. This writes
+        **both** in one transaction so the setting (what's read) and the
+        person row (the seeded MRL-boundary value) stay in agreement.
+        ``code`` is uppercased; empty is rejected."""
+        clean = (code or "").strip().upper()
+        if not clean:
+            raise ValueError("Base currency cannot be empty.")
+        try:
+            self._conn.execute(
+                "INSERT INTO setting (key, value) VALUES ('base_currency', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (clean,),
+            )
+            self._conn.execute("UPDATE person SET base_currency = ?", (clean,))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
     # ── Foreign-exchange rates (ADR-035) ───────────────────────────────────
 
     def upsert_fx_rate(
