@@ -30,7 +30,7 @@ from mfl_desktop.licensing import (
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.license_dialog import LicenseDialog
-from mfl_desktop.version import APP_NAME, __version__
+from mfl_desktop.version import APP_NAME, __version__, build_revision
 
 
 class AboutDialog(QDialog):
@@ -45,6 +45,10 @@ class AboutDialog(QDialog):
         tokens.themed(title, "QLabel { font-size: 20px; font-weight: 700; color: {heading}; }")
         version = QLabel(f"Version {__version__}")
         tokens.themed(version, "color: {muted};")
+        # Build metadata (ADR-099) — "source" in a dev checkout, a CI revision
+        # in a packaged build. Surfaced here and in Help ▸ Export Diagnostics.
+        build = QLabel(f"Build {build_revision()}")
+        tokens.themed(build, "color: {subtle}; font-size: 11px;")
 
         tagline = QLabel(
             "Your whole financial life — accounts, investments and budgets — "
@@ -86,6 +90,7 @@ class AboutDialog(QDialog):
         layout.setSpacing(10)
         layout.addWidget(title)
         layout.addWidget(version)
+        layout.addWidget(build)
         layout.addSpacing(4)
         layout.addWidget(tagline)
         layout.addWidget(line)

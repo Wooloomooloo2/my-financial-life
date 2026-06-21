@@ -1,0 +1,22 @@
+# My Financial Life — DESKTOP app pinned runtime dependencies (ADR-099).
+#
+# This is the dependency set for the PySide6 + SQLite desktop application
+# (the live 1.0 target, code under mfl_desktop/). The repository root's
+# `requirements.txt` pins the LEGACY v0.1 FastAPI/Oxigraph web app (now in
+# maintenance mode) — it does NOT include PySide6 and must not be used to
+# build the desktop app. Install with:
+#
+#     pip install -r requirements-desktop.txt
+#
+# Python: 3.11+ (developed/tested on CPython 3.12–3.13; uses PEP 604/585
+# typing with `from __future__ import annotations`). PyInstaller packaging
+# is per-OS (no cross-compile) — see ADR-078.
+#
+# Versions pinned to what the app is developed and verified against. The
+# whole runtime surface is just three direct third-party packages — the FX
+# and security-price clients use stdlib `urllib` (no `requests`), and
+# everything else (sqlite3, decimal, csv, json, …) is the standard library.
+
+PySide6==6.11.1        # Qt for Python — the entire UI + QSettings + QtCharts-free paintEvent charts
+cryptography==49.0.0   # Ed25519 offline license verification (ADR-079) + bank-feed credential crypto
+ofxtools==0.9.5        # OFX / QFX statement parsing + OFX Direct Connect (ADR-077); imported lazily at the import sites

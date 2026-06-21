@@ -144,6 +144,13 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)  # ADR-079: surfaced in About + diagnostics
 
+    # ADR-099: local rotating log + last-resort crash handler. Set up now the
+    # app name (hence the log dir) is known, before any window or DB work, so
+    # an early failure is still captured. No telemetry — the log is local only.
+    from mfl_desktop import diagnostics
+    diagnostics.setup_logging()
+    diagnostics.install_excepthook()
+
     # Resolve which database to open (ADR-050 rule 2 + ADR-016 + ADR-092).
     # Precedence, highest first:
     #   1. --db          explicit caller intent

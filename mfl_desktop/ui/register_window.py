@@ -1002,6 +1002,10 @@ class RegisterWindow(QMainWindow):
         about_action = QAction("&About My Financial Life…", self)
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
+        diagnostics_action = QAction("Export &Diagnostics…", self)
+        diagnostics_action.triggered.connect(self._on_export_diagnostics)
+        help_menu.addAction(diagnostics_action)
+        help_menu.addSeparator()
         enter_license_action = QAction("Enter &License…", self)
         enter_license_action.triggered.connect(self._on_enter_license)
         help_menu.addAction(enter_license_action)
@@ -1016,6 +1020,37 @@ class RegisterWindow(QMainWindow):
         from mfl_desktop.ui.about_dialog import AboutDialog
         AboutDialog(self).exec()
         self._refresh_license_cue()
+
+    def _on_export_diagnostics(self) -> None:
+        """Help ▸ Export Diagnostics (ADR-099) — write the local diagnostics
+        blob (environment, paths, recent log) to a user-chosen file for a
+        support email. Nothing is sent anywhere; the user controls the file."""
+        from mfl_desktop import diagnostics
+        default = str(
+            QStandardPaths.writableLocation(QStandardPaths.DesktopLocation)
+            or Path.home()
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export diagnostics",
+            str(Path(default) / "mfl-diagnostics.txt"),
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            written = diagnostics.write_diagnostics(Path(path), repo=self._repo)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Export failed",
+                f"Could not write the diagnostics file:\n\n{e}",
+            )
+            return
+        QMessageBox.information(
+            self, "Diagnostics exported",
+            f"Saved to:\n{written}\n\nAttach this to a support email. It "
+            f"contains app + system info and recent log lines — no account "
+            f"data or passwords.",
+        )
 
     def _on_enter_license(self) -> None:
         """Help ▸ Enter License — paste + validate a key (ADR-079)."""

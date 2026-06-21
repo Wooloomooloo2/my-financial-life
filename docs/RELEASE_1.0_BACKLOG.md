@@ -101,10 +101,11 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 - [x] Crash-safety review — **confirmed, no change needed for 1.0.** K0 = direct signed+notarised (non-sandboxed), so the ADR-057 Snapshots/Library-beside-the-file + appdata model works as-is; the sandbox conflict is a K3/1.1+ concern (already scoped there).
 
 ### P6 — Release engineering hygiene
-- [ ] Pin dependencies; produce a reproducible build env per OS.
-- [ ] Version string + build metadata surfaced in About and in crash reports.
-- [ ] Basic automated test pass green on both OSes before each packaged build (the offscreen Qt smoke pattern already exists).
-- [ ] Decide a crash/error-reporting approach (local log + "export diagnostics" button is the privacy-friendly minimum; Sentry-style is heavier and has its own privacy implications).
+**Status: dep-pinning + version/build metadata + crash log/diagnostics + test gate done 2026-06-21 (ADR-099); per-OS PyInstaller build env stays with the packaging round (ADR-078 / K1-K2).**
+- [~] Pin dependencies; produce a reproducible build env per OS. **Deps pinned (ADR-099):** new `requirements-desktop.txt` pins the *actual* desktop runtime — PySide6 / cryptography / ofxtools (the old root `requirements.txt` is the legacy web-app's deps and didn't even list PySide6). Per-OS PyInstaller specs + full lock are deferred to the packaging round (ADR-078, no build scripts yet).
+- [x] Version string + build metadata surfaced in About and in crash reports — **DONE (ADR-099).** `version.build_revision()`/`build_string()` (reads a CI-stamped `_build_info.py`, "source" fallback); About shows a "Build {rev}" line; diagnostics + the crash log header carry the full env string.
+- [x] Basic automated test pass green — **DONE (ADR-099).** `tests/` IRI guard green + an import-all/`compileall` smoke (135 modules import clean offscreen) as the cross-module gate. CI matrix on both OSes pends the packaging round.
+- [x] Decide a crash/error-reporting approach — **DONE (ADR-099): local-log + Export Diagnostics, no telemetry.** `diagnostics.py` = rotating file log + a last-resort excepthook (logs + a non-fatal "your data is safe / log is here" dialog) + Help ▸ **Export Diagnostics…** (PII-light blob to a user-chosen file). Nothing leaves the device.
 
 ---
 

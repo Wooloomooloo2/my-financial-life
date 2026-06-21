@@ -21,3 +21,23 @@ APP_EDITION = int(__version__.split(".", 1)[0])
 # site is live; update here when it ships.
 WEBSITE_URL = "https://myfinancial.life"
 DOCS_URL = "https://myfinancial.life/docs/getting-started"
+
+
+def build_revision() -> str:
+    """A short build identifier surfaced in About + diagnostics (ADR-099).
+
+    A packaged build's CI step writes an optional ``mfl_desktop/_build_info.py``
+    with ``REVISION`` (e.g. a git short SHA) and ``BUILD_DATE``; this reads it
+    if present. A plain source checkout has no such file, so it falls back to
+    ``"source"`` — never runs git at runtime (fragile in a frozen app)."""
+    try:
+        from mfl_desktop import _build_info  # type: ignore
+    except Exception:
+        return "source"
+    rev = getattr(_build_info, "REVISION", "") or "source"
+    return str(rev)
+
+
+def build_string() -> str:
+    """``"1.0.0 (source)"`` — version + build revision, for one-line display."""
+    return f"{__version__} ({build_revision()})"

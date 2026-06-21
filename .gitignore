@@ -18,3 +18,6 @@ build/
 # License-signing private key (ADR-079) — must NEVER be committed or bundled.
 tools/.dev_signing_key
 *.signing_key
+# Build metadata stamped by the packaging CI step (ADR-099) — generated, not
+# source. A plain checkout has none and falls back to the "source" revision.
+mfl_desktop/_build_info.py
