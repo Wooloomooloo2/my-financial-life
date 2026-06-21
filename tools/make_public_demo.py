@@ -91,7 +91,7 @@ def main() -> int:
     # Accounts --------------------------------------------------------------
     current = repo.create_account(
         name="Everyday Current", type_key="cash", currency="GBP",
-        opening_balance=D("3500.00"),
+        opening_balance=D("7000.00"),
     )
     emergency = repo.create_account(
         name="Emergency Fund", type_key="savings", currency="GBP",
@@ -126,26 +126,6 @@ def main() -> int:
         opening_balance=D("15500.00"),
     )
 
-    # Loan accounts (ADR-095) — a mortgage on the home + car finance. The
-    # opening balance is set to the current principal owed (original − already
-    # paid); the amortization schedule projects forward from there.
-    mortgage_id = repo.create_loan_account(
-        name="Home Mortgage", currency="GBP",
-        original_amount=D("260000.00"), principal_paid=D("22400.00"),
-        interest_rate=4.49, compounding="monthly", term_months=300,  # 25 yr
-        start_date=day(2026, 1, 1), payment_day=1,
-        track_mode="split", interest_source="loan",
-        payment_account_id=current.id,
-    )
-    car_loan_id = repo.create_loan_account(
-        name="Car Finance", currency="GBP",
-        original_amount=D("14000.00"), principal_paid=D("5200.00"),
-        interest_rate=6.9, compounding="monthly", term_months=60,
-        start_date=day(2026, 1, 15), payment_day=15,
-        track_mode="split", interest_source="payment",
-        payment_account_id=current.id,
-    )
-
     transfer_cat = repo.get_default_transfer_category_id()
 
     # Categories: use the seeded tree, add a few subcategories for richer
@@ -177,6 +157,31 @@ def main() -> int:
 
     def cat(name: str) -> int:
         return subs.get(name) or top(name)
+
+    # Loan accounts (ADR-095), created now that categories exist (the mortgage
+    # books its interest under Rent / Mortgage so the budget housing line still
+    # captures the true cost). Opening balance = current principal owed
+    # (original − already paid); monthly payments (posted in the loop below)
+    # then build the register history and pay it down.
+    mortgage_id = repo.create_loan_account(
+        name="Home Mortgage", currency="GBP",
+        original_amount=D("230000.00"), principal_paid=D("23000.00"),  # owed 207k
+        interest_rate=4.49, compounding="monthly", term_months=300,    # 25 yr
+        payment=D("1150.00"),                                          # = old rent
+        start_date=day(2025, 7, 1), payment_day=1,
+        track_mode="split", interest_source="payment",
+        payment_account_id=current.id,
+        interest_category_id=cat("Rent / Mortgage"),
+    )
+    car_loan_id = repo.create_loan_account(
+        name="Car Finance", currency="GBP",
+        original_amount=D("14000.00"), principal_paid=D("5200.00"),    # owed 8.8k
+        interest_rate=6.9, compounding="monthly", term_months=60,
+        start_date=day(2025, 7, 15), payment_day=15,
+        track_mode="split", interest_source="payment",
+        payment_account_id=current.id,
+        # interest_category left default → 'Interest ▸ Loan interest'
+    )
 
     # Payees are created on demand.
     def pay(name: str) -> int:
@@ -223,9 +228,21 @@ def main() -> int:
         earn(emergency, day(yr, mo, 28), jitter(34, 0.2), "Investment income",
              "Interest", "Interest")
 
-        # Housing & bills (current account direct debits)
-        spend(current, day(yr, mo, 1), 1150, "Rent / Mortgage",
-              "Greenfield Lettings", "Rent")
+        # Mortgage + car-loan payments (ADR-095) — each splits into principal
+        # (a transfer that pays the loan down) + interest (an expense on the
+        # paying account), building the loans' register history. The mortgage
+        # interest lands under Rent / Mortgage so the budget housing line still
+        # shows the true cost.
+        repo.post_loan_payment(
+            account_id=mortgage_id, posted_date=day(yr, mo, 1),
+            status=status_for(day(yr, mo, 1)),
+        )
+        repo.post_loan_payment(
+            account_id=car_loan_id, posted_date=day(yr, mo, 15),
+            status=status_for(day(yr, mo, 15)),
+        )
+
+        # Other housing & bills (current account direct debits)
         spend(current, day(yr, mo, 5), 168, "Council Tax", "City Council")
         # Energy varies by season (higher in winter)
         season = 1.5 if mo in (12, 1, 2) else (0.7 if mo in (6, 7, 8) else 1.0)
@@ -446,7 +463,7 @@ def main() -> int:
         (current.id, "balance"), (card.id, "available_credit"),
     ])
     plan = {
-        "Salary": 3950, "Rent / Mortgage": 1150, "Groceries": 360,
+        "Salary": 3950, "Rent / Mortgage": 800, "Groceries": 360,
         "Energy": 110, "Water": 41, "Broadband & Mobile": 84,
         "Council Tax": 168, "Restaurants": 120, "Coffee": 30,
         "Takeaway": 45, "Fuel": 95, "Public transport": 50,
@@ -465,12 +482,12 @@ def main() -> int:
 
     # Pull a couple of bills in (ADR-094) so the stepped burn-down shows
     # scheduled bills — these link the existing envelopes to a schedule.
-    rent_sched = repo.create_scheduled_txn(
-        account_id=current.id, payee_name="Greenfield Lettings",
-        category_id=cat("Rent / Mortgage"), estimated_amount=D("-1150.00"),
-        cadence="monthly", anchor_date="2026-01-01",
+    council_sched = repo.create_scheduled_txn(
+        account_id=current.id, payee_name="City Council",
+        category_id=cat("Council Tax"), estimated_amount=D("-168.00"),
+        cadence="monthly", anchor_date="2026-01-05",
     )
-    repo.add_bill_line_from_schedule(budget_id=budget.id, schedule_id=rent_sched)
+    repo.add_bill_line_from_schedule(budget_id=budget.id, schedule_id=council_sched)
     gym_sched = repo.create_scheduled_txn(
         account_id=current.id, payee_name="PureGym",
         category_id=cat("Gym"), estimated_amount=D("-42.00"),
