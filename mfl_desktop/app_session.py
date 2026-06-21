@@ -42,17 +42,23 @@ def remember_last_db(path: Path | str) -> None:
 
 
 def last_db_path() -> Optional[Path]:
-    """The most-recently-opened database, or ``None`` if nothing is recorded
-    or the recorded file no longer exists (moved / deleted / different
-    machine). Callers fall through to their normal default in that case."""
+    """The most-recently-opened database path as recorded, or ``None`` if
+    nothing is recorded.
+
+    Deliberately does **not** check existence (ADR-092 amendment): a recorded
+    file can be *temporarily* absent — an iCloud/Dropbox file not yet
+    materialised, a removable/network drive not mounted — and the launch
+    resolver must distinguish "no pointer set" from "pointer set but the file
+    isn't here right now" so a transient absence never causes the pointer to be
+    silently overwritten with a fallback default. The caller decides what to do
+    when the path doesn't currently exist."""
     try:
         raw = QSettings().value(_LAST_DB_KEY)
     except Exception:
         return None
     if not raw:
         return None
-    path = Path(str(raw))
-    return path if path.exists() else None
+    return Path(str(raw))
 
 
 # ── Licensing (ADR-079) ────────────────────────────────────────────────────

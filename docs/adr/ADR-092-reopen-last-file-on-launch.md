@@ -58,4 +58,17 @@ Last-opened sits **above** the cwd dev convenience so "reopen what I was working
 
 ## Verification
 
-Offscreen (isolated `QSettings` ini): round-trip of `remember_last_db` / `last_db_path`; a recorded-then-deleted path returns `None` (caller falls through); a relative path is stored absolute. Offscreen Qt: constructing `RegisterWindow` on file A then driving `_swap_repository` to file B updates the remembered file to B, and importing `__main__` (which pulls in `register_window` + `app_session`) raises no circular import.
+Offscreen (isolated `QSettings` ini): round-trip of `remember_last_db` / `last_db_path`; a relative path is stored absolute. Offscreen Qt: constructing `RegisterWindow` on file A then driving `_swap_repository` to file B updates the remembered file to B, and importing `__main__` (which pulls in `register_window` + `app_session`) raises no circular import.
+
+---
+
+## Amendment — 2026-06-21 (transient-absence robustness)
+
+**Reported:** after working in an **iCloud-Drive** `.mfl` and quitting, the next launch opened the default `mfl_dev.mfl` instead of the remembered file. The recorded pointer was correct, but the launch resolver had two destructive interactions with files that can be *temporarily* absent (iCloud/Dropbox offload, removable/network drives):
+
+1. **`last_db_path()` filtered on `exists()`**, returning `None` for a not-yet-materialised iCloud file — indistinguishable from "no pointer set" — so the resolver fell through to the default.
+2. The launch then **re-recorded the fallback default**, *clobbering* the pointer. So a single transient absence permanently lost the user's last file, even after iCloud rehydrated it. (Compounded by `Repository()` bootstrapping a fresh DB at any missing path, which would silently *recreate* a remembered file that was genuinely gone.)
+
+**Fix:** `last_db_path()` now returns the recorded path **without an existence check** — "set but not here right now" is distinct from "unset". The resolver does the existence check itself and tracks a `fell_back_from_remembered` flag: when a remembered pointer exists but the file can't be used this launch (absent, or present-but-won't-open), it opens the default **for this session only and does not overwrite the pointer**. The next launch retries once the file is back. A genuinely-corrupt remembered file still falls back the same way (pointer kept, user re-points via File ▸ Open). Existence is checked before handing the path to `Repository`, so a missing file is never recreated.
+
+**Verified** offscreen: a recorded iCloud-style file, then "evicted" (deleted) → launch opens the legacy default, `fell_back` true, **pointer preserved** (not clobbered); file restored → next launch reopens it; a missing remembered file is never recreated by the resolver.

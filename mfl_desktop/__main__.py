@@ -147,12 +147,18 @@ def main(argv: list[str] | None = None) -> int:
     # Resolve which database to open (ADR-050 rule 2 + ADR-016 + ADR-092).
     # Precedence, highest first:
     #   1. --db          explicit caller intent
-    #   2. last-opened   the file open at last quit (ADR-092), if it still exists
+    #   2. last-opened   the file open at last quit (ADR-092), if present now
     #   3. legacy cwd db dev convenience for a checked-out repo (mfl_dev.mfl/.db)
     #   4. appdata default  the OS-standard per-user file (seeded if empty)
     seed_if_empty = False
     remembered = None if args.db is not None else last_db_path()
     legacy_db = next((p for p in LEGACY_DB_CANDIDATES if p.exists()), None)
+    # Set when a remembered pointer exists but we *couldn't use it this launch*
+    # (the file isn't present right now, or won't open) and fell back to a
+    # default. In that case we must NOT overwrite the pointer — the file may be
+    # an iCloud/removable file that's just not materialised yet, and clobbering
+    # it would permanently lose the user's last file (ADR-092 amendment).
+    fell_back_from_remembered = False
     if args.db is not None:
         # Explicit path: the caller asked for a specific file — don't silently
         # create it; point at the CLI if it's missing (unchanged behaviour).
@@ -164,39 +170,45 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-    elif remembered is not None:
+    elif remembered is not None and remembered.exists():
         # Reopen the file the user was working in when they last quit (ADR-092).
-        # last_db_path() already confirmed it exists; if it turns out to be
-        # unreadable we fall back to the default below.
+        # If it turns out to be unreadable we fall back below without clobbering.
         db_path = remembered
     elif legacy_db is not None:
         # Dev convenience: a checked-out repo with the historical working DB in
         # cwd keeps launching against it with no --db flag. The canonical .mfl
         # wins over a legacy .db when both are present (ADR-016/050).
         db_path = legacy_db
+        fell_back_from_remembered = remembered is not None
     else:
         # Default: the OS-standard per-user location. Repository() bootstraps
         # the schema and mkdirs the parent on first run; we own this file, so
         # an empty one gets seeded with a starter account below.
         db_path = _appdata_db_path()
         seed_if_empty = True
+        fell_back_from_remembered = remembered is not None
 
     try:
         repo = Repository(db_path)
-    except Exception as e:
+    except Exception:
         if remembered is not None and db_path == remembered:
-            # The remembered file exists but won't open (corrupt / not an MFL
-            # file). Don't strand the user on a dead launch — fall back to the
-            # normal default and let them File ▸ Open the right one.
+            # The remembered file is present but won't open (corrupt / not an
+            # MFL file). Don't strand the user on a dead launch — fall back to
+            # the normal default and let them File ▸ Open the right one. Keep
+            # the pointer (don't clobber) so a transient cause can recover.
             db_path = legacy_db if legacy_db is not None else _appdata_db_path()
             seed_if_empty = legacy_db is None
+            fell_back_from_remembered = True
             repo = Repository(db_path)
         else:
             raise
 
     # Persist the file we actually opened so the next launch reopens it
-    # (ADR-092). File ▸ Open updates this again at runtime.
-    remember_last_db(db_path)
+    # (ADR-092) — UNLESS we fell back from a remembered pointer that was only
+    # temporarily unavailable, in which case keeping the pointer lets the next
+    # launch retry once the file is back. File ▸ Open updates it at runtime.
+    if not fell_back_from_remembered:
+        remember_last_db(db_path)
 
     # ADR-076: apply the persisted light/dark theme now the DB is open (before
     # any window is shown, so there's no flash). Default light.
