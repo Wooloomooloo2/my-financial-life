@@ -144,6 +144,12 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)  # ADR-079: surfaced in About + diagnostics
 
+    # ADR-101: the brand app icon (window / taskbar / dock). The packaged
+    # bundle icon (.icns/.ico) is set by the build step; this is the runtime
+    # window icon. No-op if the asset is missing.
+    from mfl_desktop import resources
+    app.setWindowIcon(resources.app_icon())
+
     # ADR-099: local rotating log + last-resort crash handler. Set up now the
     # app name (hence the log dir) is known, before any window or DB work, so
     # an early failure is still captured. No telemetry — the log is local only.
