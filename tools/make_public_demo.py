@@ -126,6 +126,26 @@ def main() -> int:
         opening_balance=D("15500.00"),
     )
 
+    # Loan accounts (ADR-095) — a mortgage on the home + car finance. The
+    # opening balance is set to the current principal owed (original − already
+    # paid); the amortization schedule projects forward from there.
+    mortgage_id = repo.create_loan_account(
+        name="Home Mortgage", currency="GBP",
+        original_amount=D("260000.00"), principal_paid=D("22400.00"),
+        interest_rate=4.49, compounding="monthly", term_months=300,  # 25 yr
+        start_date=day(2026, 1, 1), payment_day=1,
+        track_mode="split", interest_source="loan",
+        payment_account_id=current.id,
+    )
+    car_loan_id = repo.create_loan_account(
+        name="Car Finance", currency="GBP",
+        original_amount=D("14000.00"), principal_paid=D("5200.00"),
+        interest_rate=6.9, compounding="monthly", term_months=60,
+        start_date=day(2026, 1, 15), payment_day=15,
+        track_mode="split", interest_source="payment",
+        payment_account_id=current.id,
+    )
+
     transfer_cat = repo.get_default_transfer_category_id()
 
     # Categories: use the seeded tree, add a few subcategories for richer
@@ -354,6 +374,39 @@ def main() -> int:
     buy(brokerage, day(2026, 1, 13), aapl, 4, 205.00)
     buy(brokerage, day(2026, 1, 13), msft, 2, 462.00)
 
+    # ── A bond + an option in the brokerage (ADR-093) ───────────────────────
+    aapl_bond = repo.get_or_create_security(
+        "Apple Inc 4.2% 2032", "", "Bond",
+        instrument_type="bond", price_multiplier=10.0, face_value=1000.0,
+        coupon_rate=4.2, maturity_date=day(2032, 9, 1), cusip="037833ET3",
+    )
+    aapl_call = repo.get_or_create_security(
+        "AAPL 18-Jun-2027 220 Call", "", "Option",
+        instrument_type="option", price_multiplier=100.0, contract_size=100.0,
+        underlying_symbol="AAPL", strike=220.0, expiry_date=day(2027, 6, 18),
+        option_type="call",
+    )
+    # Fund the positions, then buy: 5 bonds @ 99.50 (% of par) + £accrued, and
+    # 2 call contracts @ 3.40 (premium/share, ×100 multiplier).
+    move(current, brokerage, day(2025, 8, 1), 4600, to_amount=5870)
+    bond_principal = (D("5") * D("1000") * D("99.50") / D("100"))  # 4975.00
+    bond_accrued = D("58.30")
+    repo.insert_transaction(
+        account_id=brokerage.id, posted_date=day(2025, 8, 4),
+        amount=-(bond_principal + bond_accrued), payee_id=None,
+        category_id=top("Savings and investments"), status="Cleared", memo="",
+        action="Buy", security_id=aapl_bond, quantity=D("5"), price=D("99.50"),
+        accrued_interest=bond_accrued, import_hash=None, import_batch_id=None,
+    )
+    repo.insert_transaction(
+        account_id=brokerage.id, posted_date=day(2025, 8, 4),
+        amount=-(D("2") * D("3.40") * D("100")), payee_id=None,
+        category_id=top("Savings and investments"), status="Cleared", memo="",
+        action="Buy", security_id=aapl_call, quantity=D("2"), price=D("3.40"),
+        import_hash=None, import_batch_id=None,
+    )
+    repo.commit()
+
     # ── Price history (monthly close per security) + FX ─────────────────────
     def price_series(sec, p0, p1, ccy):
         for i, (yr, mo) in enumerate(MONTHS):
@@ -370,6 +423,10 @@ def main() -> int:
     price_series(glbl, 178.0, 208.0, "GBP")
     price_series(aapl, 191.0, 219.0, "USD")
     price_series(msft, 441.0, 489.0, "USD")
+    # Bond quotes as a % of par; option as a premium/share. A couple of recent
+    # marks so they carry a market value (×price_multiplier) in Net Worth.
+    price_series(aapl_bond, 99.5, 101.1, "USD")
+    price_series(aapl_call, 3.4, 5.2, "USD")
 
     # FX: monthly USD→GBP (so the brokerage values in the GBP net worth)
     usdgbp = 0.781
@@ -402,6 +459,24 @@ def main() -> int:
         kind = "income" if name == "Salary" else "expense"
         line_id = repo.add_budget_line(budget_id=budget.id, category_id=cid)
         repo.set_line_allocation(line_id, "2026-01", D(amt), scope="all")
+
+    # Track the mortgage pay-off in the budget (ADR-095 → ADR-058 R4b goal).
+    repo.create_loan_paydown_goal(mortgage_id, budget.id)
+
+    # Pull a couple of bills in (ADR-094) so the stepped burn-down shows
+    # scheduled bills — these link the existing envelopes to a schedule.
+    rent_sched = repo.create_scheduled_txn(
+        account_id=current.id, payee_name="Greenfield Lettings",
+        category_id=cat("Rent / Mortgage"), estimated_amount=D("-1150.00"),
+        cadence="monthly", anchor_date="2026-01-01",
+    )
+    repo.add_bill_line_from_schedule(budget_id=budget.id, schedule_id=rent_sched)
+    gym_sched = repo.create_scheduled_txn(
+        account_id=current.id, payee_name="PureGym",
+        category_id=cat("Gym"), estimated_amount=D("-42.00"),
+        cadence="monthly", anchor_date="2026-01-05",
+    )
+    repo.add_bill_line_from_schedule(budget_id=budget.id, schedule_id=gym_sched)
 
     # ── Summary ─────────────────────────────────────────────────────────────
     repo.checkpoint()
