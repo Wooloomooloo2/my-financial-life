@@ -46,6 +46,7 @@ from mfl_desktop.db.repository import (
     TransferCandidate,
 )
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui import type_scale
 from mfl_desktop.ui.transfer_chips import fmt_amount as _fmt_amount, strength_chip as _strength_chip
 
 
@@ -127,7 +128,7 @@ class TransferMatchConfirmDialog(QDialog):
             f"· {candidate.posted_date}"
         )
         amt_lbl.setTextFormat(Qt.RichText)
-        amt_lbl.setStyleSheet("QLabel { font-size: 14px; }")
+        amt_lbl.setStyleSheet(f"QLabel {{ {type_scale.fs(type_scale.LEAD)}; }}")
         row1.addWidget(amt_lbl, 1)
         row1.addWidget(_strength_chip(candidate.strength))
         card_layout.addLayout(row1)

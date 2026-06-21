@@ -87,12 +87,14 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 - [x] **`TransactionsListWindow` only reachable via drill — CONFIRMED intentional** (good detail view; nav is breadcrumb-chip removal + period swap, consistent per ADR-083). No change. _(P3c affordance-audit = this + schedules, recorded in ADR-084.)_
 
 ### P4 — Visual & interaction polish for a paying audience
-**Status: dark-mode pass + button audit done 2026-06-21 (ADR-097); typography-scale + app-icon still open.**
+**Status: COMPLETE 2026-06-21 — dark-mode pass + button audit (ADR-097), brand re-tone to teal+gold (ADR-100), app icon (ADR-101), typography scale (ADR-102).**
 - [x] Consistent dialog sizing, button order (platform-native: macOS vs Windows), default-button + Esc behaviour across all dialogs. **AUDITED → already consistent (ADR-097).** ~40 of ~47 dialogs use `QDialogButtonBox` (native ordering + Esc + role-default for free); the remaining hand-rolled rows are action-toolbar management dialogs (New/Edit/Delete + Close) where a default button would make Enter destructive — correctly left without one. No change required.
 - [x] Dark-mode pass over any surface added since ADR-076 — **DONE (ADR-097).** The newly-called-out surfaces (commission/total-cost investment fields, Bank Feeds, loan, bonds/options) were already clean (paintEvent + `chart_helpers`). Swept the same item-brush bug class ADR-076 r3 fixed and closed four stragglers: `net_worth` "no rate" flag, `investment_returns` gain/loss table + Performers labels, `statements` status column + summary, `transfer_match` picker sentinel — all now resolve `tokens.c(...)` live (light values unchanged). No frozen hex inside `themed()` templates.
 - [ ] Empty-state / first-run polish (the Home dashboard cards already self-hide; verify a brand-new seeded DB looks intentional, not empty/broken). **→ folded into P5 (onboarding).**
-- [ ] Spacing/typography scale (the deferred Arc B round) — at least a consistent scale, not pixel-perfect. **Still open — its own round (subjective).**
-- [ ] Iconography + app icon (needed anyway for stores). **Still open — needs design assets (also a K-workstream store requirement).**
+- [x] Spacing/typography scale (the deferred Arc B round) — at least a consistent scale, not pixel-perfect. **DONE (ADR-102).** Defined `mfl_desktop/ui/type_scale.py` (9 named px steps reverse-engineered from existing use) + folded the two off-scale one-offs (14→LEAD 15, 17→SUBTITLE 18). Every `font-size` now on the scale. (A full `fs()` migration + a spacing-token system noted as an optional future round.)
+- [x] Iconography + app icon (needed anyway for stores). **DONE (ADR-101).** Extracted the MFL hexagon from the brand artwork → `assets/icons/` (PNG set + macOS `.icns` + Windows `.ico`); `resources.py` (frozen-build-safe) wires it as the runtime window/dock icon; `.icns`/`.ico` ready for the packaging step.
+
+_Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold brand token, off the app-icon artwork — see the colour-scheme note below / CLAUDE_CONTEXT._
 
 ### P5 — First-run onboarding & help
 **Status: DONE 2026-06-21 (ADR-098).**
@@ -286,7 +288,7 @@ K3 App Stores (sandbox work) → C3 store listings → F3 SimpleFIN/Plaid ship e
 - [x] **P1** one date-format + one period helper; no duplicated preset/label code. _(Part A ADR-082; Part B `make_date_edit`/`make_period_combo` adoption 2026-06-18.)_
 - [x] **P2** every report drills to the shared transactions view; no dead-end charts. _(ADR-083, 2026-06-18 — Net Worth drills to the Account Summary page per owner fork; Budget keeps its precise bespoke register.)_
 - [x] **P3** the four overlap candidates resolved (schedules entry points, filter-dialog base class, transfer-match unification, drill consistency). _(P3a ADR-084; P3b ADR-096; schedules + drill-consistency confirmed no-change.)_
-- [~] **P4/P5** UI polished, dark-mode-complete, first-run + Help + About present. _(P5 done ADR-098; P4 dark-mode + button audit done ADR-097 — typography-scale round + app icon still open.)_
+- [x] **P4/P5** UI polished, dark-mode-complete, first-run + Help + About present. _(P5 ADR-098; P4 complete — dark-mode/button-audit ADR-097, brand re-tone ADR-100, app icon ADR-101, typography ADR-102.)_
 - [ ] **K1/K2** signed + notarised macOS DMG and signed Windows installer that pass Gatekeeper/SmartScreen, with working auto-update.
 - [ ] **B1/B2** company formed, Privacy Policy + ToS published at stable URLs.
 - [ ] **W1/W2** website live with showcase, download, buy, privacy, terms, support.

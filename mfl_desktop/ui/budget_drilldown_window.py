@@ -39,6 +39,7 @@ from mfl_desktop.ui.delegates import (
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui import type_scale
 
 _COLUMN_WIDTHS = {
     "posted_date": 110, "account_name": 170, "payee_name": 210,
@@ -83,7 +84,9 @@ class BudgetDrillDownWindow(QMainWindow):
         self.resize(1040, 600)
 
         heading = QLabel(title)
-        heading.setStyleSheet("font-size: 17px; font-weight: bold; padding: 2px;")
+        heading.setStyleSheet(
+            f"{type_scale.fs(type_scale.SUBTITLE)}; font-weight: bold; padding: 2px;"
+        )
 
         self._table = QTableView()
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
