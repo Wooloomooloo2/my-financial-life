@@ -79,11 +79,11 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 - [x] Drill consistency audited — Sankey/I&E/Returns all open the one `TransactionsListWindow`; Net Worth opens the canonical Account Summary; Budget keeps its precise bespoke register (documented).
 
 ### P3 — Remove overlapping functionality ⭐ (owner explicitly asked)
-**Status: P3a shipped 2026-06-18 (ADR-084 — the big rock); P3b/P3c remain.** Guiding rule established in ADR-084: consolidate divergent *duplicates of the same thing*, never prune distinct *affordances*.
+**Status: COMPLETE — P3a (ADR-084, 2026-06-18), P3b (ADR-096, 2026-06-21), P3c confirmed no-change.** Guiding rule established in ADR-084: consolidate divergent *duplicates of the same thing*, never prune distinct *affordances*.
 **Candidates (audited):**
 - [x] **Six report filter dialogs ~40% copy-paste — DONE (P3a, ADR-084).** Extracted a **toolkit** `ReportFilterDialogBase` (opt-in builders + shared helpers + statics); each dialog keeps its specials (rollup/securities/top-N/category tree). Constructor signatures + saved `filters_json` unchanged; verified headless across all six.
 - [x] **Schedules' 4 entry points — AUDITED, KEPT.** Confirmed legitimate affordances, not redundancy: Manage ▸ Schedules / filter-bar button (carries the overdue badge) / Home "Bills due" card are three discovery paths to the same `SchedulesDialog`; the right-click "Create Schedule From Transaction" opens a *different* seeded dialog. No amputation.
-- [ ] **P3b — Two transfer-matching UIs** (inline ADR-036 confirm/picker vs Manage ▸ Reconcile Transfers ADR-037) — extract the duplicated `_CHIP_COLOURS` / `_fmt_amount` / strength-chip into a shared `transfer_chips.py` so the two surfaces can't drift; row layouts stay bespoke. **Still pending.**
+- [x] **P3b — Two transfer-matching UIs** (inline ADR-036 confirm/picker vs Manage ▸ Reconcile Transfers ADR-037) — **DONE (ADR-096, 2026-06-21).** Extracted the duplicated `_CHIP_COLOURS` / `_fmt_amount` / strength-chip into shared `mfl_desktop/ui/transfer_chips.py` (`CHIP_COLOURS` / `fmt_amount` / `strength_chip` / `strength_chip_holder`); both dialogs import them aliased to their old private names so call sites are untouched; row layouts stay bespoke. Removed the now-dead locals + unused imports (`QSizePolicy` / `QPalette` / `Decimal` / orphan `_fmt_rate`). Verified offscreen + full app import.
 - [x] **`TransactionsListWindow` only reachable via drill — CONFIRMED intentional** (good detail view; nav is breadcrumb-chip removal + period swap, consistent per ADR-083). No change. _(P3c affordance-audit = this + schedules, recorded in ADR-084.)_
 
 ### P4 — Visual & interaction polish for a paying audience
@@ -165,7 +165,7 @@ Cores already shipped (ADR-077): Enable Banking, SimpleFIN, Plaid, OFX Direct + 
 **Decisions locked 2026-06-16:** MFL and MRL are a **bundled / combined offering**; the technical integration is a **1.1 fast-follow**; its direction is **MFL → MRL, file-based RDF export** over the shared ontology. Today **only IRI compatibility exists** — accounts/person carry `mrl:`-namespaced IRIs (`repository._next_account_iri`); there is **no** RDF/SPARQL/Oxigraph code in MFL. The shared `docs/ontology/mrl-ontology.ttl` is a **contract** between the two apps (ADR-005: do not edit it from MFL). MRL already models the same entities MFL owns the live data for (`mrl:Account`/`CashAccount`/`InvestmentAccount`/`PensionAccount`/`CreditCardAccount`/`PropertyAsset`, `mrl:Person`, `mrl:IncomeSource`, `mrl:Currency`, `mrl:Jurisdiction`) plus retirement concepts MFL doesn't (`mrl:ProjectionSettings`, drawdown/surplus strategies, `mrlx:TaxTreatmentType`, `mrl:LifeEvent`) — so the clean split is **MFL = reality today → MRL = projects it forward through retirement + tax.**
 
 ### M1 — 1.0-gated items (small; the heavy lifting is 1.1)
-- [ ] **Preserve the IRI boundary** — no regressions to the `mrl:` account/person namespace (it is the join key MRL matches on). Add a guard/test so a future refactor can't silently change the prefix.
+- [x] **Preserve the IRI boundary** — **DONE (ADR-096, 2026-06-21).** `tests/test_iri_boundary.py` (Qt-free, runs on base `python3` or pytest) pins: account/person IRIs stay `mrl:`-namespaced (`mrl:<Class>_<n>`, class-scoped sequential), private entities stay `mfl:`, the `mrl:Person_1` + `mrl:CashAccount_1` seed is pinned at both seed sites, and an account round-trips via `get_account_by_iri`. Negative-checked: it fails on a simulated `mrl:`→`mfl:` regression.
 - [ ] **Privacy policy (B2) discloses the planned MFL→MRL local data hand-off** — even though the export *code* ships in 1.1, the data-flow section must name it (and the bundle means the privacy story spans both apps).
 - [ ] **Bundle marketing prep (W/C)** — the launch website tells the combined "financial life + retirement" story and commerce supports a bundle price. _This is 1.0 even though the technical exchange is 1.1._
 
@@ -280,15 +280,15 @@ K3 App Stores (sandbox work) → C3 store listings → F3 SimpleFIN/Plaid ship e
 ## 10. Definition of Done — the 1.0 gate
 
 1.0 ships when ALL of:
-- [ ] **P1** one date-format + one period helper; no duplicated preset/label code.
+- [x] **P1** one date-format + one period helper; no duplicated preset/label code. _(Part A ADR-082; Part B `make_date_edit`/`make_period_combo` adoption 2026-06-18.)_
 - [x] **P2** every report drills to the shared transactions view; no dead-end charts. _(ADR-083, 2026-06-18 — Net Worth drills to the Account Summary page per owner fork; Budget keeps its precise bespoke register.)_
-- [ ] **P3** the four overlap candidates resolved (schedules entry points, filter-dialog base class, transfer-match unification, drill consistency).
+- [x] **P3** the four overlap candidates resolved (schedules entry points, filter-dialog base class, transfer-match unification, drill consistency). _(P3a ADR-084; P3b ADR-096; schedules + drill-consistency confirmed no-change.)_
 - [ ] **P4/P5** UI polished, dark-mode-complete, first-run + Help + About present.
 - [ ] **K1/K2** signed + notarised macOS DMG and signed Windows installer that pass Gatekeeper/SmartScreen, with working auto-update.
 - [ ] **B1/B2** company formed, Privacy Policy + ToS published at stable URLs.
 - [ ] **W1/W2** website live with showcase, download, buy, privacy, terms, support.
 - [ ] **C1/C2** pricing decided, a real purchase → license-key → install flow works end-to-end (via MoR).
-- [ ] **M1** IRI boundary guard test green; privacy policy discloses the MFL→MRL hand-off; website tells the bundle story.
+- [~] **M1** IRI boundary guard test green _(DONE — ADR-096, `tests/test_iri_boundary.py`)_; privacy policy discloses the MFL→MRL hand-off (B2, pending); website tells the bundle story (W1, pending).
 - [ ] **Q** test matrix green incl. the live `.mfl`; launch checklist complete.
 
 Explicitly **out of the 1.0 gate** (both 1.1 fast-follows): automated Enable Banking feeds, and the **MFL→MRL RDF export code** (M2) — 1.0 only preserves the boundary, discloses it, and markets the bundle.

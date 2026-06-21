@@ -11,7 +11,6 @@ one SQL transaction; cancelling the dialog touches nothing.
 """
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Optional
 
 from PySide6.QtCore import Qt
@@ -41,40 +40,10 @@ from mfl_desktop.db.repository import (
 )
 from mfl_desktop.ui.category_picker import make_category_picker
 from mfl_desktop.ui import tokens
-
-
-_CHIP_COLOURS: dict[str, str] = {
-    "Strong":   "#2563EB",
-    "Good":     "#F59E0B",
-    "Possible": "#64748B",
-}
-
-
-def _fmt_amount(value: Decimal, currency: str) -> str:
-    sym = {"GBP": "£", "USD": "$", "EUR": "€"}.get(currency, "")
-    sign = "-" if value < 0 else ""
-    magnitude = abs(value)
-    body = f"{magnitude:,.2f}"
-    if sym:
-        return f"{sign}{sym}{body}"
-    return f"{sign}{currency} {body}"
-
-
-def _strength_chip_widget(strength: str) -> QWidget:
-    holder = QWidget()
-    layout = QHBoxLayout(holder)
-    layout.setContentsMargins(4, 2, 4, 2)
-    chip = QLabel(strength)
-    chip.setAlignment(Qt.AlignCenter)
-    colour = _CHIP_COLOURS.get(strength, "#64748B")
-    chip.setStyleSheet(
-        f"QLabel {{ color: white; background: {colour}; "
-        f"border-radius: 8px; padding: 2px 8px; "
-        f"font-weight: 600; font-size: 11px; }}"
-    )
-    layout.addWidget(chip)
-    layout.addStretch(1)
-    return holder
+from mfl_desktop.ui.transfer_chips import (
+    fmt_amount as _fmt_amount,
+    strength_chip_holder as _strength_chip_widget,
+)
 
 
 class TransferReconcileDialog(QDialog):

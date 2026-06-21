@@ -20,7 +20,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QDoubleValidator, QPalette
+from PySide6.QtGui import QColor, QDoubleValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -47,49 +46,7 @@ from mfl_desktop.db.repository import (
     TransferCandidate,
 )
 from mfl_desktop.ui import tokens
-
-
-# Strength chip colours — match the slate / blue palette established by
-# ADR-026's theme. Strong is the affirmative blue; Good is amber; Possible
-# is muted slate so the user sees "this is the weakest of the three."
-_CHIP_COLOURS: dict[str, str] = {
-    "Strong":   "#2563EB",   # blue-600
-    "Good":     "#F59E0B",   # amber-500
-    "Possible": "#64748B",   # slate-500
-}
-
-
-def _fmt_amount(value: Decimal, currency: str) -> str:
-    """`£500.00` / `$1,000.00` / fallback `EUR 12.34`."""
-    sym = {"GBP": "£", "USD": "$", "EUR": "€"}.get(currency, "")
-    sign = "-" if value < 0 else ""
-    magnitude = abs(value)
-    body = f"{magnitude:,.2f}"
-    if sym:
-        return f"{sign}{sym}{body}"
-    return f"{sign}{currency} {body}"
-
-
-def _fmt_rate(rate: Optional[Decimal]) -> str:
-    if rate is None:
-        return "—"
-    return f"{rate:.4f}"
-
-
-def _strength_chip(strength: str) -> QLabel:
-    """Small inline pill widget displaying the strength bucket."""
-    chip = QLabel(strength)
-    chip.setAlignment(Qt.AlignCenter)
-    colour = _CHIP_COLOURS.get(strength, "#64748B")
-    chip.setStyleSheet(
-        f"QLabel {{"
-        f"  color: white; background: {colour}; "
-        f"  border-radius: 8px; padding: 2px 8px; "
-        f"  font-weight: 600; font-size: 11px;"
-        f"}}"
-    )
-    chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-    return chip
+from mfl_desktop.ui.transfer_chips import fmt_amount as _fmt_amount, strength_chip as _strength_chip
 
 
 def _source_summary_label(
