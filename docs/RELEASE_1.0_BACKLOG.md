@@ -87,11 +87,12 @@ The app is feature-complete; 1.0 is about **consistency, removing overlap, and m
 - [x] **`TransactionsListWindow` only reachable via drill — CONFIRMED intentional** (good detail view; nav is breadcrumb-chip removal + period swap, consistent per ADR-083). No change. _(P3c affordance-audit = this + schedules, recorded in ADR-084.)_
 
 ### P4 — Visual & interaction polish for a paying audience
-- [ ] Consistent dialog sizing, button order (platform-native: macOS vs Windows), default-button + Esc behaviour across all dialogs.
-- [ ] Empty-state / first-run polish (the Home dashboard cards already self-hide; verify a brand-new seeded DB looks intentional, not empty/broken).
-- [ ] Dark-mode pass over any surface added since ADR-076 (the new commission/total-cost investment fields, Bank Feeds dialog).
-- [ ] Spacing/typography scale (the deferred Arc B round) — at least a consistent scale, not pixel-perfect.
-- [ ] Iconography + app icon (needed anyway for stores).
+**Status: dark-mode pass + button audit done 2026-06-21 (ADR-097); typography-scale + app-icon still open.**
+- [x] Consistent dialog sizing, button order (platform-native: macOS vs Windows), default-button + Esc behaviour across all dialogs. **AUDITED → already consistent (ADR-097).** ~40 of ~47 dialogs use `QDialogButtonBox` (native ordering + Esc + role-default for free); the remaining hand-rolled rows are action-toolbar management dialogs (New/Edit/Delete + Close) where a default button would make Enter destructive — correctly left without one. No change required.
+- [x] Dark-mode pass over any surface added since ADR-076 — **DONE (ADR-097).** The newly-called-out surfaces (commission/total-cost investment fields, Bank Feeds, loan, bonds/options) were already clean (paintEvent + `chart_helpers`). Swept the same item-brush bug class ADR-076 r3 fixed and closed four stragglers: `net_worth` "no rate" flag, `investment_returns` gain/loss table + Performers labels, `statements` status column + summary, `transfer_match` picker sentinel — all now resolve `tokens.c(...)` live (light values unchanged). No frozen hex inside `themed()` templates.
+- [ ] Empty-state / first-run polish (the Home dashboard cards already self-hide; verify a brand-new seeded DB looks intentional, not empty/broken). **→ folded into P5 (onboarding).**
+- [ ] Spacing/typography scale (the deferred Arc B round) — at least a consistent scale, not pixel-perfect. **Still open — its own round (subjective).**
+- [ ] Iconography + app icon (needed anyway for stores). **Still open — needs design assets (also a K-workstream store requirement).**
 
 ### P5 — First-run onboarding & help
 - [ ] A short first-run flow: create/seed file, pick base currency, optional "import your first statement" nudge.

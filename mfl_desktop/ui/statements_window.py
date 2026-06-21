@@ -41,13 +41,13 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import AccountSummary, Repository, StatementRow
 from mfl_desktop.ui.reconcile_wizard import ReconcileWizard
+from mfl_desktop.ui import tokens
 
 
 _SYMBOL = {"GBP": "£", "USD": "$", "EUR": "€"}
-_MUTED = "#475569"
-_GREEN = "#16A34A"
-_AMBER = "#D97706"
-_RED = "#DC2626"
+# Status colours are theme tokens resolved live in `_reload_table` (ADR-097
+# P4 dark-mode pass) — `_status_text` returns the token *name*, not a frozen
+# light hex, so the status column is dark-mode-correct on refresh.
 
 
 def _fmt(amount: Decimal, currency: str) -> str:
@@ -105,7 +105,7 @@ class StatementsWindow(QDialog):
         self._table.itemDoubleClicked.connect(lambda _: self._on_open())
 
         self._summary = QLabel("")
-        self._summary.setStyleSheet(f"color: {_MUTED};")
+        tokens.themed(self._summary, "color: {muted_strong};")
 
         self._new_btn = QPushButton("＋ &New Statement…")
         self._open_btn = QPushButton("&Open…")
@@ -139,10 +139,10 @@ class StatementsWindow(QDialog):
         rows = self._repo.list_statements_for_account(self._account.id)
         self._table.setRowCount(len(rows))
         for i, s in enumerate(rows):
-            text, colour = self._status_text(s)
+            text, colour_token = self._status_text(s)
             status_item = QTableWidgetItem(text)
             status_item.setData(Qt.UserRole, s.id)
-            status_item.setForeground(QColor(colour))
+            status_item.setForeground(QColor(tokens.c(colour_token)))
             self._table.setItem(i, 0, status_item)
 
             self._table.setItem(i, 1, QTableWidgetItem(_period_label(s)))
@@ -166,14 +166,16 @@ class StatementsWindow(QDialog):
         self._update_summary(rows)
 
     def _status_text(self, s: StatementRow) -> tuple[str, str]:
+        """Return ``(label, token_name)`` — the second element is a theme
+        token name (resolved live by the caller), not a literal colour."""
         if s.status == "open":
-            return "● In progress", _AMBER
+            return "● In progress", "warning"
         if s.is_out_of_balance:
             return (
                 f"⚠ Out of balance ({_fmt(s.residual, self._account.currency)})",
-                _RED,
+                "negative",
             )
-        return "✓ Reconciled", _GREEN
+        return "✓ Reconciled", "positive"
 
     def _update_summary(self, rows: list[StatementRow]) -> None:
         if not rows:

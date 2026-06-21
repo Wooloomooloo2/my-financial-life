@@ -674,7 +674,7 @@ class NetWorthWindow(QMainWindow):
                         name,
                         f"{_symbol(acct.currency)}{shown_native:,.2f} (no rate)",
                     ])
-                    child.setForeground(1, QBrush(QColor("#b45309")))
+                    child.setForeground(1, QBrush(QColor(tokens.c("warning"))))
                     child.setToolTip(
                         1, f"No {acct.currency}→{self._display_ccy} rate on file.",
                     )

@@ -73,9 +73,8 @@ _CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 _SID_ROLE = Qt.UserRole + 1
 
 # Period labels are the shared registry (ADR-082, single source of truth).
-
-_GAIN = "#16a34a"
-_LOSS = "#dc2626"
+# Gain/loss colours are resolved live from theme tokens in `_colour` (ADR-097
+# P4 dark-mode pass) rather than frozen module constants.
 
 _TABLE_HEADERS = (
     "Symbol", "Security", "Cost", "Market value",
@@ -403,7 +402,8 @@ class InvestmentReturnsWindow(QMainWindow):
         pct = QLabel(f"{perf:+.1f}%")
         pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         pct.setStyleSheet(
-            f"color: {'#16a34a' if perf >= 0 else '#dc2626'}; font-weight: 600;"
+            f"color: {tokens.c('positive') if perf >= 0 else tokens.c('negative')}; "
+            f"font-weight: 600;"
         )
         h.addWidget(left, 1)
         h.addWidget(pct, 0)
@@ -875,13 +875,17 @@ class InvestmentReturnsWindow(QMainWindow):
 
     @staticmethod
     def _colour(amount) -> Optional[str]:
+        # Resolve the gain/loss hex against the active theme at call time so
+        # the returned colour is dark-mode-correct (the window rebuilds its
+        # table + summary on activate-refresh). Used for both table item
+        # foregrounds and inline stylesheet strings.
         if amount is None:
             return None
         a = float(amount)
         if a > 0:
-            return _GAIN
+            return tokens.c("positive")
         if a < 0:
-            return _LOSS
+            return tokens.c("negative")
         return None
 
     def _update_summary(

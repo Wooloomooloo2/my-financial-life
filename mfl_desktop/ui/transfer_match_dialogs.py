@@ -277,7 +277,7 @@ class TransferMatchPickerDialog(QDialog):
         f = create_item.font()
         f.setItalic(True)
         create_item.setFont(f)
-        create_item.setForeground(QColor("#2563EB"))
+        create_item.setForeground(QColor(tokens.c("accent")))
         self._table.setItem(last, 0, create_item)
         for col in range(1, 5):
             empty = QTableWidgetItem("")
