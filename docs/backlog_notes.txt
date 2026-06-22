@@ -1,0 +1,4 @@
+**When entering manual transactions through the dialogue box, please include a 
+'save and new transaction'**
+**payee auto complete in manual transaction dialogue box**
+**Spending over time report always goes behind register after editing the filter**
