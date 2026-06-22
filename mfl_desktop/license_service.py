@@ -14,10 +14,10 @@ from mfl_desktop import app_session, licensing
 from mfl_desktop.licensing import LicenseError, LicenseInfo, LicenseStatus
 from mfl_desktop.version import APP_EDITION
 
-# Where the About / Enter-License dialogs send the user to purchase. Placeholder
-# until the W1 marketing site is live (RELEASE_1.0_BACKLOG workstream W); kept
-# here as the single source so every surface links to the same place.
-BUY_URL = "https://myfinancial.life/buy"
+# Where the About / Enter-License dialogs send the user to purchase. Points at
+# the Garelochsoft company site (RELEASE_1.0_BACKLOG workstream W); kept here as
+# the single source so every surface links to the same place.
+BUY_URL = "https://garelochsoft.co.uk/buy"
 
 
 def ensure_trial_started(today: date | None = None) -> str:

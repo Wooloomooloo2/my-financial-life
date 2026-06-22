@@ -16,11 +16,12 @@ APP_NAME = "My Financial Life"
 APP_EDITION = int(__version__.split(".", 1)[0])
 
 # Product links (ADR-098). Single source of truth for the website + docs URLs
-# the in-app Help menu and onboarding point at. Placeholders on the launch
-# domain (the same domain as license_service.BUY_URL) until the W-workstream
-# site is live; update here when it ships.
-WEBSITE_URL = "https://myfinancial.life"
-DOCS_URL = "https://myfinancial.life/docs/getting-started"
+# the in-app Help menu and onboarding point at. The site lives on the
+# Garelochsoft company domain (Garelochsoft also publishes My Retirement Life);
+# routes are flat to match the live Astro site (same domain as
+# license_service.BUY_URL).
+WEBSITE_URL = "https://garelochsoft.co.uk"
+DOCS_URL = "https://garelochsoft.co.uk/docs/getting-started"
 
 
 def build_revision() -> str:
