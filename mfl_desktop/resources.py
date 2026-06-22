@@ -57,3 +57,18 @@ def app_pixmap(size: int = 64):
     asset is missing (callers should guard with ``isNull()``)."""
     from PySide6.QtCore import QSize
     return app_icon().pixmap(QSize(size, size))
+
+
+def company_logo(height: int = 32):
+    """The Garelochsoft company wordmark scaled to ``height`` px (aspect kept),
+    for the publisher attribution in the About box. Garelochsoft publishes My
+    Financial Life. Returns a null pixmap if the asset is missing."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap
+    p = asset_path("icons", "garelochsoft_logo.png")
+    if not p.exists():
+        return QPixmap()
+    pm = QPixmap(str(p))
+    if pm.isNull():
+        return pm
+    return pm.scaledToHeight(height, Qt.SmoothTransformation)

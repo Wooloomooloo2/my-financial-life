@@ -87,7 +87,18 @@ class AboutDialog(QDialog):
         self._state_lbl.setWordWrap(True)
         self._state_lbl.setTextFormat(Qt.RichText)
 
-        copyright_lbl = QLabel("© 2026 My Financial Life")
+        # Publisher attribution — the Garelochsoft company wordmark + copyright.
+        publisher_lbl = QLabel("Published by")
+        tokens.themed(publisher_lbl, "color: {muted}; font-size: 11px;")
+        company_logo_lbl = QLabel()
+        company_logo_lbl.setPixmap(resources.company_logo(36))
+        company_row = QHBoxLayout()
+        company_row.setSpacing(8)
+        company_row.addWidget(publisher_lbl, 0, Qt.AlignVCenter)
+        company_row.addWidget(company_logo_lbl, 0, Qt.AlignVCenter)
+        company_row.addStretch(1)
+
+        copyright_lbl = QLabel("© 2026 Garelochsoft")
         tokens.themed(copyright_lbl, "color: {muted}; font-size: 11px;")
 
         buttons = QDialogButtonBox(parent=self)
@@ -114,7 +125,8 @@ class AboutDialog(QDialog):
         layout.addWidget(tagline)
         layout.addWidget(line)
         layout.addWidget(self._state_lbl)
-        layout.addSpacing(2)
+        layout.addSpacing(6)
+        layout.addLayout(company_row)
         layout.addWidget(copyright_lbl)
         layout.addWidget(buttons)
         self.resize(420, self.sizeHint().height())
