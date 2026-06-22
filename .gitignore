@@ -21,3 +21,9 @@ tools/.dev_signing_key
 # Build metadata stamped by the packaging CI step (ADR-099) — generated, not
 # source. A plain checkout has none and falls back to the "source" revision.
 mfl_desktop/_build_info.py
+
+# Marketing screenshots (generated for the website handoff; not app source).
+screenshots/
+
+# macOS noise
+.DS_Store
