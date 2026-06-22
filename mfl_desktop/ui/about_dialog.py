@@ -92,10 +92,13 @@ class AboutDialog(QDialog):
         tokens.themed(publisher_lbl, "color: {muted}; font-size: 11px;")
         company_logo_lbl = QLabel()
         company_logo_lbl.setPixmap(resources.company_logo(36))
+        company_name_lbl = QLabel("Garelochsoft")
+        tokens.themed(company_name_lbl, "color: {heading}; font-size: 14px; font-weight: 600;")
         company_row = QHBoxLayout()
         company_row.setSpacing(8)
         company_row.addWidget(publisher_lbl, 0, Qt.AlignVCenter)
         company_row.addWidget(company_logo_lbl, 0, Qt.AlignVCenter)
+        company_row.addWidget(company_name_lbl, 0, Qt.AlignVCenter)
         company_row.addStretch(1)
 
         copyright_lbl = QLabel("© 2026 Garelochsoft")
