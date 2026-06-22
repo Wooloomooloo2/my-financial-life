@@ -17,7 +17,7 @@ from mfl_desktop.version import APP_EDITION
 # Where the About / Enter-License dialogs send the user to purchase. Points at
 # the Garelochsoft company site (RELEASE_1.0_BACKLOG workstream W); kept here as
 # the single source so every surface links to the same place.
-BUY_URL = "https://garelochsoft.co.uk/buy"
+BUY_URL = "https://garelochsoft.com/buy"
 
 
 def ensure_trial_started(today: date | None = None) -> str:

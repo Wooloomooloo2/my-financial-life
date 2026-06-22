@@ -2,7 +2,7 @@
 
 **Purpose:** a self-contained brief for building the marketing + docs website (workstream W1/W2), to be handed to a separate website project. Everything the site needs is here — you do **not** need the app's source or its ADRs. Distilled from the 1.0 launch backlog and the product decisions as of 2026-06-22.
 
-**Publisher & domain:** the app is published by **Garelochsoft**, whose site is **`https://garelochsoft.co.uk`** (the website project already lives in the `mfl-website` repo, built with Astro and deployed via Netlify/Cloudflare). Garelochsoft also publishes the sister app **My Retirement Life** (see §9), so the company is the umbrella brand for both products — but the site as built is the **My Financial Life** product site with flat routes (`/buy`, `/download`, `/docs/...`); if a second product is added later the routes may need product-scoping. The app's in-product links (Help ▸ Website / Getting Started / Buy) point at `garelochsoft.co.uk` + those flat routes — keep them stable.
+**Publisher & domain:** the app is published by **Garelochsoft**, whose site is **`https://garelochsoft.com`** (the website project already lives in the `mfl-website` repo, built with Astro and deployed via Netlify/Cloudflare). Garelochsoft also publishes the sister app **My Retirement Life** (see §9), so the company is the umbrella brand for both products — but the site as built is the **My Financial Life** product site with flat routes (`/buy`, `/download`, `/docs/...`); if a second product is added later the routes may need product-scoping. The app's in-product links (Help ▸ Website / Getting Started / Buy) point at `garelochsoft.com` + those flat routes — keep them stable.
 
 **Status of the product:** the desktop app (macOS + Windows) is feature-complete and brand-finished; it builds to signed-ready installers. The website is the remaining launch blocker (its Privacy + Terms URLs are *also* a hard prerequisite for turning on automated bank feeds later — see §8).
 
@@ -39,9 +39,9 @@ The shipping app **hardcodes these URLs**; the site MUST serve them (don't renam
 
 | Route | Purpose | Linked from |
 |---|---|---|
-| `https://garelochsoft.co.uk` | Home / marketing | Help ▸ Visit Website |
-| `https://garelochsoft.co.uk/buy` | Purchase / pricing | Help ▸ Buy, About box, License dialog |
-| `https://garelochsoft.co.uk/docs/getting-started` | Getting-started docs | Help ▸ Getting Started |
+| `https://garelochsoft.com` | Home / marketing | Help ▸ Visit Website |
+| `https://garelochsoft.com/buy` | Purchase / pricing | Help ▸ Buy, About box, License dialog |
+| `https://garelochsoft.com/docs/getting-started` | Getting-started docs | Help ▸ Getting Started |
 
 Also expected by the launch checklist (and by Enable Banking, §8): `/privacy`, `/terms`, `/download`, `/support`. Keep URLs stable once published.
 
@@ -194,7 +194,7 @@ Plus the **app icon** at large size for the hero/footer.
 ## 12. Tech & hosting recommendation
 
 - **Static site** — no backend needed. A generator like **Astro** (great for marketing + markdown docs), **Eleventy**, or **Hugo**; plain HTML is fine for something this small. Markdown for the `/docs` pages.
-- **Host:** Netlify, Cloudflare Pages, or GitHub Pages, with the **`garelochsoft.co.uk`** custom domain and auto-deploy on push.
+- **Host:** Netlify, Cloudflare Pages, or GitHub Pages, with the **`garelochsoft.com`** custom domain and auto-deploy on push.
 - **Commerce:** embed the Merchant-of-Record checkout (Paddle/Lemon Squeezy/FastSpring) on `/buy` — usually a hosted checkout link or a small JS overlay; no server code.
 - **Analytics:** if any, prefer privacy-friendly (Plausible/Fathom/none) to stay consistent with the product's ethos — and disclose it in `/privacy`.
 - **Separate repo** from the app (different stack, independent deploy/cadence, the site can be public while the app repo stays private).
@@ -212,7 +212,7 @@ Plus the **app icon** at large size for the hero/footer.
 ## 14. What the owner still must supply (not the website author's call)
 
 - The **final price** and the **bundle discount**.
-- The **domain** — ✅ **`garelochsoft.co.uk`** (Garelochsoft company site); DNS pointed at the host.
+- The **domain** — ✅ **`garelochsoft.com`** (Garelochsoft company site); DNS pointed at the host.
 - The **Merchant-of-Record account** + the checkout link/keys for `/buy`.
 - **Legal-reviewed** Privacy + Terms text (the site ships placeholders until then). Legal entity = **Garelochsoft** (confirm the registered form — UK Ltd assumed).
 - The **contact / support / help email addresses** — *to be supplied by the owner shortly* (one will also serve as the data-protection contact for the privacy policy + Enable Banking).

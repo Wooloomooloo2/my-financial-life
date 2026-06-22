@@ -20,8 +20,8 @@ APP_EDITION = int(__version__.split(".", 1)[0])
 # Garelochsoft company domain (Garelochsoft also publishes My Retirement Life);
 # routes are flat to match the live Astro site (same domain as
 # license_service.BUY_URL).
-WEBSITE_URL = "https://garelochsoft.co.uk"
-DOCS_URL = "https://garelochsoft.co.uk/docs/getting-started"
+WEBSITE_URL = "https://garelochsoft.com"
+DOCS_URL = "https://garelochsoft.com/docs/getting-started"
 
 
 def build_revision() -> str:
