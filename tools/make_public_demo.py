@@ -359,6 +359,31 @@ def main() -> int:
             import_hash=None, import_batch_id=None,
         )
 
+    def reinvest(acct, iso, sec, qty, price):
+        # DRIP — a reinvested distribution with no cash leg (amount 0); it books
+        # new shares at `price`, and its income is valued at qty × price
+        # (ADR-089). Tagged Investment income so it counts in the Investment
+        # Income view (ADR-108) when the "include reinvested" toggle is on.
+        repo.insert_transaction(
+            account_id=acct.id, posted_date=iso, amount=D("0.00"),
+            payee_id=pay("Dividend"), category_id=top("Investment income"),
+            status=status_for(iso), memo="Reinvested dividend", action="ReinvDiv",
+            security_id=sec, quantity=D(qty), price=D(price),
+            import_hash=None, import_batch_id=None,
+        )
+
+    def coupon(acct, iso, sec, amount):
+        # Bond coupon — cash interest income (ADR-093). `is_income` recognises
+        # IntInc, so it shows as income (and gives the bond a yield) in the
+        # Investment Income view (ADR-108).
+        repo.insert_transaction(
+            account_id=acct.id, posted_date=iso, amount=abs(D(amount)),
+            payee_id=pay("Bond interest"), category_id=top("Investment income"),
+            status=status_for(iso), memo="Coupon", action="IntInc",
+            security_id=sec, quantity=None, price=None,
+            import_hash=None, import_batch_id=None,
+        )
+
     start = day(2025, 7, 1)
     # Pre-existing holdings (the picture didn't start from zero)
     shares_in(isa, start, vwrl, 230, 96.50)
@@ -385,6 +410,13 @@ def main() -> int:
             dividend(isa, day(yr, mo, 20), vwrl, jitter(190, 0.1))
             dividend(brokerage, day(yr, mo, 15), aapl, jitter(8, 0.1))
             dividend(brokerage, day(yr, mo, 15), msft, jitter(9, 0.1))
+            # The pension fund reinvests its distribution (DRIP) — a ~£170/qtr
+            # payout bought back as fund units, so it shows only under "include
+            # reinvested" in the Investment Income view (ADR-108).
+            reinvest(
+                pension, day(yr, mo, 22), glbl,
+                round(float(jitter(170, 0.1)) / glbl_px, 4), glbl_px,
+            )
 
     # A mid-year brokerage top-up
     move(current, brokerage, day(2026, 1, 12), 1500, to_amount=1905)
@@ -422,6 +454,10 @@ def main() -> int:
         action="Buy", security_id=aapl_call, quantity=D("2"), price=D("3.40"),
         import_hash=None, import_batch_id=None,
     )
+    # Semi-annual coupons (4.2% on 5 × $1,000 face = $105 each), paid Mar 1 /
+    # Sep 1 — the accrued interest paid at purchase covered the stub period.
+    coupon(brokerage, day(2025, 9, 1), aapl_bond, 105)
+    coupon(brokerage, day(2026, 3, 1), aapl_bond, 105)
     repo.commit()
 
     # ── Price history (monthly close per security) + FX ─────────────────────
