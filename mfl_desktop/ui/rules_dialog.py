@@ -29,6 +29,10 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import Repository, RuleRow
 from mfl_desktop.rules_engine import MATCH_FIELDS, MATCHER_KINDS
+from mfl_desktop.ui.category_picker import (
+    make_category_picker,
+    selected_category_id,
+)
 from mfl_desktop.ui.rule_edit_dialog import RuleEditDialog
 from mfl_desktop.ui import tokens
 
@@ -47,9 +51,10 @@ class RulesDialog(QDialog):
         self._repo = repo
         self.setWindowTitle("Rules")
         self.setModal(True)
-        self.resize(760, 620)
+        self.resize(760, 720)
 
         self._categories = repo.list_categories_flat()
+        self._cat_path = {c.id: (c.path or c.name) for c in self._categories}
 
         # ── rules table ──
         self._table = QTableWidget(0, 4)
@@ -81,6 +86,36 @@ class RulesDialog(QDialog):
         rule_actions.addWidget(self._edit_btn)
         rule_actions.addWidget(self._delete_btn)
 
+        # ── remembered payee categories (ADR-106) ──
+        # The per-payee "default category" memory (ADR-072) is what actually
+        # auto-categorises most payees on import / pre-fills on entry — a
+        # separate mechanism from the pattern rules above. Surfacing it here
+        # so the whole automation picture really is in one place.
+        self._memory_table = QTableWidget(0, 2)
+        self._memory_table.setHorizontalHeaderLabels(["Payee", "Auto-category"])
+        self._memory_table.verticalHeader().setVisible(False)
+        self._memory_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._memory_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._memory_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._memory_table.setSortingEnabled(False)
+        mh = self._memory_table.horizontalHeader()
+        mh.setSectionResizeMode(0, QHeaderView.Stretch)
+        mh.setSectionResizeMode(1, QHeaderView.Stretch)
+        self._memory_table.setMaximumHeight(200)
+        self._memory_table.itemSelectionChanged.connect(self._update_button_state)
+        self._memory_table.itemDoubleClicked.connect(
+            lambda *_: self._on_memory_edit()
+        )
+
+        self._mem_edit_btn = QPushButton("Edit &category…")
+        self._mem_forget_btn = QPushButton("&Forget")
+        self._mem_edit_btn.clicked.connect(self._on_memory_edit)
+        self._mem_forget_btn.clicked.connect(self._on_memory_forget)
+        mem_actions = QHBoxLayout()
+        mem_actions.addStretch(1)
+        mem_actions.addWidget(self._mem_edit_btn)
+        mem_actions.addWidget(self._mem_forget_btn)
+
         # ── aliases (read-only) ──
         self._alias_table = QTableWidget(0, 2)
         self._alias_table.setHorizontalHeaderLabels(["Alias", "→ Payee"])
@@ -100,6 +135,14 @@ class RulesDialog(QDialog):
         layout.addWidget(QLabel("Auto-categorisation rules"))
         layout.addWidget(self._table, stretch=3)
         layout.addLayout(rule_actions)
+        mem_hdr = QLabel(
+            "Remembered payee categories — a payee’s saved auto-category "
+            "(also set per payee in Payees…)"
+        )
+        tokens.themed(mem_hdr, "color: {muted}; margin-top: 8px;")
+        layout.addWidget(mem_hdr)
+        layout.addWidget(self._memory_table, stretch=2)
+        layout.addLayout(mem_actions)
         alias_hdr = QLabel(
             "Payee aliases — implicit “is exactly → payee” rules "
             "(manage in Payees…)"
@@ -131,6 +174,15 @@ class RulesDialog(QDialog):
             self._table.setItem(i, 2, cat)
             self._table.setItem(i, 3, prio)
 
+        memories = self._repo.list_payee_default_categories()
+        self._memory_table.setRowCount(len(memories))
+        for i, (pid, pname, cat_id) in enumerate(memories):
+            p = QTableWidgetItem(pname)
+            p.setData(Qt.UserRole, pid)
+            c = QTableWidgetItem(self._cat_path.get(cat_id, f"category {cat_id}"))
+            self._memory_table.setItem(i, 0, p)
+            self._memory_table.setItem(i, 1, c)
+
         aliases = self._collect_aliases()
         self._alias_table.setRowCount(len(aliases))
         for i, (alias_name, canon_name) in enumerate(aliases):
@@ -153,6 +205,9 @@ class RulesDialog(QDialog):
         has = self._selected_rule() is not None
         self._edit_btn.setEnabled(has)
         self._delete_btn.setEnabled(has)
+        has_mem = self._selected_memory() is not None
+        self._mem_edit_btn.setEnabled(has_mem)
+        self._mem_forget_btn.setEnabled(has_mem)
 
     def _selected_rule(self) -> RuleRow | None:
         rows = self._table.selectionModel().selectedRows()
@@ -160,6 +215,17 @@ class RulesDialog(QDialog):
             return None
         rid = self._table.item(rows[0].row(), 0).data(Qt.UserRole)
         return next((r for r in self._rules if r.id == rid), None)
+
+    def _selected_memory(self) -> tuple[int, str] | None:
+        """The selected remembered-category row as ``(payee_id, payee_name)``,
+        or None when nothing is selected."""
+        rows = self._memory_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        item = self._memory_table.item(rows[0].row(), 0)
+        if item is None:
+            return None
+        return int(item.data(Qt.UserRole)), item.text()
 
     # ── actions ──
 
@@ -217,6 +283,73 @@ class RulesDialog(QDialog):
             QMessageBox.critical(self, "Could not delete", str(e))
             return
         self._reload()
+        self.rules_changed.emit()
+
+    # ── remembered-category actions (ADR-106) ──
+
+    def _on_memory_edit(self) -> None:
+        sel = self._selected_memory()
+        if sel is None:
+            return
+        payee_id, payee_name = sel
+        current = self._repo.get_payee_default_category(payee_id)
+        picker = QDialog(self)
+        picker.setWindowTitle("Auto-category")
+        picker.setModal(True)
+        label = QLabel(
+            f"Automatically categorise transactions from “{payee_name}” as:"
+        )
+        label.setWordWrap(True)
+        combo = make_category_picker(self._categories, default_id=current)
+        pbuttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        pbuttons.accepted.connect(picker.accept)
+        pbuttons.rejected.connect(picker.reject)
+        lay = QVBoxLayout(picker)
+        lay.addWidget(label)
+        lay.addWidget(combo)
+        lay.addWidget(pbuttons)
+        picker.resize(440, picker.sizeHint().height())
+        if picker.exec() != QDialog.Accepted:
+            return
+        new_cat = selected_category_id(combo)
+        if new_cat is None:
+            QMessageBox.warning(
+                self, "Pick a category",
+                "Choose a category from the list.",
+            )
+            return
+        try:
+            self._repo.set_payee_default_category(payee_id, new_cat)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not save", str(e))
+            return
+        self._reload()
+        self._update_button_state()
+        self.rules_changed.emit()
+
+    def _on_memory_forget(self) -> None:
+        sel = self._selected_memory()
+        if sel is None:
+            return
+        payee_id, payee_name = sel
+        confirm = QMessageBox.question(
+            self, "Forget category?",
+            f"Stop auto-categorising “{payee_name}”?\n\n"
+            f"Existing transactions keep their categories; only future "
+            f"imports / entries stop pre-filling.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self._repo.set_payee_default_category(payee_id, None)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not save", str(e))
+            return
+        self._reload()
+        self._update_button_state()
         self.rules_changed.emit()
 
     def _offer_retroactive(self, rule_id: int, vals: dict) -> None:

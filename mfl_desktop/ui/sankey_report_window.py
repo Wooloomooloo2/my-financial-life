@@ -361,7 +361,11 @@ class SankeyReportWindow(QMainWindow):
             current_category_ids=f.category_ids,
             parent=self,
         )
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        # ADR-105: keep this report in front after the modal filter closes.
+        self.raise_()
+        self.activateWindow()
+        if not accepted:
             return
         chosen = dlg.values()
         if chosen is None:

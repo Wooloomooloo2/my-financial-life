@@ -621,7 +621,13 @@ class SpendingReportWindow(QMainWindow):
             title=f"Filter — {self._DIRECTION.type_label}",
             parent=self,
         )
-        if dialog.exec() != QDialog.Accepted:
+        accepted = dialog.exec() == QDialog.Accepted
+        # ADR-105: the modal filter dialog returns activation to this window's
+        # top-level parent (the register), burying the report the user is
+        # editing. Pull it back to the front whatever the dialog's outcome.
+        self.raise_()
+        self.activateWindow()
+        if not accepted:
             return
         new_filters = dialog.values()
         if new_filters is None or new_filters == self._current_filters:

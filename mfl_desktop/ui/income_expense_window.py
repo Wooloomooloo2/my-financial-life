@@ -551,7 +551,11 @@ class IncomeExpenseWindow(QMainWindow):
             categories=self._all_categories,
             parent=self,
         )
-        if dialog.exec() != QDialog.Accepted:
+        accepted = dialog.exec() == QDialog.Accepted
+        # ADR-105: keep this report in front after the modal filter closes.
+        self.raise_()
+        self.activateWindow()
+        if not accepted:
             return
         new_filters = dialog.values()
         if new_filters is None or new_filters == self._current_filters:

@@ -227,6 +227,12 @@ class PayeesDialog(QDialog):
     def _selected_ids(self) -> list[int]:
         seen: list[int] = []
         for idx in self._table.selectionModel().selectedRows():
+            # Skip filtered-out (hidden) rows: search hides non-matching rows
+            # rather than removing them, so a shift-click range over visible
+            # rows also selects the hidden rows between them. Acting on those
+            # would merge/delete payees the user can't see (ADR-106 follow-up).
+            if self._table.isRowHidden(idx.row()):
+                continue
             item = self._table.item(idx.row(), 0)
             if item is None:
                 continue

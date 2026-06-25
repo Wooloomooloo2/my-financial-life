@@ -1129,12 +1129,19 @@ class RegisterWindow(QMainWindow):
     # ── new / delete transaction ──
 
     def _payee_default_category_for_name(self, name: str):
-        """ADR-073: resolve a typed payee name to its remembered auto-category
-        (or None) so the New Transaction dialog can pre-fill the category."""
+        """ADR-073/ADR-106: resolve a typed payee name to a category to
+        pre-fill in the New Transaction dialog. Prefers the explicit
+        remembered auto-category; when none is set, falls back to the payee's
+        most-common historical category so a payee you've categorised before
+        (but never explicitly 'remembered') still pre-fills. None if neither
+        resolves."""
         pid = self._repo.find_payee_id_by_name(name)
         if pid is None:
             return None
-        return self._repo.get_payee_default_category(pid)
+        explicit = self._repo.get_payee_default_category(pid)
+        if explicit is not None:
+            return explicit
+        return self._repo.most_common_category_for_payee(pid)
 
     def _on_new_transaction(self) -> None:
         accounts = self._repo.list_accounts()
@@ -1150,18 +1157,36 @@ class RegisterWindow(QMainWindow):
             self._open_investment_txn_dialog(seed=None)
             return
         default_id = self._account.id if self._account is not None else None
+        # ADR-105: loop while the user keeps clicking "Save & New", reusing the
+        # just-used account as the default for the next entry.
+        while True:
+            next_default = self._create_one_transaction(default_id)
+            if next_default is None:
+                return
+            default_id = next_default
+
+    def _create_one_transaction(self, default_id: Optional[int]) -> Optional[int]:
+        """Show the New Transaction dialog once and commit its result.
+
+        Returns the account id to reuse for another entry when the user clicked
+        Save & New, or None to stop (plain Save / Split / cancel / error).
+        Factored out of :meth:`_on_new_transaction` so the Save & New loop
+        reuses the full commit path — transfer, split, payee-default-category —
+        unchanged (ADR-105)."""
+        accounts = self._repo.list_accounts()
         dialog = NewTransactionDialog(
             accounts=accounts,
             categories=self._categories,
             default_account_id=default_id,
             payee_category_lookup=self._payee_default_category_for_name,
+            payee_names=self._repo.list_payee_names(),
             parent=self,
         )
         if dialog.exec() != NewTransactionDialog.Accepted:
-            return
+            return None
         values = dialog.values()
         if values is None:
-            return
+            return None
 
         # ADR-051: the user clicked "Split…" — hand the header fields and the
         # entered amount to the split dialog (which collects the category lines
@@ -1258,7 +1283,7 @@ class RegisterWindow(QMainWindow):
             self._model.reload()
             self._refresh_sidebar_balances()
             self.statusBar().showMessage("Transfer recorded", 4000)
-            return
+            return values.account_id if dialog.save_and_new_requested() else None
 
         try:
             payee_id = self._repo.get_or_create_payee(values.payee_name)
@@ -1285,6 +1310,7 @@ class RegisterWindow(QMainWindow):
         self._model.reload()
         self._refresh_sidebar_balances()
         self.statusBar().showMessage("Transaction added", 4000)
+        return values.account_id if dialog.save_and_new_requested() else None
 
     def _on_table_double_clicked(self, proxy_index) -> None:
         """Double-click routing for dialog-edited rows:

@@ -20,6 +20,7 @@ from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QCompleter,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
@@ -61,6 +62,7 @@ class NewTransactionDialog(QDialog):
         categories: list[CategoryChoice],
         default_account_id: Optional[int] = None,
         payee_category_lookup: Optional[Callable[[str], Optional[int]]] = None,
+        payee_names: Optional[list[str]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -91,6 +93,22 @@ class NewTransactionDialog(QDialog):
         self._payee_edit = QLineEdit()
         self._payee_edit.setPlaceholderText("Optional")
         self._payee_edit.editingFinished.connect(self._maybe_prefill_category)
+        # Payee autocomplete — same contains-match, case-insensitive completer
+        # the register's PayeeTypeaheadDelegate and BulkEditDialog use, so the
+        # three entry surfaces behave identically (ADR-105). Names are a
+        # snapshot taken when the dialog opens (canonical payees, ADR-028).
+        if payee_names:
+            completer = QCompleter(payee_names, self._payee_edit)
+            completer.setCompletionMode(QCompleter.PopupCompletion)
+            completer.setFilterMode(Qt.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setMaxVisibleItems(8)
+            self._payee_edit.setCompleter(completer)
+            # Picking a completion fills the field but doesn't fire
+            # editingFinished, so pre-fill the remembered category then too.
+            completer.activated.connect(
+                lambda _text: self._maybe_prefill_category()
+            )
 
         # Searchable dropdown — same helper used in BulkEditDialog so the
         # two surfaces behave identically. Default to Uncategorised (id=1).
@@ -140,6 +158,12 @@ class NewTransactionDialog(QDialog):
         )
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
+        # ADR-105: "Save & New" commits this transaction and immediately
+        # reopens a fresh dialog on the same account, for fast multi-entry.
+        save_new_btn = buttons.addButton(
+            "Save && New", QDialogButtonBox.ActionRole,
+        )
+        save_new_btn.clicked.connect(self._on_save_and_new)
         # ADR-051: "Split…" hands the header + amount to the split dialog,
         # which collects the per-category lines. Category isn't required here.
         split_btn = buttons.addButton("Split…", QDialogButtonBox.ActionRole)
@@ -152,6 +176,7 @@ class NewTransactionDialog(QDialog):
         self.resize(420, self.sizeHint().height())
         self._values: Optional[NewTransactionValues] = None
         self._split_requested = False
+        self._save_and_new_requested = False
 
     # ── helpers ──
 
@@ -182,6 +207,17 @@ class NewTransactionDialog(QDialog):
             if self._category_combo.itemData(i) == cat_id:
                 self._category_combo.setCurrentIndex(i)
                 break
+
+    def _on_save_and_new(self) -> None:
+        """ADR-105: validate + accept like Save, but flag the caller to
+        reopen a fresh dialog afterwards. Reuses the same validation path so
+        the two buttons never diverge."""
+        self._save_and_new_requested = True
+        self._on_accept()
+        # If validation failed, _on_accept didn't accept() — clear the flag
+        # so a subsequent plain Save isn't mistaken for Save & New.
+        if self.result() != QDialog.Accepted:
+            self._save_and_new_requested = False
 
     def _on_accept(self) -> None:
         # Account
@@ -285,3 +321,8 @@ class NewTransactionDialog(QDialog):
     def split_requested(self) -> bool:
         """True when the user clicked Split… rather than Save (ADR-051)."""
         return self._split_requested
+
+    def save_and_new_requested(self) -> bool:
+        """True when the user clicked Save & New, so the caller should reopen
+        a fresh dialog on the same account after committing (ADR-105)."""
+        return self._save_and_new_requested

@@ -3226,6 +3226,44 @@ class Repository:
             return None
         return int(row["default_category_id"])
 
+    def most_common_category_for_payee(self, payee_id: int) -> Optional[int]:
+        """Infer a payee's usual category from its own transaction history
+        (ADR-106): the most-frequent non-Uncategorised, non-transfer category
+        across the payee and its aliases, ties broken by most recent. Used as
+        a fallback for the New Transaction dialog's category pre-fill when the
+        payee has no explicit remembered category (ADR-072). Returns None when
+        the payee has no categorised history. Read-only — never writes a
+        memory; the explicit per-payee default stays the source of truth."""
+        ids = self.expand_canonical_payee_ids([payee_id]) or [payee_id]
+        ph = ",".join("?" * len(ids))
+        row = self._conn.execute(
+            f"SELECT t.category_id AS cid, COUNT(*) AS n, "
+            f"       MAX(t.posted_date) AS recent "
+            f"FROM txn t JOIN category c ON c.id = t.category_id "
+            f"WHERE t.payee_id IN ({ph}) "
+            f"  AND t.category_id != ? AND c.kind != 'transfer' "
+            f"GROUP BY t.category_id "
+            f"ORDER BY n DESC, recent DESC LIMIT 1",
+            (*ids, UNCATEGORISED_ID),
+        ).fetchone()
+        return int(row["cid"]) if row is not None else None
+
+    def list_payee_default_categories(self) -> list[tuple[int, str, int]]:
+        """``(payee_id, payee_name, category_id)`` for every payee carrying a
+        remembered auto-category (ADR-072). Memories live on canonicals, so
+        these are the merchants that auto-categorise on import / pre-fill on
+        entry. Sorted by payee name; feeds the Rules dialog's memories section
+        (ADR-106). The caller resolves the category's display path."""
+        cur = self._conn.execute(
+            "SELECT id, name, default_category_id FROM payee "
+            "WHERE default_category_id IS NOT NULL "
+            "ORDER BY name COLLATE NOCASE"
+        )
+        return [
+            (int(r["id"]), r["name"], int(r["default_category_id"]))
+            for r in cur
+        ]
+
     def resolve_import_payee(
         self, raw_name: str,
     ) -> tuple[Optional[int], Optional[int]]:

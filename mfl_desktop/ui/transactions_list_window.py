@@ -52,6 +52,7 @@ from decimal import Decimal
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -60,6 +61,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableView,
@@ -80,6 +82,7 @@ from mfl_desktop.ui.delegates import (
     PayeeTypeaheadDelegate,
     StatusDelegate,
 )
+from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui import tokens
@@ -422,6 +425,20 @@ class TransactionsListWindow(QMainWindow):
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(False)
+        # ADR-105: match the register's edit triggers so inline editing is as
+        # responsive here, and offer the selection-based Bulk Edit verb via a
+        # context menu + Ctrl+E.
+        self._table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self._bulk_edit_action = QAction("Bulk Edit Selected…", self)
+        self._bulk_edit_action.setShortcut(QKeySequence("Ctrl+E"))
+        self._bulk_edit_action.triggered.connect(self._on_bulk_edit)
+        self.addAction(self._bulk_edit_action)
 
         self._proxy: Optional[DrillDownFilterProxy] = None
         self._model: Optional[TransactionTableModel] = None
@@ -502,6 +519,9 @@ class TransactionsListWindow(QMainWindow):
         from single-account to all-transactions)."""
         self._account_id = account_id
         self._model = TransactionTableModel(self._repo, account_id=account_id)
+        # ADR-105: warn before an inline edit lands on a reconciled row, same
+        # gate the main register installs (ADR-040).
+        self._model.reconciled_edit_guard = self._confirm_reconciled_edit
         self._proxy = DrillDownFilterProxy(self._model)
         self._table.setModel(self._proxy)
         self._model.reload()
@@ -762,6 +782,92 @@ class TransactionsListWindow(QMainWindow):
         self._apply_filter()
         self._refresh_chips_and_title()
         self._refresh_footer()
+
+    # ── bulk edit (ADR-105) ──
+
+    def _selected_txn_ids(self) -> list[int]:
+        """Source-row ids for the currently-selected proxy rows — one entry
+        per row regardless of the clicked column."""
+        assert self._proxy is not None and self._model is not None
+        sel = self._table.selectionModel()
+        if sel is None:
+            return []
+        ids: list[int] = []
+        for proxy_idx in sel.selectedRows():
+            src = self._proxy.mapToSource(proxy_idx)
+            if src.isValid():
+                ids.append(self._model.row_at(src.row()).id)
+        return ids
+
+    def _on_table_context_menu(self, pos) -> None:
+        ids = self._selected_txn_ids()
+        if len(ids) < 2:
+            return
+        menu = QMenu(self._table)
+        act = menu.addAction(f"Bulk Edit {len(ids)} Transactions…")
+        act.triggered.connect(self._on_bulk_edit)
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _on_bulk_edit(self) -> None:
+        """Apply payee / category / status / memo to ≥2 selected rows, reusing
+        the register's BulkEditDialog. Transfers and splits stay in the
+        register (ADR-105) — a transfer-kind category is refused here."""
+        ids = self._selected_txn_ids()
+        if len(ids) < 2:
+            return
+        dialog = BulkEditDialog(
+            self._repo.list_categories_flat(),
+            len(ids),
+            payee_names=self._repo.list_payee_names(),
+            parent=self,
+        )
+        if dialog.exec() != BulkEditDialog.Accepted:
+            return
+        changes = dialog.values()
+        if not changes:
+            return
+        new_cat = changes.get("category_id")
+        if new_cat is not None and self._repo.get_category_kind(new_cat) == "transfer":
+            QMessageBox.information(
+                self, "Use the register for transfers",
+                "Setting a transfer category turns transactions into transfers, "
+                "which isn't supported in this drill-down view.\n\n"
+                "Open the account register to do that.",
+            )
+            return
+        reconciled = [i for i in ids if self._repo.is_reconciled(i)]
+        if reconciled and not self._confirm_reconciled_bulk(len(reconciled)):
+            return
+        try:
+            self._repo.bulk_update_transactions(ids, **changes)
+        except Exception as e:  # noqa: BLE001 — surface as a dialog
+            QMessageBox.critical(
+                self, "Bulk edit",
+                f"The changes were not applied:\n\n{e}",
+            )
+            return
+        self._model.reload()
+        self._apply_filter()
+        self._refresh_footer()
+
+    def _confirm_reconciled_edit(self, _txn_id: int) -> bool:
+        """Model gate for an inline edit on a reconciled row (ADR-040)."""
+        resp = QMessageBox.question(
+            self, "Reconciled transaction",
+            "This transaction is reconciled to a statement.\n\n"
+            "Changing it may put that statement out of balance. Change anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        return resp == QMessageBox.Yes
+
+    def _confirm_reconciled_bulk(self, count: int) -> bool:
+        resp = QMessageBox.question(
+            self, "Reconciled transactions",
+            f"{count} of the selected transactions are reconciled to a "
+            "statement. Changing them may put it out of balance. Change anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        return resp == QMessageBox.Yes
 
     # ── refresh on activate (matches BudgetWindow / AccountSummaryWindow) ──
 
