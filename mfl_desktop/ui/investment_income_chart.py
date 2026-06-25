@@ -87,14 +87,26 @@ class IncomeBarChart(QWidget):
         n = len(self._bars)
         slot = plot_w / n
         bar_w = min(slot * 0.7, 48)
-        p.setFont(self._font(8))
         for i, (label, val) in enumerate(self._bars):
             cx = left + slot * (i + 0.5)
             bh = (val / axis_max) * plot_h if val > 0 else 0.0
-            p.fillRect(QRectF(cx - bar_w / 2, top + plot_h - bh, bar_w, bh), accent)
+            bar_top = top + plot_h - bh
+            p.fillRect(QRectF(cx - bar_w / 2, bar_top, bar_w, bh), accent)
+            # Value label above each non-zero bar — the month's income amount
+            # (income is usually quarterly, so only a few months are labelled).
+            if val > 0:
+                p.setPen(ink)
+                p.setFont(self._font(8))
+                ly = max(float(top), bar_top - 15)
+                p.drawText(
+                    QRectF(cx - slot / 2, ly, slot, 13),
+                    Qt.AlignHCenter | Qt.AlignBottom,
+                    chart_helpers.fmt_currency(val, 0, sym),
+                )
             # Thin the x labels when the window is long so they don't collide.
             if n <= 14 or i % 2 == 0:
                 p.setPen(axis_ink)
+                p.setFont(self._font(8))
                 p.drawText(
                     QRectF(cx - slot / 2, top + plot_h + 4, slot, 16),
                     Qt.AlignHCenter | Qt.AlignTop, label,

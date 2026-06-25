@@ -71,9 +71,14 @@ _MONTH_ABBR = (
 _SID_ROLE = Qt.UserRole + 1   # security id on the row's first cell (drill-down)
 _EPS = 1e-9
 
+# Income-first column order (ADR-108 r2): this is an *income* view, so the
+# income + yields lead, right after the security identity; the holdings /
+# price / total-return columns follow. The Income cell is bold so it reads as
+# the focus and isn't confused with the (larger) Total gain column.
 _TABLE_HEADERS = (
-    "Symbol", "Security", "Ccy", "Price", "Shares", "Cost", "Market value",
-    "Value gain", "Weight", "Yield/cost", "Yield/mkt", "Income", "Total gain",
+    "Symbol", "Security", "Ccy", "Income", "Yield/cost", "Yield/mkt",
+    "Price", "Shares", "Cost", "Market value", "Value gain", "Weight",
+    "Total gain",
 )
 
 
@@ -471,45 +476,52 @@ class InvestmentIncomeWindow(QMainWindow):
             yom_text, yom_key = self._yield_text(income, mv_f) if priced else ("—", _LOW)
             price = m["price"]
 
+            # (text, alignment, colour, numeric sort key, bold)
             cells = [
-                (m["symbol"], Qt.AlignLeft, None, None),
-                (m["name"], Qt.AlignLeft, None, None),
-                (m["ccy"], Qt.AlignLeft, None, None),
+                (m["symbol"], Qt.AlignLeft, None, None, False),
+                (m["name"], Qt.AlignLeft, None, None, False),
+                (m["ccy"], Qt.AlignLeft, None, None, False),
+                (self._money(m["income"]), Qt.AlignRight, None, income, True),
+                (yoc_text, Qt.AlignRight, None, yoc_key, False),
+                (yom_text, Qt.AlignRight, None, yom_key, False),
                 (
                     self._money(price, 2, m["ccy"]) if price is not None else "—",
                     Qt.AlignRight, None, float(price) if price is not None else _LOW,
+                    False,
                 ),
-                (f"{shares:,.4f}", Qt.AlignRight, None, shares),
-                (self._money(m["cost"]), Qt.AlignRight, None, cost),
+                (f"{shares:,.4f}", Qt.AlignRight, None, shares, False),
+                (self._money(m["cost"]), Qt.AlignRight, None, cost, False),
                 (
                     self._money(mv) if priced else "—",
-                    Qt.AlignRight, None, mv_f if priced else _LOW,
+                    Qt.AlignRight, None, mv_f if priced else _LOW, False,
                 ),
                 (
                     self._signed(unreal) + self._pct(float(unreal), cost)
                     if unreal is not None else "—",
                     Qt.AlignRight, self._colour(unreal),
-                    float(unreal) if unreal is not None else _LOW,
+                    float(unreal) if unreal is not None else _LOW, False,
                 ),
                 (
                     f"{weight:.1f}%" if weight is not None else "—",
                     Qt.AlignRight, None, weight if weight is not None else _LOW,
+                    False,
                 ),
-                (yoc_text, Qt.AlignRight, None, yoc_key),
-                (yom_text, Qt.AlignRight, None, yom_key),
-                (self._money(m["income"]), Qt.AlignRight, None, income),
                 (
                     self._signed(total_gain), Qt.AlignRight,
-                    self._colour(total_gain), total_gain,
+                    self._colour(total_gain), total_gain, False,
                 ),
             ]
-            for c, (text, align, colour, sortkey) in enumerate(cells):
+            for c, (text, align, colour, sortkey, bold) in enumerate(cells):
                 item = _SortItem(text)
                 item.setTextAlignment(int(align | Qt.AlignVCenter))
                 if colour is not None:
                     item.setForeground(QColor(colour))
                 if sortkey is not None:
                     item.setData(Qt.UserRole, sortkey)
+                if bold:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
                 if c == 0:
                     item.setData(_SID_ROLE, m["sid"])
                 self._table.setItem(r, c, item)
