@@ -1,5 +1,1 @@
-**When entering manual transactions through the dialogue box, please include a 
-'save and new transaction'**
-**payee auto complete in manual transaction dialogue box**
-**Spending over time report always goes behind register after editing the filter**
-**when you double click on a report to view transactions, you cannot edit / bulk edit them in that view**
+(No open items — the four previous notes shipped in ADR-105 on 2026-06-25.)
