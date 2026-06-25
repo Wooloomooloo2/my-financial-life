@@ -85,6 +85,7 @@ from mfl_desktop.ui.spending_report_window import SpendingReportWindow
 from mfl_desktop.ui.income_report_window import IncomeReportWindow
 from mfl_desktop.ui.income_expense_window import IncomeExpenseWindow
 from mfl_desktop.ui.investment_returns_window import InvestmentReturnsWindow
+from mfl_desktop.ui.investment_income_window import InvestmentIncomeWindow
 from mfl_desktop.ui.sankey_report_window import SankeyReportWindow
 from mfl_desktop.ui.payee_report_window import PayeeReportWindow
 from mfl_desktop.ui.category_payee_window import CategoryPayeeWindow
@@ -225,6 +226,10 @@ class RegisterWindow(QMainWindow):
         # reports_changed signal + WA_DeleteOnClose contract).
         self._saved_report_wins: dict[int, QMainWindow] = {}
         self._bare_report_wins: dict[str, QMainWindow] = {}
+        # ADR-108: the Investment Income view is a live analysis window (no
+        # saved type), kept singleton via this reference rather than the
+        # report-framework registries above.
+        self._investment_income_win: Optional[QMainWindow] = None
 
         search = QLineEdit()
         search.setPlaceholderText("Search payee, memo, amount, or date…")
@@ -960,6 +965,12 @@ class RegisterWindow(QMainWindow):
             self._on_investment_returns_report
         )
         reports_menu.addAction(self._investment_returns_action)
+
+        self._investment_income_action = QAction("Investment Inco&me…", self)
+        self._investment_income_action.triggered.connect(
+            self._on_investment_income_report
+        )
+        reports_menu.addAction(self._investment_income_action)
 
         self._sankey_action = QAction("&Sankey (Income → Expenses)…", self)
         self._sankey_action.triggered.connect(self._on_sankey_report)
@@ -3200,6 +3211,23 @@ class RegisterWindow(QMainWindow):
     def _on_sankey_report(self) -> None:
         """Reports menu → Sankey. Opens the *bare* window (ADR-056)."""
         self._open_bare_report(TYPE_SANKEY)
+
+    def _on_investment_income_report(self) -> None:
+        """Reports menu → Investment Income (ADR-108). A live analysis window
+        (not a saved report), kept singleton — repeat clicks raise the existing
+        one rather than stacking duplicates."""
+        existing = self._investment_income_win
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        win = InvestmentIncomeWindow(self._repo, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.destroyed.connect(
+            lambda _obj=None: setattr(self, "_investment_income_win", None)
+        )
+        self._investment_income_win = win
+        win.show()
 
     def _open_bare_report(self, type_key: str) -> None:
         """Open an unattached report window for the given type. Singleton
