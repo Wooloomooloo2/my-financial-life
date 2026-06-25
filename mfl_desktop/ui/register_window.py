@@ -1154,7 +1154,9 @@ class RegisterWindow(QMainWindow):
         # ADR-048: on an investment account, New Transaction opens the
         # investment form (Buy/Sell/Div/…) rather than the cash dialog.
         if self._account is not None and self._account.family == "investment":
-            self._open_investment_txn_dialog(seed=None)
+            # ADR-107: loop while the user keeps clicking "Save & New".
+            while self._open_investment_txn_dialog(seed=None):
+                pass
             return
         default_id = self._account.id if self._account is not None else None
         # ADR-105: loop while the user keeps clicking "Save & New", reusing the
@@ -1376,22 +1378,26 @@ class RegisterWindow(QMainWindow):
             "Split updated" if seed is not None else "Split added", 4000,
         )
 
-    def _open_investment_txn_dialog(self, seed) -> None:
+    def _open_investment_txn_dialog(self, seed) -> bool:
         """Open the investment transaction dialog in create (seed=None) or edit
-        mode, then reload the register + sidebar on a successful save."""
+        mode, then reload the register + sidebar on a successful save.
+
+        Returns True when the user clicked "Save & New" (create mode only), so
+        the caller should reopen a fresh dialog for the next entry (ADR-107)."""
         if self._account is None:
-            return
+            return False
         dialog = InvestmentTransactionDialog(
             self._repo, self._account, seed=seed, parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
-            return
+            return False
         self._model.reload()
         self._refresh_sidebar_balances()
         self.statusBar().showMessage(
             "Transaction updated" if seed is not None else "Transaction added",
             4000,
         )
+        return seed is None and dialog.save_and_new_requested()
 
     def _on_model_data_changed(self, top_left, _bottom_right, _roles) -> None:
         """Detect inline edits that need post-processing:

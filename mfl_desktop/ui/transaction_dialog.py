@@ -23,12 +23,12 @@ from PySide6.QtWidgets import (
     QCompleter,
     QDateEdit,
     QDialog,
-    QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QRadioButton,
     QVBoxLayout,
 )
@@ -153,25 +153,42 @@ class NewTransactionDialog(QDialog):
         form.addRow("Amount:", self._amount_edit)
         form.addRow("Memo:", self._memo_edit)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Save | QDialogButtonBox.Cancel
-        )
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        # ADR-105: "Save & New" commits this transaction and immediately
-        # reopens a fresh dialog on the same account, for fast multi-entry.
-        save_new_btn = buttons.addButton(
-            "Save && New", QDialogButtonBox.ActionRole,
-        )
-        save_new_btn.clicked.connect(self._on_save_and_new)
+        # ADR-107: lay the buttons out by hand rather than via
+        # QDialogButtonBox. The box's macOS policy pushes ActionRole buttons
+        # (Save & New, Split) to the *left*, away from where the eye lands;
+        # we want the primary action on the right and consistent across
+        # platforms. Order: secondary action left, then Cancel / Save /
+        # Save & New on the right, with Save & New as the default (Enter).
         # ADR-051: "Split…" hands the header + amount to the split dialog,
         # which collects the per-category lines. Category isn't required here.
-        split_btn = buttons.addButton("Split…", QDialogButtonBox.ActionRole)
+        split_btn = QPushButton("Split…")
         split_btn.clicked.connect(self._on_split)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._on_accept)
+        # ADR-105: "Save & New" commits this transaction and immediately
+        # reopens a fresh dialog on the same account, for fast multi-entry.
+        save_new_btn = QPushButton("Save && New")
+        save_new_btn.clicked.connect(self._on_save_and_new)
+        # Save & New is the default — Enter commits and reopens for fast
+        # multi-entry. Pin autoDefault off on the others so a focused button
+        # can't quietly become the default.
+        for b in (split_btn, cancel_btn, save_btn):
+            b.setAutoDefault(False)
+        save_new_btn.setDefault(True)
+        save_new_btn.setAutoDefault(True)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(split_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(save_btn)
+        button_row.addWidget(save_new_btn)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addLayout(button_row)
 
         self.resize(420, self.sizeHint().height())
         self._values: Optional[NewTransactionValues] = None

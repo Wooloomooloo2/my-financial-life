@@ -49,11 +49,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDialog,
-    QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -309,11 +310,32 @@ class InvestmentTransactionDialog(QDialog):
         tokens.themed(self._hint, "QLabel { color: {muted}; font-size: 11px; }")
         outer.addWidget(self._hint)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Save).setDefault(True)
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+        # ADR-107: hand-laid button row (see transaction_dialog.py) — Cancel /
+        # Save / Save & New on the right, primary action where the eye lands.
+        self._save_and_new_requested = False
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setAutoDefault(False)
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._on_save)
+        save_btn.setAutoDefault(False)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(save_btn)
+        # ADR-107: "Save & New" only when creating — re-opening on an edit
+        # makes no sense. It's the default (Enter) for fast multi-entry.
+        if seed is None:
+            save_new_btn = QPushButton("Save && New")
+            save_new_btn.clicked.connect(self._on_save_and_new)
+            save_new_btn.setDefault(True)
+            save_new_btn.setAutoDefault(True)
+            button_row.addWidget(save_new_btn)
+        else:
+            save_btn.setDefault(True)
+            save_btn.setAutoDefault(True)
+        outer.addLayout(button_row)
 
         if seed is not None:
             self._populate_from_seed(seed)
@@ -896,6 +918,20 @@ class InvestmentTransactionDialog(QDialog):
             )
             return
         self.accept()
+
+    def _on_save_and_new(self) -> None:
+        """ADR-107: commit like Save, but flag the register to reopen a fresh
+        investment dialog afterwards for fast multi-entry. Reuses _on_save so
+        the two paths never diverge; clears the flag if validation bailed."""
+        self._save_and_new_requested = True
+        self._on_save()
+        if self.result() != QDialog.Accepted:
+            self._save_and_new_requested = False
+
+    def save_and_new_requested(self) -> bool:
+        """True when the user clicked Save & New, so the register should reopen
+        a fresh dialog on the same account after this one commits (ADR-107)."""
+        return self._save_and_new_requested
 
     def _compute_amount(
         self, kind: str, qty: Optional[Decimal], price: Optional[Decimal],
