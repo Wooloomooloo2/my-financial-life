@@ -48,6 +48,7 @@ from mfl_desktop.db.repository import Repository, ReportRow
 from mfl_desktop.reports import (
     category_group_map, category_path, category_root_map,
 )
+from mfl_desktop.reports.income_expense import bucket_bounds
 from mfl_desktop.reports.filters import (
     IncomeOverTimeFilters,
     SpendingOverTimeFilters,
@@ -189,6 +190,9 @@ class SpendingReportWindow(QMainWindow):
 
         # Drill-down: stack of prior filter snapshots. Empty == top-level.
         self._drill_stack: list[SpendingOverTimeFilters] = []
+        # Granularity of the last render — a clicked bar resolves its bucket
+        # key to a date span against this (ADR-114 amend).
+        self._last_granularity: str = "month"
 
         self.resize(1240, 740)
 
@@ -405,6 +409,9 @@ class SpendingReportWindow(QMainWindow):
             if filters.granularity == "auto"
             else _GRANULARITY_TO_SQL.get(filters.granularity, "month")
         )
+        # Remembered so a clicked bar can resolve its bucket key → date span
+        # when it opens the underlying transactions (ADR-114 amend).
+        self._last_granularity = sql_granularity
 
         account_ids = list(filters.account_ids) or [a.id for a in self._all_accounts]
         if not account_ids:
@@ -665,7 +672,7 @@ class SpendingReportWindow(QMainWindow):
 
     # ── drill-down ──
 
-    def _on_segment_clicked(self, group_id: int, _bucket: str) -> None:
+    def _on_segment_clicked(self, group_id: int, bucket: str) -> None:
         """Push current filters onto the drill stack, then narrow the
         category filter to the clicked group's descendants and descend
         the rollup level one notch (so the chart re-renders with the
@@ -686,7 +693,7 @@ class SpendingReportWindow(QMainWindow):
             self._current_filters.rollup_level == "leaf"
             or not self._repo.category_has_children(group_id)
         ):
-            self._open_transactions(group_id)
+            self._open_transactions(group_id, bucket)
             return
         descendants = self._repo.category_descendants(group_id)
         if not descendants:
@@ -726,17 +733,27 @@ class SpendingReportWindow(QMainWindow):
             self._back_button.setVisible(False)
         self._refresh()
 
-    def _open_transactions(self, category_id: int) -> None:
+    def _open_transactions(self, category_id: int, bucket: str) -> None:
         """Open the underlying transactions for a leaf category over the
-        report's current period + account scope (ADR-114). Reached when a
-        clicked segment can't be drilled further. The category filter is
-        'this and descendants', so a category that still has children shows
-        the whole subtree. Period is passed as the report's resolved date
-        bounds so the list matches exactly what the bars summed."""
+        **clicked bar's** time bucket + the report's account scope (ADR-114).
+        Reached when a clicked segment can't be drilled further. The category
+        filter is 'this and descendants', so a category that still has children
+        shows the whole subtree. The period is the span of the clicked bucket
+        (e.g. just 2023 for an annual bar) — not the whole report range — so
+        the list matches the bar the user actually clicked. Falls back to the
+        full report range if the bucket key can't be parsed."""
         if category_id not in self._categories_by_id:
             return
         filters = self._current_filters
-        d_from, d_to = self._resolve_date_bounds(filters)
+        r_from, r_to = self._resolve_date_bounds(filters)
+        try:
+            b_from, b_to = bucket_bounds(bucket, self._last_granularity)
+            # An edge bucket only covers the slice inside the report range, so
+            # clamp — the bar summed (bucket span ∩ report range), not the whole
+            # calendar bucket.
+            d_from, d_to = max(b_from, r_from), min(b_to, r_to)
+        except (ValueError, KeyError):
+            d_from, d_to = r_from, r_to
         # A single selected account drills per-account; 0 (all) or a subset
         # opens the cross-account view (mirrors the Income & Expense drill).
         acc_ids = list(filters.account_ids)

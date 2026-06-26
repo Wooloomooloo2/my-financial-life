@@ -43,9 +43,13 @@ children is unchanged, as is Back / the drill stack.
 - A click at the `leaf` rollup always opens transactions, so the (rare) case of
   a tree deeper than three levels shows the leaf-bucket's whole subtree rather
   than drilling further; acceptable and matches the "and descendants" scoping.
-- Scope is the **whole report period**, not the clicked time bucket — the
-  existing category drill already ignored the bucket, so this keeps the
-  behaviour the user's filters describe. Scoping a leaf click to just the
-  clicked bucket's span is a possible future refinement.
+- **Amendment (same day):** scope is the **clicked time bucket**, not the whole
+  report period. The first cut opened the full report range, so clicking
+  "Rent for 2023" listed Rent for *2007–2025*. The leaf click now resolves its
+  bucket key to a date span (`bucket_bounds` from
+  `mfl_desktop.reports.income_expense`, which both reports' `_BUCKET_EXPR` feed)
+  against the last-render granularity (remembered as `self._last_granularity`),
+  **clamped to the report range** so an edge bucket lists only the slice the bar
+  actually summed. Unparseable key → falls back to the full report range.
 - Inherited by `IncomeReportWindow` for free (it only overrides `_DIRECTION`).
   View layer only; no migration, no schema change.
