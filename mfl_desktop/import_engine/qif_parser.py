@@ -1,10 +1,12 @@
-# QIF (Quicken Interchange Format) parser — investment-focused (ADR-043, round 1).
+# QIF (Quicken Interchange Format) parser (ADR-043; cash sections added later).
 #
-# Parses the four sections a Banktivity investment export carries:
+# Parses the sections a Banktivity / Quicken export carries:
 #   !Account        — account name / type / cleared balance
 #   !Type:Cat       — the source category list (parsed, but not bulk-created in
 #                     round 1; see ADR-043)
 #   !Type:Invst     — investment transactions (Buy / Sell / Div / Cash / …)
+#   !Type:Bank / !Type:CCard / !Type:Cash / !Type:Oth A|L
+#                   — cash-ledger transactions (date / amount / payee / category)
 #   !Type:Security  — the securities master (name / ticker / type)
 #
 # Returns a QifFile whose `.transactions` are normalised dicts that are a
@@ -29,8 +31,9 @@
 # direction. Unknown actions fall back to "T as a signed cash amount" so a
 # real cash movement is never silently dropped (logged at WARNING).
 #
-# Structured so !Type:Bank / !Type:CCard dispatch can be added later: today
-# their records are simply skipped.
+# Cash-ledger sections (!Type:Bank / !Type:CCard / !Type:Cash / !Type:Oth) are
+# normalised into the same cash dict the service already consumes from CSV/OFX;
+# splits aren't exploded into child rows yet (the row imports at its total).
 
 from __future__ import annotations
 
@@ -124,7 +127,7 @@ def parse_qif(file_bytes: bytes, filename: str = "") -> QifFile:
         if line.startswith("!"):
             flush()
             section = _section_for_header(line)
-            if section in ("invst", "cat", "security", "account"):
+            if section in ("invst", "cat", "security", "account", "cash"):
                 saw_known_section = True
             if section == "invst":
                 result.is_investment = True
@@ -169,8 +172,17 @@ def _section_for_header(header: str) -> str:
         return "invst"
     if h.startswith("!type:security"):
         return "security"
-    # !Type:Bank / !Type:CCard / !Option / !Clear / !Type:Memorized / etc.
-    # Skipped in round 1; bank/credit dispatch slots in here later.
+    # Cash-ledger transactions: bank accounts, credit cards, cash, and the
+    # generic asset/liability ledgers Banktivity/Quicken export (Oth A / Oth L).
+    # All share the same record shape (D/T/C/P/M/L), parsed as cash (ADR-043 amd).
+    if (
+        h.startswith("!type:bank")
+        or h.startswith("!type:ccard")
+        or h.startswith("!type:cash")
+        or h.startswith("!type:oth")
+    ):
+        return "cash"
+    # !Option / !Clear / !Type:Memorized / !Type:Prices / etc. — skipped.
     return "ignore"
 
 
@@ -183,6 +195,10 @@ def _dispatch_record(section: str, fields: list[tuple[str, str]], result: QifFil
         _apply_category_record(fields, result)
     elif section == "invst":
         txn = _normalise_invst_record(fields)
+        if txn is not None:
+            result.transactions.append(txn)
+    elif section == "cash":
+        txn = _normalise_cash_record(fields)
         if txn is not None:
             result.transactions.append(txn)
     # 'ignore' / '' → drop the record.
@@ -316,6 +332,90 @@ def _normalise_invst_record(fields: list[tuple[str, str]]) -> Optional[dict]:
         "price": price,                   # Decimal or None
         "commission": commission,         # Decimal or None
         "linked_account": linked_account,
+    }
+
+
+def _normalise_cash_record(fields: list[tuple[str, str]]) -> Optional[dict]:
+    """Normalise a QIF cash-ledger record (Bank / CCard / Cash / Oth) into the
+    same cash dict the import service consumes from CSV/OFX (ADR-043 amendment).
+
+    Fields: ``D`` date, ``T``/``U`` signed amount, ``C`` cleared flag, ``P``
+    payee, ``M`` memo, ``N`` cheque/reference number, ``L`` category — or
+    ``L[Account]`` for a transfer, imported as plain cash with a memo note (real
+    transfer linking is a later round, mirroring the investment path). Split
+    lines (``S``/``E``/``$``) are not exploded into child rows in this round; the
+    record imports at its total ``T`` and, lacking an ``L``, falls back to the
+    first split category so it isn't silently uncategorised."""
+    date_raw = payee = memo = number = ""
+    cleared = ""
+    linked_account = ""
+    category = ""
+    total: Optional[Decimal] = None
+    split_categories: list[str] = []
+
+    for code, value in fields:
+        if code == "D":
+            date_raw = value
+        elif code in ("T", "U"):
+            # T and U are the same signed amount in practice; first non-None wins.
+            if total is None:
+                total = _parse_amount_str(value)
+        elif code == "C":
+            cleared = value.strip().lower()
+        elif code == "P":
+            payee = value
+        elif code == "M":
+            memo = value
+        elif code == "N":
+            number = value.strip()
+        elif code == "L":
+            inner = _bracketed(value)
+            if inner is not None:
+                linked_account = inner          # L[Account] — transfer's other side
+            else:
+                category = value
+        elif code == "S":
+            inner = _bracketed(value)
+            if inner is None and value.strip():
+                split_categories.append(value)
+
+    date_iso = _parse_qif_date(date_raw)
+    if not date_iso:
+        logger.warning("Skipping QIF cash row with unparseable date: %r", date_raw)
+        return None
+
+    t = total if total is not None else Decimal("0")
+    amount = abs(t)
+    tx_type = "debit" if t < 0 else "credit"
+
+    memo_parts: list[str] = []
+    if number:
+        memo_parts.append(f"#{number}")
+    if memo.strip():
+        memo_parts.append(memo.strip())
+    if linked_account:
+        direction = "from" if tx_type == "credit" else "to"
+        memo_parts.append(f"Transfer {direction} {linked_account}")
+    full_memo = " | ".join(memo_parts)
+
+    # Prefer the L category; for a split row (no L) fall back to its first split
+    # category so the whole amount isn't dumped into Uncategorised. A transfer
+    # (L[Account]) leaves the category empty — it's cash for now, not a spend.
+    category_raw = ""
+    if not linked_account:
+        category_raw = category or (split_categories[0] if split_categories else "")
+
+    status_override = "Cleared" if cleared in ("c", "x", "r") else ""
+
+    return {
+        "fitid": "",                          # QIF has no FITID; service hashes
+        "date": date_iso,
+        "amount": amount,                     # positive magnitude; tx_type signs it
+        "tx_type": tx_type,
+        "payee_raw": payee.strip(),
+        "memo": full_memo,
+        "status_override": status_override,
+        "category_raw": category_raw,
     }
 
 
