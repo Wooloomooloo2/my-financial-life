@@ -44,7 +44,7 @@ class DataFile:
     name: str            # display name (library: user stem; snapshot: stem)
     saved_at: datetime   # from the file's mtime
     size: int            # bytes
-    kind: str            # "saved" | "snapshot"
+    kind: str            # "current" | "saved" | "snapshot"
 
 
 def library_dir(db_path: Path | str) -> Path:
@@ -81,6 +81,18 @@ def _size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def current_file(db_path: Path | str) -> DataFile:
+    """The live working file itself, as a distinguished ``kind="current"`` row.
+
+    Surfaced at the top of the Saved-datasets list (ADR-109) so the user can
+    always *see* which file they're actually editing — the No.1 source of the
+    "which file is this?" confusion was that the working file appeared nowhere in
+    the library. It is not a saved copy and must never be deletable/renamable;
+    the dialog enforces that off the ``kind``."""
+    p = Path(db_path).resolve()
+    return DataFile(p, p.stem, _mtime(p), _size(p), "current")
 
 
 def list_saved(db_path: Path | str) -> list[DataFile]:

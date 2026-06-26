@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import data_library, snapshots
 from mfl_desktop import license_service
 from mfl_desktop import version
-from mfl_desktop.app_session import remember_last_db
+from mfl_desktop.app_session import remember_last_db, set_snapshots_root
 from mfl_desktop.licensing import STATE_EXPIRED, STATE_TRIAL
 from mfl_desktop.account_summary import bills_due_summary
 from mfl_desktop import periods
@@ -452,10 +452,26 @@ class RegisterWindow(QMainWindow):
         connection. Every step is best-effort — a backup or checkpoint failure
         must never trap the user in the app."""
         self._snapshot_timer.stop()
+        self._flush_and_close()
+        super().closeEvent(event)
+
+    def on_about_to_quit(self) -> None:
+        """Safety net for a quit that doesn't route through ``closeEvent`` —
+        e.g. Cmd/Ctrl-Q or app-level quit (ADR-109). Idempotent: ``_flush_and_close``
+        no-ops once the repo is closed, so running both here and in ``closeEvent``
+        is harmless. Guarantees the WAL is folded into the ``.mfl`` (the
+        'auto-save on exit' the owner asked for) however the app exits."""
+        self._snapshot_timer.stop()
+        self._flush_and_close()
+
+    def _flush_and_close(self) -> None:
+        """Final backup → WAL checkpoint → close, guarded so it runs at most
+        once. Best-effort throughout."""
+        if not self._repo.is_open():
+            return
         snapshots.maybe_snapshot(self._repo)
         self._repo.checkpoint()
         self._repo.close()
-        super().closeEvent(event)
 
     def changeEvent(self, event) -> None:
         """Refresh the Schedules cue when the window regains focus (A6,
@@ -2294,7 +2310,83 @@ class RegisterWindow(QMainWindow):
         dialog.load_requested.connect(self._load_dataset)
         # Re-arm the capture timer if the user changed the cadence (ADR-060).
         dialog.settings_changed.connect(self._apply_snapshot_interval)
+        # ADR-109 Locations: main-file + snapshots-folder changes the window owns.
+        dialog.open_existing_main_requested.connect(self._on_open_existing_main)
+        dialog.relocate_main_requested.connect(self._relocate_main_file)
+        dialog.snapshots_root_changed.connect(self._set_snapshots_root)
         dialog.exec()
+
+    def _on_open_existing_main(self, path: Path) -> None:
+        """Make an existing file the live working file (ADR-109 Locations) — the
+        same swap as File ▸ Open, which already records it as the file to reopen
+        next launch."""
+        path = Path(path)
+        if path.resolve() == self._repo.db_path.resolve():
+            return
+        try:
+            new_repo = Repository(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(
+                self, "Could not open file",
+                f"The file at {path} could not be opened as a "
+                f"My Financial Life database:\n\n{e}",
+            )
+            return
+        self._swap_repository(new_repo)
+        self.statusBar().showMessage(f"Opened {path.name}", 5000)
+
+    def _relocate_main_file(self, target_dir: Path) -> None:
+        """Move the live working file into ``target_dir`` (ADR-109 Locations).
+
+        Done as a self-contained copy + verify + swap + best-effort delete of the
+        original — never a bare ``os.rename`` (Documents → external drive is a
+        cross-device move that would raise). The copy is atomic via
+        ``Repository.save_copy``, so any failure leaves the original file live
+        and intact."""
+        target_dir = Path(target_dir)
+        dest = target_dir / self._repo.db_path.name
+        src = self._repo.db_path.resolve()
+        if dest.resolve() == src:
+            return
+        if dest.exists():
+            overwrite = QMessageBox.question(
+                self, "Replace file",
+                f"A file named “{dest.name}” already exists in that folder. "
+                "Replace it?",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
+            )
+            if overwrite != QMessageBox.Yes:
+                return
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            self._repo.checkpoint()        # fold WAL in so the copy is complete
+            self._repo.save_copy(dest)     # atomic online backup to the new home
+            Repository(dest).close()       # verify it opens before we commit
+            new_repo = Repository(dest)
+        except Exception as e:  # noqa: BLE001 — original is untouched on failure
+            QMessageBox.critical(
+                self, "Move failed",
+                f"Could not move the data file to {target_dir}:\n\n{e}",
+            )
+            return
+        self._swap_repository(new_repo)    # adopts new, tears down + closes old
+        # Best-effort: remove the file we moved away from + its WAL/SHM sidecars.
+        for stray in (src, src.with_name(src.name + "-wal"),
+                      src.with_name(src.name + "-shm")):
+            try:
+                stray.unlink()
+            except OSError:
+                pass
+        self.statusBar().showMessage(f"Moved data file to {target_dir}", 6000)
+
+    def _set_snapshots_root(self, parent: Path) -> None:
+        """Point backups at a new parent folder (ADR-109 Locations) and seed the
+        new ``MFL Snapshots`` location immediately with a forced capture."""
+        set_snapshots_root(Path(parent))
+        snapshots.maybe_snapshot(self._repo, force=True)
+        self.statusBar().showMessage(
+            f"Backups now saved under {parent}", 6000,
+        )
 
     def _load_dataset(self, source: Path) -> None:
         """Load a saved dataset / snapshot as a *fresh working copy* (ADR-059).

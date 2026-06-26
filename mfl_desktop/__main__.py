@@ -14,10 +14,12 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from PySide6.QtCore import QThreadPool, QRunnable, QStandardPaths
+from PySide6.QtCore import QThreadPool, QRunnable
 
-from mfl_desktop.app_session import last_db_path, remember_last_db
+from mfl_desktop import launch
+from mfl_desktop.app_session import remember_last_db
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.ui.file_recovery_dialog import FileRecoveryDialog
 from mfl_desktop.fx import refresh_latest_into
 from mfl_desktop.prices import (
     backfill_missing_history_into,
@@ -85,26 +87,9 @@ class _PriceRefreshRunnable(QRunnable):
 
 
 APP_NAME = "MFL"
-# Historical cwd dev databases, preferred in this order: the canonical .mfl
-# (ADR-016's save format) first, then the older .db. So a repo checked out on
-# any machine opens the live working file with no --db flag. (ADR-050 Tier-2
-# amended 2026-06-14: was .db-only, which silently diverged from a .mfl carried
-# across machines — the Windows checkout opened a stale mfl_dev.db while the
-# real data lived in mfl_dev.mfl.)
-LEGACY_DB_CANDIDATES = [Path("mfl_dev.mfl"), Path("mfl_dev.db")]
-DEFAULT_DB_FILENAME = "MyFinancialLife.mfl"
-
-
-def _appdata_db_path() -> Path:
-    """The OS-standard default database location (ADR-050 rule 2).
-
-    Resolves to ``~/Library/Application Support/MFL`` on macOS,
-    ``%APPDATA%\\MFL`` on Windows, ``~/.local/share/MFL`` on Linux — one
-    ``QStandardPaths`` call, no platform branch (rule 9). Requires a
-    QApplication whose applicationName is set (``APP_NAME`` drives the
-    trailing ``MFL`` folder)."""
-    base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
-    return Path(base) / DEFAULT_DB_FILENAME
+# Database resolution (which file to open, legacy candidates, the first-run
+# default, and the never-silently-swap cloud-recovery loop) lives in
+# ``mfl_desktop.launch`` (ADR-109) so it's unit-testable without a window.
 
 
 def _seed_starter_db(repo: Repository) -> None:
@@ -164,71 +149,25 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics.setup_logging()
     diagnostics.install_excepthook()
 
-    # Resolve which database to open (ADR-050 rule 2 + ADR-016 + ADR-092).
-    # Precedence, highest first:
-    #   1. --db          explicit caller intent
-    #   2. last-opened   the file open at last quit (ADR-092), if present now
-    #   3. legacy cwd db dev convenience for a checked-out repo (mfl_dev.mfl/.db)
-    #   4. appdata default  the OS-standard per-user file (seeded if empty)
-    seed_if_empty = False
-    remembered = None if args.db is not None else last_db_path()
-    legacy_db = next((p for p in LEGACY_DB_CANDIDATES if p.exists()), None)
-    # Set when a remembered pointer exists but we *couldn't use it this launch*
-    # (the file isn't present right now, or won't open) and fell back to a
-    # default. In that case we must NOT overwrite the pointer — the file may be
-    # an iCloud/removable file that's just not materialised yet, and clobbering
-    # it would permanently lose the user's last file (ADR-092 amendment).
-    fell_back_from_remembered = False
-    if args.db is not None:
-        # Explicit path: the caller asked for a specific file — don't silently
-        # create it; point at the CLI if it's missing (unchanged behaviour).
-        db_path = args.db
-        if not db_path.exists():
-            print(
-                f"Database not found at {db_path}.\n"
-                "Create one with: python -m mfl_desktop.cli init",
-                file=sys.stderr,
-            )
-            return 1
-    elif remembered is not None and remembered.exists():
-        # Reopen the file the user was working in when they last quit (ADR-092).
-        # If it turns out to be unreadable we fall back below without clobbering.
-        db_path = remembered
-    elif legacy_db is not None:
-        # Dev convenience: a checked-out repo with the historical working DB in
-        # cwd keeps launching against it with no --db flag. The canonical .mfl
-        # wins over a legacy .db when both are present (ADR-016/050).
-        db_path = legacy_db
-        fell_back_from_remembered = remembered is not None
-    else:
-        # Default: the OS-standard per-user location. Repository() bootstraps
-        # the schema and mkdirs the parent on first run; we own this file, so
-        # an empty one gets seeded with a starter account below.
-        db_path = _appdata_db_path()
-        seed_if_empty = True
-        fell_back_from_remembered = remembered is not None
+    # Resolve which database to open (ADR-109; supersedes the ADR-092 fall-back).
+    # The resolver never silently swaps to a different file: a configured main
+    # file that's temporarily unreadable (cloud-evicted, drive offline) is waited
+    # out / re-downloaded, then escalated to an explicit recovery dialog shown
+    # over the splash. ``pump`` keeps the splash painting during a cloud download.
+    res = launch.resolve_database(
+        args, pump=app.processEvents, dialog_factory=FileRecoveryDialog,
+    )
+    if res.exit_code is not None:
+        return res.exit_code
+    db_path = res.db_path
+    seed_if_empty = res.seed_if_empty
 
-    try:
-        repo = Repository(db_path)
-    except Exception:
-        if remembered is not None and db_path == remembered:
-            # The remembered file is present but won't open (corrupt / not an
-            # MFL file). Don't strand the user on a dead launch — fall back to
-            # the normal default and let them File ▸ Open the right one. Keep
-            # the pointer (don't clobber) so a transient cause can recover.
-            db_path = legacy_db if legacy_db is not None else _appdata_db_path()
-            seed_if_empty = legacy_db is None
-            fell_back_from_remembered = True
-            repo = Repository(db_path)
-        else:
-            raise
-
-    # Persist the file we actually opened so the next launch reopens it
-    # (ADR-092) — UNLESS we fell back from a remembered pointer that was only
-    # temporarily unavailable, in which case keeping the pointer lets the next
-    # launch retry once the file is back. File ▸ Open updates it at runtime.
-    if not fell_back_from_remembered:
-        remember_last_db(db_path)
+    # Every resolved path is now an explicit choice (the pointer, --db, the
+    # first-run default, or a file the user picked in recovery), so we always
+    # record it as the file to reopen next launch. File ▸ Open / Locations update
+    # it at runtime. Repository() bootstraps the schema + mkdirs the parent.
+    repo = Repository(db_path)
+    remember_last_db(db_path)
 
     # ADR-076: apply the persisted light/dark theme now the DB is open (before
     # any window is shown, so there's no flash). Default light.
@@ -261,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:
     win = RegisterWindow(repo, account_iri)
     win.show()
     splash.finish(win)  # ADR-103: close the splash once the window is up
+    # ADR-109: guarantee the WAL is folded into the .mfl on *any* exit, not just
+    # a window close — Cmd/Ctrl-Q routes through aboutToQuit, not closeEvent.
+    # Idempotent with closeEvent (see RegisterWindow._flush_and_close).
+    app.aboutToQuit.connect(win.on_about_to_quit)
 
     # First-run onboarding (ADR-098): only when we just seeded a brand-new
     # file this launch. Lets the user pick a base currency + name the first

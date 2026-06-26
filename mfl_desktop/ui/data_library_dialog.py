@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import data_library
 from mfl_desktop.data_library import DataFile
 from mfl_desktop.db.repository import Repository
+from mfl_desktop.ui.locations_dialog import LocationsDialog
 from mfl_desktop.ui.snapshot_settings_dialog import SnapshotSettingsDialog
 
 _FILE_ROLE = Qt.UserRole
@@ -71,6 +72,12 @@ class DataLibraryDialog(QDialog):
     # Emitted after the user changes snapshot retention settings, so the window
     # can re-arm its capture timer at the new cadence (ADR-060).
     settings_changed = Signal()
+    # ADR-109 Locations: the user picked an existing file to make the live file.
+    open_existing_main_requested = Signal(Path)
+    # ADR-109 Locations: relocate the live file into the picked folder.
+    relocate_main_requested = Signal(Path)
+    # ADR-109 Locations: new parent folder for the MFL Snapshots directory.
+    snapshots_root_changed = Signal(Path)
 
     def __init__(self, repo: Repository, parent=None) -> None:
         super().__init__(parent)
@@ -97,6 +104,10 @@ class DataLibraryDialog(QDialog):
         root.addWidget(self._tabs, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        locations_btn = buttons.addButton(
+            "Locations…", QDialogButtonBox.ActionRole
+        )
+        locations_btn.clicked.connect(self._on_locations)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
@@ -169,15 +180,23 @@ class DataLibraryDialog(QDialog):
 
     def _refresh(self) -> None:
         db_path = self._repo.db_path
-        self._fill(self._saved_table, data_library.list_saved(db_path))
+        # The live working file is pinned at the top so the user can always see
+        # which file they're editing (ADR-109), above their named saved copies.
+        saved = [data_library.current_file(db_path), *data_library.list_saved(db_path)]
+        self._fill(self._saved_table, saved)
         self._fill(self._snap_table, data_library.list_snapshots(db_path))
         self._sync_buttons()
 
     def _fill(self, table: QTableWidget, files: list[DataFile]) -> None:
         table.setRowCount(len(files))
         for r, f in enumerate(files):
-            name = QTableWidgetItem(f.name)
+            label = f"{f.name}  (current)" if f.kind == "current" else f.name
+            name = QTableWidgetItem(label)
             name.setData(_FILE_ROLE, f)
+            if f.kind == "current":
+                font = name.font()
+                font.setBold(True)
+                name.setFont(font)
             when = QTableWidgetItem(_fmt_when(f.saved_at))
             size = QTableWidgetItem(_fmt_size(f.size))
             size.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -193,10 +212,15 @@ class DataLibraryDialog(QDialog):
         return item.data(_FILE_ROLE) if item else None
 
     def _sync_buttons(self) -> None:
-        has_saved = self._selected(self._saved_table) is not None
-        self._load_btn.setEnabled(has_saved)
-        self._rename_btn.setEnabled(has_saved)
-        self._delete_btn.setEnabled(has_saved)
+        selected_saved = self._selected(self._saved_table)
+        # The pinned "current" row is the live file itself — it can't be loaded
+        # onto itself, renamed, or deleted (ADR-109).
+        is_real_saved = (
+            selected_saved is not None and selected_saved.kind == "saved"
+        )
+        self._load_btn.setEnabled(is_real_saved)
+        self._rename_btn.setEnabled(is_real_saved)
+        self._delete_btn.setEnabled(is_real_saved)
         has_snap = self._selected(self._snap_table) is not None
         self._snap_load_btn.setEnabled(has_snap)
         self._snap_delete_btn.setEnabled(has_snap)
@@ -206,8 +230,31 @@ class DataLibraryDialog(QDialog):
     def _on_double_click(self, _item: QTableWidgetItem) -> None:
         table = self.sender()
         chosen = self._selected(table)
-        if chosen is not None:
+        # The pinned "current" row is the live file — double-clicking it is a
+        # no-op (you can't load the file you're already in onto itself).
+        if chosen is not None and chosen.kind != "current":
             self._load(chosen)
+
+    def _on_locations(self) -> None:
+        dialog = LocationsDialog(self._repo, parent=self)
+        # Snapshot-folder change is safe to apply while we stay open: forward it
+        # to the window (which sets the root + captures into the new location),
+        # then refresh our snapshot list to show the move.
+        dialog.snapshots_root_changed.connect(self.snapshots_root_changed)
+        dialog.snapshots_root_changed.connect(lambda _p: self._refresh())
+        # The two main-file actions swap the live file, so close this dialog
+        # first — our repo handle is about to be torn down (mirrors _load).
+        dialog.open_existing_main_requested.connect(self._forward_open_existing)
+        dialog.relocate_main_requested.connect(self._forward_relocate)
+        dialog.exec()
+
+    def _forward_open_existing(self, path: Path) -> None:
+        self.accept()
+        self.open_existing_main_requested.emit(path)
+
+    def _forward_relocate(self, target_dir: Path) -> None:
+        self.accept()
+        self.relocate_main_requested.emit(target_dir)
 
     def _on_load_saved(self) -> None:
         chosen = self._selected(self._saved_table)

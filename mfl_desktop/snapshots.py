@@ -32,7 +32,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-SNAPSHOT_DIRNAME = "Snapshots"
+SNAPSHOT_DIRNAME = "MFL Snapshots"
+# The pre-ADR-109 folder name, used beside the live database. Still read (so an
+# upgrader's existing history isn't orphaned) but never written to.
+_LEGACY_SNAPSHOT_DIRNAME = "Snapshots"
 
 # Retention defaults (ADR-060). All four are user-configurable per file via the
 # `setting` table; these are the out-of-the-box values.
@@ -94,9 +97,30 @@ def save_policy(repo, policy: RetentionPolicy) -> None:
     repo.set_setting(KEY_MONTHLY_MONTHS, str(policy.monthly_months))
 
 
+def _snapshots_root() -> Path:
+    """The configured parent folder for the ``MFL Snapshots/`` directory.
+
+    Indirection kept thin and lazily-imported so this module stays importable on
+    a Qt-free interpreter (the base ``python3`` has no PySide6) and unit tests can
+    monkeypatch the root without pulling in ``QSettings``."""
+    from mfl_desktop import app_session
+    return app_session.snapshots_root()
+
+
 def snapshot_dir(db_path: Path | str) -> Path:
-    """The ``Snapshots/`` folder beside the live database."""
-    return Path(db_path).resolve().parent / SNAPSHOT_DIRNAME
+    """The ``MFL Snapshots/`` folder under the configured root (ADR-109).
+
+    No longer beside the live database — the location is user-configurable and
+    defaults to a local app-data folder (see ``app_session.snapshots_root``).
+    ``db_path`` is kept in the signature for call-site symmetry and forward
+    compatibility (e.g. a future per-file subfolder)."""
+    return _snapshots_root() / SNAPSHOT_DIRNAME
+
+
+def _legacy_snapshot_dir(db_path: Path | str) -> Path:
+    """The pre-ADR-109 ``Snapshots/`` folder beside the live database — read for
+    backward compatibility so an upgrader's existing backups still appear."""
+    return Path(db_path).resolve().parent / _LEGACY_SNAPSHOT_DIRNAME
 
 
 def _snapshot_stem(db_path: Path | str) -> str:
@@ -104,7 +128,10 @@ def _snapshot_stem(db_path: Path | str) -> str:
 
 
 def snapshot_path(db_path: Path | str, now: datetime) -> Path:
-    """The snapshot filename for ``db_path`` at ``now`` (no collision check)."""
+    """The snapshot filename for ``db_path`` at ``now`` (no collision check).
+
+    Always under the *new* :func:`snapshot_dir` — we read the legacy folder but
+    never write to it."""
     stem = _snapshot_stem(db_path)
     return snapshot_dir(db_path) / f"{stem}-{now.strftime(_STAMP_FMT)}.mfl"
 
@@ -112,12 +139,20 @@ def snapshot_path(db_path: Path | str, now: datetime) -> Path:
 def existing_snapshots(db_path: Path | str) -> list[Path]:
     """All snapshot files for this database, oldest first.
 
-    Lexical sort == chronological sort thanks to the fixed-width ``_STAMP_FMT``.
-    """
-    folder = snapshot_dir(db_path)
-    if not folder.is_dir():
-        return []
-    return sorted(folder.glob(f"{_snapshot_stem(db_path)}-*.mfl"))
+    Unions the configured :func:`snapshot_dir` with the legacy beside-the-file
+    folder (ADR-109 backward compat) so no upgrader's history is orphaned. Sorted
+    by filename — lexical == chronological thanks to the fixed-width ``_STAMP_FMT``
+    — so callers relying on ``[-1]`` being the newest keep working across both
+    folders. Same-named files in both folders are de-duplicated, preferring the
+    new location."""
+    stem = _snapshot_stem(db_path)
+    by_name: dict[str, Path] = {}
+    # Legacy first, then new — the dict update lets the new location win a clash.
+    for folder in (_legacy_snapshot_dir(db_path), snapshot_dir(db_path)):
+        if folder.is_dir():
+            for p in folder.glob(f"{stem}-*.mfl"):
+                by_name[p.name] = p
+    return sorted(by_name.values(), key=lambda p: p.name)
 
 
 def _stamp_of(db_path: Path | str, path: Path) -> datetime | None:

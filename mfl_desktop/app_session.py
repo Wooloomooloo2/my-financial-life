@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QStandardPaths
 
 # Namespaced so future app-level keys (window geometry, recent-files list, …)
 # can live alongside it without collision.
@@ -27,6 +27,13 @@ _LAST_DB_KEY = "session/last_db_path"
 # per-file `setting` table.
 _LICENSE_KEY = "license/key"
 _TRIAL_START_KEY = "license/trial_start"
+# Where the rotating snapshot backups live (ADR-109). This is the *parent* of
+# the ``MFL Snapshots/`` folder. It is app-level, not per-file: a filesystem
+# path is a per-machine storage decision, and storing it inside the `.mfl`
+# would break the moment that `.mfl` is the very thing synced between a Mac
+# (``/Users/…``) and a PC (``C:\\Users\\…``). The retention *policy* (the GFS
+# knobs) stays per-file — see ``snapshots.py``.
+_SNAPSHOTS_ROOT_KEY = "locations/snapshots_root"
 
 
 def remember_last_db(path: Path | str) -> None:
@@ -59,6 +66,35 @@ def last_db_path() -> Optional[Path]:
     if not raw:
         return None
     return Path(str(raw))
+
+
+# ── Snapshot location (ADR-109) ─────────────────────────────────────────────
+
+def snapshots_root() -> Path:
+    """The parent folder under which the ``MFL Snapshots/`` backup folder lives.
+
+    Defaults to the OS-standard per-user application-data location (local, never
+    cloud-synced) — snapshots are multi-MB full-database copies, and keeping many
+    of them beside a cloud-synced ``.mfl`` would bloat the user's cloud storage
+    and sync bandwidth. The user can point it anywhere via Manage Data ▸
+    Locations (e.g. an external drive, or alongside the file for cross-machine
+    recovery)."""
+    try:
+        raw = QSettings().value(_SNAPSHOTS_ROOT_KEY)
+    except Exception:
+        raw = None
+    if raw:
+        return Path(str(raw))
+    return Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
+
+
+def set_snapshots_root(path: Path | str) -> None:
+    """Persist the snapshots parent folder (ADR-109). Best-effort: a failure to
+    persist must never break the app. Stores the resolved absolute path."""
+    try:
+        QSettings().setValue(_SNAPSHOTS_ROOT_KEY, str(Path(path).resolve()))
+    except Exception:
+        pass
 
 
 # ── Licensing (ADR-079) ────────────────────────────────────────────────────
