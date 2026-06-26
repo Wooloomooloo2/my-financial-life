@@ -681,11 +681,29 @@ class ImportService:
         )
 
     def _resolve_category_id(self, category_raw: str) -> int:
-        """Parse a source category path (Banktivity ':' separator) into the
-        hierarchical category tree. Returns the leaf id, creating intermediate
-        nodes as needed; returns Uncategorised if path is empty.
+        """Resolve a source category path (Banktivity ':' separator) to a leaf
+        category id, honouring the user's curation (ADR-112):
+
+        1. empty path → Uncategorised;
+        2. an explicit import mapping (source path → my category) wins — this is
+           how a merged/deleted/reparented category keeps re-imports in line;
+        3. an existing path in the tree is used as-is (no duplicate created);
+        4. otherwise, in match-only mode the path parks in **Needs Review** for
+           triage; with match-only off it's created (the legacy behaviour that
+           lets a fresh file build its tree from the first import).
         """
         if not category_raw or not category_raw.strip():
             return self._repo.uncategorised_id()
         segments = [s.strip() for s in category_raw.split(":") if s.strip()]
+
+        mapped = self._repo.get_category_import_mapping(segments)
+        if mapped is not None:
+            return mapped
+
+        existing = self._repo.find_category_path(segments)
+        if existing is not None:
+            return existing
+
+        if self._repo.import_match_only_categories():
+            return self._repo.needs_review_category_id()
         return self._repo.find_or_create_category_path(segments, source="import")

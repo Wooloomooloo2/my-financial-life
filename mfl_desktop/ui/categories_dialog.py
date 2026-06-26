@@ -118,9 +118,29 @@ class CategoriesDialog(QDialog):
         self._show_archived_chk = QCheckBox("Show archived")
         self._show_archived_chk.toggled.connect(self._on_show_archived_toggled)
 
+        # ADR-112: when on, imports stop creating categories they can't match —
+        # unmatched ones park in "Needs Review" instead of forking the tree.
+        self._match_only_chk = QCheckBox("Match imports only")
+        self._match_only_chk.setToolTip(
+            "When on, importing a category that doesn't already exist (and has "
+            "no mapping) parks it in “Needs Review” instead of creating it, so "
+            "imports never recreate categories you've cleaned up."
+        )
+        self._match_only_chk.setChecked(self._repo.import_match_only_categories())
+        self._match_only_chk.toggled.connect(
+            self._repo.set_import_match_only_categories
+        )
+
+        # Inspect/forget the source-path → category redirects recorded when you
+        # merge / delete / reparent (ADR-112).
+        self._mappings_btn = QPushButton("Import &Mappings…")
+        self._mappings_btn.clicked.connect(self._on_import_mappings)
+
         action_row = QHBoxLayout()
         action_row.addWidget(self._new_btn)
         action_row.addWidget(self._show_archived_chk)
+        action_row.addWidget(self._match_only_chk)
+        action_row.addWidget(self._mappings_btn)
         action_row.addStretch(1)
         action_row.addWidget(self._rename_btn)
         action_row.addWidget(self._reparent_btn)
@@ -780,6 +800,16 @@ class CategoriesDialog(QDialog):
         return (new_id, typed, True)
 
     def _on_show_archived_toggled(self, _checked: bool) -> None:
+        self._reload_tree()
+        self._update_button_state()
+
+    def _on_import_mappings(self) -> None:
+        """Open the import-map viewer (ADR-112). A forgotten mapping can change
+        how a future import resolves, and the tree itself can shift if the user
+        forgot a redirect onto a now-missing path, so refresh on close."""
+        from mfl_desktop.ui.import_mappings_dialog import ImportMappingsDialog
+
+        ImportMappingsDialog(self._repo, self).exec()
         self._reload_tree()
         self._update_button_state()
 

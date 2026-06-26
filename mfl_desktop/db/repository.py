@@ -1737,6 +1737,204 @@ class Repository:
                 parent_kind = row["kind"]
         return parent_id
 
+    def find_category_path(self, segments: list[str]) -> Optional[int]:
+        """Find an existing category path (root → leaf), return the leaf id, or
+        ``None`` if any segment is missing. The find-only twin of
+        :meth:`find_or_create_category_path` — it never inserts, so an importer
+        can ask "does the user already have this category?" without forking a
+        duplicate (ADR-112). Archived rows count: a hidden category is still a
+        real one the user chose to keep, not an absence."""
+        clean = [s.strip() for s in segments if s and s.strip()]
+        if not clean:
+            return None
+        parent_id: Optional[int] = None
+        for name in clean:
+            if parent_id is None:
+                row = self._conn.execute(
+                    "SELECT id FROM category WHERE name = ? AND parent_id IS NULL",
+                    (name,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT id FROM category WHERE name = ? AND parent_id = ?",
+                    (name, parent_id),
+                ).fetchone()
+            if row is None:
+                return None
+            parent_id = row["id"]
+        return parent_id
+
+    # ── Category import-map + match-only (ADR-112) ──
+    #
+    # An importer resolves each transaction's *source* category path (e.g.
+    # "Bills:Utilities:Cable") against the tree. By default it creates anything
+    # it can't find — which silently recreates categories the user has merged,
+    # reparented, or deleted. Two countermeasures:
+    #   • a persistent map (source path → my category), auto-recorded whenever
+    #     the user merges/deletes/reparents, consulted at import before any
+    #     create — so a curated decision sticks across re-imports; and
+    #   • a match-only mode that routes anything still unmatched to "Needs
+    #     Review" instead of creating it, so new imports never quietly fork the
+    #     tree again.
+
+    _IMPORT_MATCH_ONLY_SETTING = "import_match_only_categories"
+    _NEEDS_REVIEW_CATEGORY_SETTING = "needs_review_category_id"
+
+    @staticmethod
+    def normalize_category_path(raw) -> str:
+        """The canonical map key for a category path: each segment trimmed and
+        lower-cased, blanks dropped, re-joined with ':'. Accepts a raw
+        "A:B:C" string or a list of segments. Case- and whitespace-folding
+        means "Bills : Utilities" and "bills:utilities" map to one key."""
+        segments = raw.split(":") if isinstance(raw, str) else list(raw)
+        clean = [str(s).strip().lower() for s in segments if s and str(s).strip()]
+        return ":".join(clean)
+
+    def _category_path_string(self, category_id: int) -> str:
+        """The normalised source-path key for an existing category id — its full
+        root→leaf path folded by :meth:`normalize_category_path`. '' for an
+        unknown id. Used to record what a just-merged/deleted/moved category
+        *was* called, so a later import of that name is rerouted not recreated."""
+        names: list[str] = []
+        cid: Optional[int] = category_id
+        seen: set[int] = set()
+        while cid is not None and cid not in seen:
+            seen.add(cid)
+            row = self._conn.execute(
+                "SELECT name, parent_id FROM category WHERE id = ?", (cid,),
+            ).fetchone()
+            if row is None:
+                break
+            names.append(row["name"])
+            cid = row["parent_id"]
+        names.reverse()
+        return self.normalize_category_path(names)
+
+    def category_display_path(self, category_id: int) -> str:
+        """The full root→leaf path of a category in its original casing, joined
+        with ' : ' for display (e.g. "Bills : Cable and Internet"). '' for an
+        unknown id. Used by the import-mappings management dialog."""
+        names: list[str] = []
+        cid: Optional[int] = category_id
+        seen: set[int] = set()
+        while cid is not None and cid not in seen:
+            seen.add(cid)
+            row = self._conn.execute(
+                "SELECT name, parent_id FROM category WHERE id = ?", (cid,),
+            ).fetchone()
+            if row is None:
+                break
+            names.append(row["name"])
+            cid = row["parent_id"]
+        names.reverse()
+        return " : ".join(names)
+
+    def import_match_only_categories(self) -> bool:
+        """Whether imports route unmatched categories to Needs Review instead of
+        creating them (ADR-112). Off by default — a fresh file should still
+        build its tree from the first import; the curating user turns it on."""
+        return self.get_setting(self._IMPORT_MATCH_ONLY_SETTING) == "1"
+
+    def set_import_match_only_categories(self, on: bool) -> None:
+        self.set_setting(self._IMPORT_MATCH_ONLY_SETTING, "1" if on else "0")
+
+    def needs_review_category_id(self) -> int:
+        """The "Needs Review" holding category (migration 0032), where match-only
+        imports park unmatched categories. Resolves via the stored setting, then
+        a name lookup, then Uncategorised — so an import never fails for want of
+        it even if the setting row was lost."""
+        raw = self.get_setting(self._NEEDS_REVIEW_CATEGORY_SETTING)
+        if raw:
+            try:
+                cid = int(raw)
+            except (TypeError, ValueError):
+                cid = None
+            if cid is not None and self._conn.execute(
+                "SELECT 1 FROM category WHERE id = ?", (cid,),
+            ).fetchone() is not None:
+                return cid
+        row = self._conn.execute(
+            "SELECT id FROM category WHERE name = 'Needs Review' "
+            "AND parent_id IS NULL AND source = 'system'",
+        ).fetchone()
+        return row["id"] if row is not None else UNCATEGORISED_ID
+
+    def get_category_import_mapping(self, source_path) -> Optional[int]:
+        """The mapped target category id for a source path, or ``None`` if there
+        is no mapping (ADR-112). Accepts a raw string or segment list."""
+        key = self.normalize_category_path(source_path)
+        if not key:
+            return None
+        row = self._conn.execute(
+            "SELECT target_category_id FROM category_import_map "
+            "WHERE source_path = ?",
+            (key,),
+        ).fetchone()
+        return row["target_category_id"] if row is not None else None
+
+    def set_category_import_mapping(
+        self, source_path, target_category_id: int,
+    ) -> None:
+        """Record/replace a source-path → target-category mapping (ADR-112)."""
+        key = self.normalize_category_path(source_path)
+        if not key:
+            return
+        try:
+            self._conn.execute(
+                "INSERT INTO category_import_map (source_path, target_category_id) "
+                "VALUES (?, ?) ON CONFLICT(source_path) DO UPDATE SET "
+                "target_category_id = excluded.target_category_id",
+                (key, target_category_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def delete_category_import_mapping(self, source_path) -> None:
+        """Remove a mapping so its source path resolves normally again."""
+        key = self.normalize_category_path(source_path)
+        if not key:
+            return
+        try:
+            self._conn.execute(
+                "DELETE FROM category_import_map WHERE source_path = ?", (key,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
+    def list_category_import_map(self) -> list[tuple[str, int, str]]:
+        """Every mapping as ``(source_path, target_category_id, target_label)``,
+        ordered by source path, for the management dialog. ``target_label`` is
+        the target's display path (empty if the target was deleted out from
+        under the row, though the FK cascade normally prevents that)."""
+        rows = self._conn.execute(
+            "SELECT source_path, target_category_id FROM category_import_map "
+            "ORDER BY source_path",
+        ).fetchall()
+        return [
+            (r["source_path"], r["target_category_id"],
+             self.category_display_path(r["target_category_id"]))
+            for r in rows
+        ]
+
+    def _record_category_import_mapping(
+        self, source_path_key: str, target_category_id: int,
+    ) -> None:
+        """Insert/replace a mapping **without committing** — for use inside the
+        merge/delete/reparent transactions so the record lands atomically with
+        the structural change."""
+        if not source_path_key:
+            return
+        self._conn.execute(
+            "INSERT INTO category_import_map (source_path, target_category_id) "
+            "VALUES (?, ?) ON CONFLICT(source_path) DO UPDATE SET "
+            "target_category_id = excluded.target_category_id",
+            (source_path_key, target_category_id),
+        )
+
     # ── Category — management (used by the category dialog) ──
 
     def list_category_tree(
@@ -1927,6 +2125,14 @@ class Repository:
             raise ValueError(
                 f"Invalid kind {new_kind!r}; expected one of {CATEGORY_KINDS}."
             )
+        # Moving a category rewrites the path of it *and* every descendant (their
+        # shared prefix changes). Capture each old path → its (unchanged) id
+        # before the move, so a later import using the old name reroutes to the
+        # same category instead of recreating the old branch (ADR-112).
+        old_paths = {
+            cid: self._category_path_string(cid)
+            for cid in self.category_descendants(category_id)
+        }
         try:
             self._conn.execute(
                 "UPDATE category SET parent_id = ? WHERE id = ?",
@@ -1940,6 +2146,11 @@ class Repository:
                     f"WHERE id IN ({placeholders})",
                     (new_kind, *descendants),
                 )
+            for cid, key in old_paths.items():
+                # Skip a no-op where the old path equals the category's new path
+                # (only possible at the root level with no actual move).
+                if key and key != self._category_path_string(cid):
+                    self._record_category_import_mapping(key, cid)
             self.commit()
         except Exception:
             self.rollback()
@@ -2057,6 +2268,11 @@ class Repository:
                     f"kind first by reparenting it under the right root, "
                     f"or pick a different target."
                 )
+        # Capture each source's full path *before* it's deleted, so a later
+        # import of that name reroutes to the target instead of recreating the
+        # category (ADR-112). Merge rejects sources with children, so a source's
+        # own path is the only one to record.
+        source_paths = {sid: self._category_path_string(sid) for sid in sources}
         placeholders = ",".join("?" * len(sources))
         try:
             cur = self._conn.execute(
@@ -2073,10 +2289,19 @@ class Repository:
                 f"WHERE category_id IN ({placeholders})",
                 (target_id, *sources),
             )
+            # Any existing mapping that targeted a source would cascade-delete
+            # with it; repoint those onto the merge target so the chain holds.
+            self._conn.execute(
+                f"UPDATE category_import_map SET target_category_id = ? "
+                f"WHERE target_category_id IN ({placeholders})",
+                (target_id, *sources),
+            )
             self._conn.execute(
                 f"DELETE FROM category WHERE id IN ({placeholders})",
                 tuple(sources),
             )
+            for sid in sources:
+                self._record_category_import_mapping(source_paths[sid], target_id)
             self.commit()
             return moved
         except Exception:
@@ -2167,6 +2392,10 @@ class Repository:
                 "first."
             )
         txn_count = self.count_category_transactions(category_id)
+        # Record the deleted path → Needs Review before the row goes, so a later
+        # import of that name parks for triage instead of recreating it (ADR-112).
+        deleted_path = self._category_path_string(category_id)
+        review_id = self.needs_review_category_id()
         try:
             if txn_count > 0:
                 self._conn.execute(
@@ -2180,9 +2409,20 @@ class Repository:
                 "UPDATE txn_split SET category_id = ? WHERE category_id = ?",
                 (UNCATEGORISED_ID, category_id),
             )
+            # Mappings pointing at this category would cascade-delete with it;
+            # repoint them to Needs Review (matching where its path now routes),
+            # but never let Needs Review map to itself.
+            if review_id != category_id:
+                self._conn.execute(
+                    "UPDATE category_import_map SET target_category_id = ? "
+                    "WHERE target_category_id = ?",
+                    (review_id, category_id),
+                )
             self._conn.execute(
                 "DELETE FROM category WHERE id = ?", (category_id,),
             )
+            if review_id != category_id:
+                self._record_category_import_mapping(deleted_path, review_id)
             self.commit()
             return txn_count
         except Exception:
