@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -30,7 +30,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
 )
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency, nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
@@ -52,6 +52,10 @@ class SpendingChart(QWidget):
     """
 
     segment_clicked = Signal(int, str)
+    # Double-click on a segment → open its transactions directly (ADR-114).
+    # Kept distinct from the single-click drill so a double-click doesn't
+    # first drill (re-laying-out the chart) under its own second click.
+    segment_double_clicked = Signal(int, str)
 
     # Layout constants — tuned for readability at 1240x740 (the window's
     # default size). Recalculated each paintEvent so the chart adapts to
@@ -82,6 +86,17 @@ class SpendingChart(QWidget):
         # Updated each paintEvent — list of (rect, group_index, bucket, value)
         # for hover hit-testing.
         self._segment_hitmap: list[tuple[QRectF, int, str, float]] = []
+
+        # Single-vs-double click disambiguation (ADR-114). A single click
+        # drills; a double click opens transactions. The single-click action
+        # is deferred by the double-click interval so the first press of a
+        # double-click doesn't drill (and re-lay-out the chart) before the
+        # second click is recognised — which is what made a double-click land
+        # on the wrong bar.
+        self._pending_single: Optional[tuple[int, str]] = None
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self._emit_pending_single)
 
     # ── public interface ──
 
@@ -430,21 +445,57 @@ class SpendingChart(QWidget):
         self.unsetCursor()
         super().mouseMoveEvent(event)
 
+    def _segment_at(self, pos) -> Optional[tuple[int, str]]:
+        """The ``(group_id, bucket)`` of the stack segment under ``pos``, or
+        None. Shared by hover, single-click and double-click so all three
+        resolve the same hit."""
+        for rect, group_index, bucket, _pounds in self._segment_hitmap:
+            if rect.contains(pos) and 0 <= group_index < len(self._groups):
+                return self._groups[group_index][0], bucket
+        return None
+
     def mousePressEvent(self, event) -> None:  # noqa: D401 — Qt override
-        """Left-click on a stack segment fires :py:attr:`segment_clicked`
-        with the segment's underlying ``group_id`` + bucket. Other
-        buttons fall through to the base class."""
+        """Left-click on a stack segment *drills* (via
+        :py:attr:`segment_clicked`) — but the emit is deferred by the double-
+        click interval so a double-click (which opens transactions) isn't
+        preceded by a drill that re-lays-out the chart. Other buttons fall
+        through to the base class."""
         if event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
             return
         pos = event.position() if hasattr(event, "position") else event.posF()
-        for rect, group_index, bucket, _pounds in self._segment_hitmap:
-            if rect.contains(pos):
-                if 0 <= group_index < len(self._groups):
-                    group_id = self._groups[group_index][0]
-                    self.segment_clicked.emit(int(group_id), bucket)
-                return
-        super().mousePressEvent(event)
+        hit = self._segment_at(pos)
+        if hit is None:
+            super().mousePressEvent(event)
+            return
+        self._pending_single = hit
+        self._click_timer.start(QApplication.doubleClickInterval())
+
+    def _emit_pending_single(self) -> None:
+        if self._pending_single is None:
+            return
+        group_id, bucket = self._pending_single
+        self._pending_single = None
+        self.segment_clicked.emit(int(group_id), bucket)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: D401 — Qt override
+        """Left double-click on a stack segment fires
+        :py:attr:`segment_double_clicked` (open transactions) and cancels the
+        pending single-click drill. The hitmap is still the pre-drill layout
+        here because the single-click action was deferred, so the resolved
+        segment is the one the user actually clicked."""
+        if event.button() != Qt.LeftButton:
+            super().mouseDoubleClickEvent(event)
+            return
+        self._click_timer.stop()
+        self._pending_single = None
+        pos = event.position() if hasattr(event, "position") else event.posF()
+        hit = self._segment_at(pos)
+        if hit is None:
+            super().mouseDoubleClickEvent(event)
+            return
+        group_id, bucket = hit
+        self.segment_double_clicked.emit(int(group_id), bucket)
 
     def leaveEvent(self, event) -> None:  # noqa: D401 — Qt override
         QToolTip.hideText()

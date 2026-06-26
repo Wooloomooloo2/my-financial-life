@@ -43,7 +43,22 @@ children is unchanged, as is Back / the drill stack.
 - A click at the `leaf` rollup always opens transactions, so the (rare) case of
   a tree deeper than three levels shows the leaf-bucket's whole subtree rather
   than drilling further; acceptable and matches the "and descendants" scoping.
-- **Amendment (same day):** scope is the **clicked time bucket**, not the whole
+- **Amendment 2 (same day) — double-click opens transactions; single vs double
+  disambiguated.** The real report was: double-clicking "Rent for 2023" showed
+  the *wrong* transactions (a subset of a different year). Cause: a single
+  left-click *drills* (descends the category rollup, re-laying-out the chart),
+  and a double-click's **first** press drilled before the **second** click was
+  recognised — so the second click landed on a now-different bar (often a
+  drilled-into child category), opening a subset. Fix: the chart now defers the
+  single-click drill by `QApplication.doubleClickInterval()` and emits a new
+  `segment_double_clicked(group_id, bucket)` on a real double-click (timer
+  cancelled, so no drill happens). The window opens the **whole clicked
+  category (and descendants) for the clicked bucket** on double-click —
+  deterministic, no re-layout — while single-click still drills. Cost: a single
+  click's drill now lands one double-click-interval later; acceptable for
+  reliable double-click semantics, and double-click is the gesture the user
+  reached for anyway.
+- **Amendment 1 (same day):** scope is the **clicked time bucket**, not the whole
   report period. The first cut opened the full report range, so clicking
   "Rent for 2023" listed Rent for *2007–2025*. The leaf click now resolves its
   bucket key to a date span (`bucket_bounds` from

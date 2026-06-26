@@ -251,6 +251,7 @@ class SpendingReportWindow(QMainWindow):
         # ── chart + right summary panel ──
         self._chart = SpendingChart()
         self._chart.segment_clicked.connect(self._on_segment_clicked)
+        self._chart.segment_double_clicked.connect(self._on_segment_double_clicked)
         # The chart's own legend strip elides categories when they
         # don't all fit horizontally. The right summary panel renders
         # them vertically instead (one chip per group, scrollable).
@@ -723,6 +724,16 @@ class SpendingReportWindow(QMainWindow):
         # Drill-down is a view-only change — it doesn't mark the saved
         # report dirty (the user isn't editing the persisted filters).
         self._refresh()
+
+    def _on_segment_double_clicked(self, group_id: int, bucket: str) -> None:
+        """Double-click opens the clicked segment's transactions directly —
+        the whole clicked category (and its descendants) for the clicked time
+        bucket — without drilling first (ADR-114). This is the deterministic
+        'show me these transactions' gesture; single-click still drills the
+        category rollup."""
+        if group_id in (UNCATEGORISED_ID, REINVESTED_GROUP_ID):
+            return
+        self._open_transactions(group_id, bucket)
 
     def _on_back(self) -> None:
         if not self._drill_stack:
