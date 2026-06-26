@@ -895,7 +895,15 @@ class TransactionsListWindow(QMainWindow):
     # ── refresh on activate (matches BudgetWindow / AccountSummaryWindow) ──
 
     def event(self, ev):
-        if ev.type() == QEvent.WindowActivate and self._model is not None:
+        # Guard on is_open(): on app shutdown the shared repo may already be
+        # closed while a queued WindowActivate fires here, and reloading a closed
+        # connection crashes the quit (ADR-109 follow-up) — same guard the budget
+        # / account-summary windows use.
+        if (
+            ev.type() == QEvent.WindowActivate
+            and self._model is not None
+            and self._repo.is_open()
+        ):
             # Cheap re-pull so edits made in other windows show up.
             self._model.reload()
             self._refresh_footer()

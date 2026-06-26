@@ -1075,6 +1075,14 @@ class AccountSummaryWindow(QMainWindow):
         return super().event(ev)
 
     def reload(self) -> None:
+        # During app shutdown the owning RegisterWindow may already have closed
+        # the shared repository (ADR-057/109) while a queued WindowActivate still
+        # fires here — querying a closed connection raises
+        # ``sqlite3.ProgrammingError: Cannot operate on a closed database`` and
+        # crashes the quit. Bail out quietly, the same guard BudgetWindow /
+        # HomeView use on their activate-refresh.
+        if not self._repo.is_open():
+            return
         # Re-pull the account in case the name changed (rename via the
         # Accounts dialog while this window was open).
         account = self._repo.get_account_by_id(self._account_id)
