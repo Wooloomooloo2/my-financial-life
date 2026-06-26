@@ -441,9 +441,14 @@ class SpendingReportWindow(QMainWindow):
         )
         # Income-only: fold in reinvested-dividend (DRIP) income (ADR-089). The
         # field lives only on IncomeOverTimeFilters, so guard on its presence —
-        # the spending aggregate doesn't take the param.
+        # the spending aggregate doesn't take the param. Suppressed once the
+        # user has drilled into a category (ADR-114): the DRIP series is a
+        # standalone whole-portfolio series, not part of the drilled subtree,
+        # so it's just noise next to e.g. Rental Income's breakdown.
         if hasattr(filters, "include_reinvested_dividends"):
-            agg_kwargs["include_reinvested"] = filters.include_reinvested_dividends
+            agg_kwargs["include_reinvested"] = (
+                filters.include_reinvested_dividends and not self._drill_stack
+            )
         rows = aggregate(**agg_kwargs)
         value_key = self._DIRECTION.value_key
 
@@ -456,7 +461,8 @@ class SpendingReportWindow(QMainWindow):
             # Reinvested dividends (ADR-110): their own series, independent of the
             # category filter — the "Show Reinvested Dividends" toggle is their
             # visibility control, not the category picker (they aren't listed
-            # there). So they always appear when the toggle is on.
+            # there). Present only when the toggle is on AND we're not drilled
+            # in (the aggregate isn't asked for them otherwise — see above).
             if r.get("reinvested"):
                 key = (REINVESTED_GROUP_ID, r["bucket"])
                 spending[key] = spending.get(key, 0) + r[value_key]

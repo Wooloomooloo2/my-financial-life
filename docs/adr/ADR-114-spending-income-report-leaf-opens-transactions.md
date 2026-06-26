@@ -68,3 +68,11 @@ children is unchanged, as is Back / the drill stack.
   actually summed. Unparseable key → falls back to the full report range.
 - Inherited by `IncomeReportWindow` for free (it only overrides `_DIRECTION`).
   View layer only; no migration, no schema change.
+- **Amendment 3 (same day) — reinvested dividends hidden while drilled.** The
+  ADR-110 "Reinvested Dividends" series is a standalone whole-portfolio series
+  that shows independent of the category filter. Once the user drills into a
+  category (e.g. Rental Income), it isn't part of that subtree and is just
+  noise, so `_refresh` no longer requests it from the aggregate while the drill
+  stack is non-empty (`include_reinvested = toggle and not self._drill_stack`).
+  It reappears on Back. The "Show Reinvested Dividends" toggle state is
+  untouched — only its visibility while drilled changes.
