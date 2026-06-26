@@ -354,6 +354,13 @@ _COLUMN_WIDTHS = {
     "memo":            280,
     "amount":          110,
     "running_balance": 130,
+    # Investment register (ADR-043) — used when an investment drill-down adopts
+    # the security-aware column layout.
+    "action":          90,
+    "security_symbol": 80,
+    "security_name":   260,
+    "quantity":        100,
+    "price":           100,
 }
 
 
@@ -518,7 +525,10 @@ class TransactionsListWindow(QMainWindow):
         whenever the Account chip is removed (which widens the source
         from single-account to all-transactions)."""
         self._account_id = account_id
-        self._model = TransactionTableModel(self._repo, account_id=account_id)
+        self._model = TransactionTableModel(
+            self._repo, account_id=account_id,
+            invest=self._is_investment_drilldown(account_id),
+        )
         # ADR-105: warn before an inline edit lands on a reconciled row, same
         # gate the main register installs (ADR-040).
         self._model.reconciled_edit_guard = self._confirm_reconciled_edit
@@ -527,6 +537,19 @@ class TransactionsListWindow(QMainWindow):
         self._model.reload()
         self._attach_delegates()
         self._apply_column_widths()
+
+    def _is_investment_drilldown(self, account_id: Optional[int]) -> bool:
+        """Whether this drill-down should use the security-aware column layout
+        (Action/Symbol/Security/Qty/Price) rather than the cash one
+        (Payee/Category). True when the drill is into a single investment
+        account, or is scoped to a specific security across accounts (a
+        security drill is inherently an investment view) — see ADR-109 follow-up.
+        Previously the drill-down always used the cash columns, so an investment
+        report's drill-through looked wrong."""
+        if account_id is not None:
+            acct = self._repo.get_account_by_id(account_id)
+            return acct is not None and acct.family == "investment"
+        return self._security_id is not None
 
     def _attach_delegates(self) -> None:
         """Same delegates the main register uses — typeahead payee +

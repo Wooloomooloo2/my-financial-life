@@ -78,6 +78,25 @@ class TransactionTableModel(QAbstractTableModel):
         ("Amount",   "amount",          False),
         ("Balance",  "running_balance", False),
     ]
+    # ADR-109 follow-up: the security-aware layout for a *cross-account*
+    # investment view — e.g. drilling a single security across several
+    # brokerage accounts from the Investment Income / Returns reports. Mirrors
+    # COLUMNS_INVEST but adds the Account column and drops the running Balance
+    # (a per-account balance is meaningless across accounts, exactly as
+    # COLUMNS_ALL drops it for the cross-account cash view).
+    COLUMNS_INVEST_ALL = [
+        ("Date",     "posted_date",     False),
+        ("Account",  "account_name",    False),
+        ("Action",   "action",          False),
+        ("Symbol",   "security_symbol", False),
+        ("Security", "security_name",   False),
+        ("Qty",      "quantity",        False),
+        ("Price",    "price",           False),
+        ("Status",   "status",          False),
+        ("Memo",     "memo",            False),
+        ("Category", "category_name",   True),
+        ("Amount",   "amount",          False),
+    ]
 
     def __init__(
         self, repo: Repository, account_id: int | None, since: str | None = None,
@@ -91,8 +110,13 @@ class TransactionTableModel(QAbstractTableModel):
         # (not the proxy) so load + reset + sort all shrink to what's shown.
         self._since = since
         # ADR-043: investment accounts use a security-aware column layout.
+        # ADR-109 follow-up: cross-account investment views (account_id None,
+        # invest True — e.g. a security drill across brokerages) use the
+        # Account-bearing investment layout instead of the cash COLUMNS_ALL.
         if invest and account_id is not None:
             self.COLUMNS = self.COLUMNS_INVEST
+        elif invest:
+            self.COLUMNS = self.COLUMNS_INVEST_ALL
         elif account_id is not None:
             self.COLUMNS = self.COLUMNS_SINGLE
         else:
