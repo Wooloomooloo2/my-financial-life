@@ -23,6 +23,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFrame,
@@ -43,9 +44,11 @@ from mfl_desktop.reports.filters import (
     IncomeExpenseFilters, TYPE_INCOME_EXPENSE,
 )
 from mfl_desktop.reports.income_expense import (
-    bucket_bounds, build_buckets, compute_summary, enumerate_buckets,
+    bucket_bounds, build_buckets, compose_top_level, compute_summary,
+    enumerate_buckets,
 )
-from mfl_desktop.ui.chart_helpers import fmt_currency
+from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency
+from mfl_desktop.ui.donut_chart import DonutChart, DonutSegment
 from mfl_desktop.ui.income_expense_chart import IncomeExpenseChart
 from mfl_desktop.ui.income_expense_filter_dialog import (
     IncomeExpenseFilterDialog,
@@ -163,6 +166,12 @@ class IncomeExpenseWindow(QMainWindow):
         # Granularity of the last render — the drill resolves a clicked
         # bucket key to its date span against this (ADR-083).
         self._last_granularity: Optional[str] = None
+        # Composition donut (ADR-064 amend): which side it shows, and the
+        # last-computed slices for each so the toggle re-renders without a
+        # re-query. Income/Expense breakdown is a point-in-time composition
+        # of a positive whole — the donut exception carved out by ADR-067.
+        self._comp_mode: str = "income"
+        self._comp_slices: dict[str, list] = {"income": [], "expense": []}
         self._summary_panel = self._build_summary_panel()
 
         self._body_splitter = QSplitter(Qt.Horizontal)
@@ -291,7 +300,61 @@ class IncomeExpenseWindow(QMainWindow):
         layout.addSpacing(6)
         layout.addWidget(self._note_value)
         layout.addStretch(1)
+
+        # ── breakdown donut (pinned to the bottom of the panel) ──
+        layout.addWidget(self._mini_section_title("Breakdown"))
+        layout.addLayout(self._build_comp_toggle())
+        self._comp_donut = DonutChart()
+        self._comp_donut.setMinimumHeight(180)
+        layout.addWidget(self._comp_donut)
+
+        # Legend: one row per slice (swatch · name · amount), rebuilt per
+        # render. Replaces the donut's centre total (ADR-113).
+        self._comp_legend = QVBoxLayout()
+        self._comp_legend.setContentsMargins(0, 4, 0, 0)
+        self._comp_legend.setSpacing(3)
+        layout.addLayout(self._comp_legend)
         return panel
+
+    def _build_comp_toggle(self) -> QHBoxLayout:
+        """A two-button Income / Expense segmented toggle over the donut."""
+        self._comp_income_btn = QPushButton("Income")
+        self._comp_expense_btn = QPushButton("Expense")
+        for b in (self._comp_income_btn, self._comp_expense_btn):
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            tokens.themed(
+                b,
+                "QPushButton { padding: 4px 12px; border: 1px solid {border_strong}; "
+                "border-radius: 13px; background-color: {surface}; color: {heading}; "
+                "font-size: 12px; }"
+                "QPushButton:checked { background-color: {accent}; color: {surface}; "
+                "border-color: {accent}; font-weight: bold; }"
+                "QPushButton:hover:!checked { background-color: {surface_alt}; }",
+            )
+        self._comp_income_btn.setChecked(True)
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        group.addButton(self._comp_income_btn)
+        group.addButton(self._comp_expense_btn)
+        self._comp_income_btn.clicked.connect(lambda: self._set_comp_mode("income"))
+        self._comp_expense_btn.clicked.connect(lambda: self._set_comp_mode("expense"))
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self._comp_income_btn)
+        row.addWidget(self._comp_expense_btn)
+        return row
+
+    def _set_comp_mode(self, mode: str) -> None:
+        if mode == self._comp_mode:
+            return
+        self._comp_mode = mode
+        # Keep the toggle in sync even when called programmatically.
+        self._comp_income_btn.setChecked(mode == "income")
+        self._comp_expense_btn.setChecked(mode == "expense")
+        self._render_comp_donut()
 
     @staticmethod
     def _mini_section_title(text: str) -> QLabel:
@@ -340,6 +403,7 @@ class IncomeExpenseWindow(QMainWindow):
         )
         self._render(buckets, sql_granularity, d_from, d_to, filters,
                      result.get("unconverted", {}))
+        self._refresh_composition(d_from, d_to, account_ids, category_ids)
 
     def _render(
         self,
@@ -368,8 +432,100 @@ class IncomeExpenseWindow(QMainWindow):
             granularity=granularity, summary=summary, unconverted=unconverted,
         )
 
+    # ── breakdown donut (ADR-064 amend / ADR-067 donut exception) ──
+
+    def _refresh_composition(
+        self,
+        d_from: date,
+        d_to: date,
+        account_ids: list[int],
+        category_ids: Optional[list[int]],
+    ) -> None:
+        """Recompute the income / expense top-level breakdowns for the donut.
+
+        Uses :meth:`Repository.sankey_category_totals` — the same category-
+        kind cash-flow convention as the headline figures — and rolls each
+        leaf total up to its top-level category. Stored per side so the
+        toggle re-renders without re-querying."""
+        totals = self._repo.sankey_category_totals(
+            date_from=d_from.isoformat(),
+            date_to=d_to.isoformat(),
+            account_ids=account_ids,
+            category_ids=category_ids,
+            display_currency=self._display_ccy,
+        )
+        parent_of = {c.id: c.parent_id for c in self._all_categories}
+        name_of = {c.id: c.name for c in self._all_categories}
+        self._comp_slices = {
+            side: compose_top_level(totals.get(side, {}), parent_of, name_of)
+            for side in ("income", "expense")
+        }
+        self._render_comp_donut()
+
+    def _render_comp_donut(self) -> None:
+        slices = self._comp_slices.get(self._comp_mode, [])
+        symbol = _symbol_for(self._display_ccy) or "£"
+        prefix = symbol if symbol else f"{self._display_ccy} "
+        self._clear_comp_legend()
+        if not slices:
+            self._comp_donut.show_empty(f"No {self._comp_mode} in range")
+            return
+        colours = [colour_for(i) for i in range(len(slices))]
+        segments = [
+            DonutSegment(label=s.label, value=float(s.value), color=colours[i])
+            for i, s in enumerate(slices)
+        ]
+        # Flat single ring + no centre total (the headline already shows it).
+        self._comp_donut.set_data(
+            segments=segments, center_label="", center_sub="",
+            symbol=prefix, two_ring=False,
+        )
+        for s, col in zip(slices, colours):
+            self._comp_legend.addLayout(
+                self._legend_row(s.label, self._fmt(s.value, 0), col)
+            )
+
+    def _clear_comp_legend(self) -> None:
+        """Tear down the legend rows (nested layouts + their labels). Widgets
+        are reparented away immediately so they stop painting at once, then
+        scheduled for deletion."""
+        while self._comp_legend.count():
+            item = self._comp_legend.takeAt(0)
+            child = item.layout()
+            if child is not None:
+                while child.count():
+                    sub = child.takeAt(0)
+                    w = sub.widget()
+                    if w is not None:
+                        w.setParent(None)
+                        w.deleteLater()
+                child.deleteLater()
+
+    def _legend_row(self, name: str, amount: str, colour) -> QHBoxLayout:
+        swatch = QLabel()
+        swatch.setFixedSize(10, 10)
+        swatch.setStyleSheet(
+            f"background: {colour.name()}; border-radius: 2px;"
+        )
+        name_lab = QLabel(name)
+        name_lab.setToolTip(name)
+        tokens.themed(name_lab, "color: {text}; font-size: 11px; background: transparent;")
+        amount_lab = QLabel(amount)
+        tokens.themed(amount_lab, "color: {muted_strong}; font-size: 11px; background: transparent;")
+        amount_lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(swatch)
+        row.addWidget(name_lab, stretch=1)
+        row.addWidget(amount_lab)
+        return row
+
     def _show_empty(self, message: str) -> None:
         self._chart.show_empty(message)
+        self._comp_slices = {"income": [], "expense": []}
+        self._render_comp_donut()
         self._update_summary_panel(
             filters=self._current_filters, d_from=None, d_to=None,
             granularity=None, summary=None, unconverted={}, note=message,

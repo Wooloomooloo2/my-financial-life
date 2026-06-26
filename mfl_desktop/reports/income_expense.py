@@ -75,6 +75,75 @@ class IncomeExpenseSummary:
     bucket_count: int
 
 
+@dataclass(frozen=True)
+class CompositionSlice:
+    """One slice of the income (or expense) composition donut — a single
+    top-level category's rolled-up total over the period (ADR-064 amend).
+
+    ``value`` is a non-negative Decimal in the display currency's major
+    units; ``category_id`` is the top-level category this slice rolls up to,
+    or ``None`` for the synthetic "Other" overflow bucket.
+    """
+    label: str
+    value: Decimal
+    category_id: Optional[int]
+
+
+def compose_top_level(
+    leaf_pence: dict[int, int],
+    parent_of: dict[int, Optional[int]],
+    name_of: dict[int, str],
+    *,
+    top_n: int = 8,
+) -> list[CompositionSlice]:
+    """Roll per-leaf-category pence totals up to their **top-level** ancestor
+    and return them as donut slices, largest first.
+
+    ``leaf_pence`` maps a (leaf) category id to its non-negative total in
+    minor units (as produced by :meth:`Repository.sankey_category_totals`).
+    Each id is walked up ``parent_of`` (``id → parent_id``, ``None`` at a
+    root) to the top-level category it belongs to and its pence accumulated
+    there; ``name_of`` supplies the display label. A category whose chain is
+    broken (an id missing from ``parent_of``) rolls up to the furthest
+    ancestor reached. Slices are sorted by value descending; everything past
+    ``top_n`` is folded into a single ``None``-id "Other" slice so the donut
+    never sprouts a long tail of slivers. Zero/negative totals are dropped.
+    """
+    hundred = Decimal(100)
+    rolled: dict[int, int] = {}
+    for cid, pence in leaf_pence.items():
+        if pence <= 0:
+            continue
+        top = cid
+        seen: set[int] = set()
+        while top not in seen:
+            seen.add(top)
+            parent = parent_of.get(top)
+            if parent is None:
+                break
+            top = parent
+        rolled[top] = rolled.get(top, 0) + pence
+
+    ordered = sorted(rolled.items(), key=lambda kv: kv[1], reverse=True)
+    slices: list[CompositionSlice] = [
+        CompositionSlice(
+            label=name_of.get(cid, "(unknown)"),
+            value=Decimal(pence) / hundred,
+            category_id=cid,
+        )
+        for cid, pence in ordered[:top_n]
+    ]
+    overflow = sum(pence for _cid, pence in ordered[top_n:])
+    if overflow > 0:
+        slices.append(
+            CompositionSlice(
+                label="Other", value=Decimal(overflow) / hundred,
+                category_id=None,
+            )
+        )
+    return slices
+
+
 def _month_label(y: int, m: int) -> str:
     return f"{_MONTHS[m]} {y}"
 

@@ -72,6 +72,7 @@ class DonutChart(QWidget):
         self._center_label: str = ""
         self._center_sub: str = ""
         self._symbol: str = "£"
+        self._two_ring: bool = True
         self._empty_message: Optional[str] = None
         # (a_start, a_span, r_in, r_out, label, value, pct, account_id) — a in
         # degrees clockwise from 12 o'clock; account_id is None for inner-ring
@@ -89,11 +90,19 @@ class DonutChart(QWidget):
         center_label: str = "",
         center_sub: str = "",
         symbol: str = "£",
+        two_ring: bool = True,
     ) -> None:
+        """Draw the donut. ``two_ring`` (default) nests each segment's
+        ``children`` as an outer ring (the Net Worth sunburst, ADR-067);
+        pass ``two_ring=False`` for a flat single-ring donut where each
+        segment is one annulus slice and ``children`` are ignored — used by
+        the Income & Expense breakdown, where the slices are already the
+        leaves and a second ring would just repeat them (ADR-113)."""
         self._segments = list(segments)
         self._center_label = center_label
         self._center_sub = center_sub
         self._symbol = symbol or "£"
+        self._two_ring = two_ring
         self._empty_message = None
         self.update()
 
@@ -137,6 +146,16 @@ class DonutChart(QWidget):
                 continue
             seg_span = seg_val / total * 360.0
             seg_start = a
+
+            if not self._two_ring:
+                # Flat single ring: one annulus slice spanning hole → r_out.
+                self._draw_pie(p, outer_rect, seg_start, seg_span, seg.color, sep)
+                self._hits.append(
+                    (seg_start, seg_span, r_hole, r_out, seg.label, seg_val,
+                     seg_val / total, None)
+                )
+                a += seg_span
+                continue
 
             # Outer ring — the accounts, tiling the segment's span.
             child_total = sum(max(0.0, c.value) for c in seg.children)
