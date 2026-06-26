@@ -60,6 +60,9 @@ from mfl_desktop.ui.spending_chart import SpendingChart
 from mfl_desktop.ui.spending_filter_dialog import (
     SpendingFilterDialog, UNCATEGORISED_ID,
 )
+from mfl_desktop.ui.transactions_list_window import (
+    TransactionsListWindow, TxnListFilter,
+)
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
 from dataclasses import dataclass, replace
@@ -673,6 +676,18 @@ class SpendingReportWindow(QMainWindow):
         # pointless snapshot.
         if group_id in (UNCATEGORISED_ID, REINVESTED_GROUP_ID):
             return
+        # When the clicked segment can't be broken down any further — we're
+        # already at the leaf rollup, or the category has no children — open
+        # its transactions instead of re-drilling. Without this the leaf rung
+        # of the descent ladder (``leaf → leaf``) just narrows to the same
+        # category again and again, so the user never reaches the actual
+        # transactions (ADR-114).
+        if (
+            self._current_filters.rollup_level == "leaf"
+            or not self._repo.category_has_children(group_id)
+        ):
+            self._open_transactions(group_id)
+            return
         descendants = self._repo.category_descendants(group_id)
         if not descendants:
             return
@@ -710,6 +725,37 @@ class SpendingReportWindow(QMainWindow):
         if not self._drill_stack:
             self._back_button.setVisible(False)
         self._refresh()
+
+    def _open_transactions(self, category_id: int) -> None:
+        """Open the underlying transactions for a leaf category over the
+        report's current period + account scope (ADR-114). Reached when a
+        clicked segment can't be drilled further. The category filter is
+        'this and descendants', so a category that still has children shows
+        the whole subtree. Period is passed as the report's resolved date
+        bounds so the list matches exactly what the bars summed."""
+        if category_id not in self._categories_by_id:
+            return
+        filters = self._current_filters
+        d_from, d_to = self._resolve_date_bounds(filters)
+        # A single selected account drills per-account; 0 (all) or a subset
+        # opens the cross-account view (mirrors the Income & Expense drill).
+        acc_ids = list(filters.account_ids)
+        if len(acc_ids) == 1:
+            account_id: Optional[int] = acc_ids[0]
+            account_name = next(
+                (a.name for a in self._all_accounts if a.id == account_id), "",
+            )
+        else:
+            account_id, account_name = None, ""
+        flt = TxnListFilter.for_category(
+            account_id=account_id, account_name=account_name,
+            category_id=category_id,
+            category_label=self._categories_by_id[category_id].name,
+            period_key="custom", custom_start=d_from, custom_end=d_to,
+        )
+        win = TransactionsListWindow(self._repo, flt, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.show()
 
     @staticmethod
     def _with_updates(
