@@ -68,6 +68,17 @@ children is unchanged, as is Back / the drill stack.
   actually summed. Unparseable key → falls back to the full report range.
 - Inherited by `IncomeReportWindow` for free (it only overrides `_DIRECTION`).
   View layer only; no migration, no schema change.
+- **Amendment 4 (same day) — category drill is split-aware.** The opened
+  `TransactionsListWindow`'s `DrillDownFilterProxy` matched a row only on its
+  own `txn.category_id`, but a split parent's `category_id` is Uncategorised —
+  its real categories live on `txn_split` lines (ADR-051). So drilling into a
+  category that appears only on split lines (e.g. a Rental Income line inside a
+  mixed split) showed an empty / short list even though the report counted
+  those lines (it reads the split-unrolled `txn_category_line` view). Fixed by
+  also accepting a row when its `split_category_ids` intersect the drilled
+  category's subtree — the same split-aware match the main register's base
+  proxy already does. (The register shows the whole split parent, not the line,
+  so the row's amount is the parent total — unchanged register behaviour.)
 - **Amendment 3 (same day) — reinvested dividends hidden while drilled.** The
   ADR-110 "Reinvested Dividends" series is a standalone whole-portfolio series
   that shows independent of the category filter. Once the user drills into a

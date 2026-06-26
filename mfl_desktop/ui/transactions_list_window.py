@@ -320,7 +320,15 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         elif self._payee_id is not None and row.payee_id != self._payee_id:
             return False
         if self._category_descendant_ids is not None:
-            if row.category_id not in self._category_descendant_ids:
+            # Split-aware (ADR-051, mirrors the register's base proxy): a split
+            # parent's own category_id is Uncategorised, so also accept the row
+            # when any of its split lines is in the drilled category's subtree —
+            # otherwise a category that exists only on split lines drills to an
+            # empty list even though the report counted those lines.
+            if (
+                row.category_id not in self._category_descendant_ids
+                and self._category_descendant_ids.isdisjoint(row.split_category_ids)
+            ):
                 return False
         if self._kind is not None:
             if row.transfer_id is not None:
