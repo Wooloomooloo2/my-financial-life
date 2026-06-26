@@ -136,7 +136,9 @@ class InvestmentIncomeWindow(QMainWindow):
         self.resize(1200, 740)
         self.setWindowTitle("Investment Income")
 
-        self._all_accounts = repo.list_investment_accounts()
+        # Reports include closed accounts by default (ADR-115) — their history
+        # matters for long-term trends; the filter dialog can uncheck them.
+        self._all_accounts = repo.list_investment_accounts(include_closed=True)
         self._accounts_by_id = {a.id: a for a in self._all_accounts}
         self._filters = IncomeFilters.default()
 

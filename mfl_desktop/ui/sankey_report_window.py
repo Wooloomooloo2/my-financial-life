@@ -355,7 +355,8 @@ class SankeyReportWindow(QMainWindow):
         f = self._current_filters
         dlg = SankeyFilterDialog(
             self._repo,
-            accounts=self._repo.list_accounts(),
+            # Reports include closed accounts by default (ADR-115).
+            accounts=self._repo.list_accounts(include_closed=True),
             categories=self._cat_nodes,
             current_account_ids=f.account_ids,
             current_category_ids=f.category_ids,
@@ -406,7 +407,8 @@ class SankeyReportWindow(QMainWindow):
         if len(acc_ids) == 1:
             account_id: Optional[int] = acc_ids[0]
             account_name = next(
-                (a.name for a in self._repo.list_accounts() if a.id == account_id),
+                (a.name for a in self._repo.list_accounts(include_closed=True)
+                 if a.id == account_id),
                 "",
             )
         else:

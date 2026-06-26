@@ -197,7 +197,9 @@ class SpendingReportWindow(QMainWindow):
         self.resize(1240, 740)
 
         # ── reference data ──
-        self._all_accounts = repo.list_accounts()
+        # Reports include closed accounts by default (ADR-115) — their history
+        # matters for long-term trends; the filter dialog can uncheck them.
+        self._all_accounts = repo.list_accounts(include_closed=True)
         self._all_categories = repo.list_category_tree()
         self._categories_by_id = {c.id: c for c in self._all_categories}
         self._all_canonical_payees = repo.list_canonical_payees()

@@ -121,7 +121,9 @@ class IncomeExpenseWindow(QMainWindow):
         self.resize(1180, 720)
 
         # ── reference data ──
-        self._all_accounts = repo.list_accounts()
+        # Reports include closed accounts by default (ADR-115) — their history
+        # matters for long-term trends; the filter dialog can uncheck them.
+        self._all_accounts = repo.list_accounts(include_closed=True)
         self._all_categories = repo.list_category_tree()
 
         self._current_filters: IncomeExpenseFilters = (

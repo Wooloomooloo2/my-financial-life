@@ -104,7 +104,9 @@ class PayeeReportWindow(QMainWindow):
         self.resize(1180, 740)
 
         # ── reference data ──
-        self._all_accounts = repo.list_accounts()
+        # Reports include closed accounts by default (ADR-115) — their history
+        # matters for long-term trends; the filter dialog can uncheck them.
+        self._all_accounts = repo.list_accounts(include_closed=True)
 
         self._current_filters: PayeeReportFilters = (
             PayeeReportFilters.from_json(report.filters_json)

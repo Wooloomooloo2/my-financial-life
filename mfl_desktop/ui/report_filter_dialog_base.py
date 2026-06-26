@@ -178,10 +178,15 @@ class ReportFilterDialogBase(QDialog):
         placeholder: str = "Search accounts…",
     ) -> CheckListPanel:
         """Build the Accounts checklist seeded from the saved subset
-        (empty tuple == all checked)."""
+        (empty tuple == all checked). Closed accounts (ADR-069) are included
+        in reports by default and tagged '(closed)' so they're identifiable
+        when unchecking (ADR-115)."""
         panel = CheckListPanel(
             "Accounts",
-            [(a.id, a.name) for a in accounts],
+            [
+                (a.id, a.name + ("  (closed)" if a.is_closed else ""))
+                for a in accounts
+            ],
             placeholder=placeholder,
         )
         panel.set_checked_ids(checked_ids or None)

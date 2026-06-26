@@ -144,8 +144,9 @@ class InvestmentReturnsWindow(QMainWindow):
         self._dirty: bool = False
         self.resize(1240, 760)
 
-        # reference data
-        self._all_accounts = repo.list_investment_accounts()
+        # reference data — reports include closed accounts by default (ADR-115)
+        # so long-closed brokerage history still counts; uncheck to exclude.
+        self._all_accounts = repo.list_investment_accounts(include_closed=True)
         self._accounts_by_id = {a.id: a for a in self._all_accounts}
 
         self._current_filters: InvestmentReturnsFilters = (
