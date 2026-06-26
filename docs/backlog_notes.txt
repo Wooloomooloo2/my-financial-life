@@ -1,1 +1,15 @@
-(No open items — the four previous notes shipped in ADR-105 on 2026-06-25.)
+Open owner action (not code) — category triage after ADR-112:
+  The REI Master Card import (pre-ADR-112) forked 6 categories the owner had
+  already curated. Redo the merges by hand in Manage > Categories (which now
+  also records import mappings, inoculating the next import):
+    - Bills:Utilities:Cable and Internet -> Bills:Cable and Internet
+    - Bills:Utilities:Mobile Phone        -> Bills:Phone
+    - Personal:Education:Tuition          -> Personal:Education
+    - Personal:Education:Books            -> Personal:Education
+    - Fees:Charges                        -> owner's choice (Assets:Fees or Misc)
+    - Cash                                -> Personal:Cash
+  Then delete the emptied parents Bills:Utilities and Fees.
+  Optionally turn on Manage > Categories > "Match imports only" for the hard
+  guarantee that future imports never invent a category again.
+
+(The four earlier papercut notes shipped in ADR-105 on 2026-06-25.)
