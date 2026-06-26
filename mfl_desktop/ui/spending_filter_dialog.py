@@ -128,12 +128,13 @@ class SpendingFilterDialog(ReportFilterDialogBase):
         # Income-only: fold in reinvested-dividend (DRIP) income, valued at
         # quantity × price since these rows carry no cash (ADR-089). Hidden for
         # the spending report, which has no such concept.
-        self._include_reinv_check = QCheckBox("Include reinvested dividends")
+        self._include_reinv_check = QCheckBox("Show Reinvested Dividends")
         self._include_reinv_check.setToolTip(
             "Reinvested distributions (DRIP — ReinvDiv) carry their dividend as\n"
-            "new shares, not cash. When on, each is valued at quantity × price\n"
-            "and counted as income under the category you've tagged it with\n"
-            "(tag a reinvest via the register's Category cell or its dialog)."
+            "new shares, not cash. When on, they appear as their own\n"
+            "“Reinvested Dividends” series in the chart (valued at quantity ×\n"
+            "price), independent of the category filter — so you can see\n"
+            "reinvested income distinctly from your cash dividends."
         )
         self._include_reinv_check.setChecked(
             getattr(current, "include_reinvested_dividends", True)

@@ -4706,6 +4706,10 @@ class Repository:
                 "bucket": r["bucket"],
                 "category_id": int(r["category_id"]),
                 "income_pence": int(r["income_pence"]),
+                # Tag so the report can surface these as their own
+                # "Reinvested Dividends" series rather than silently merging
+                # them into the cash category they're tagged with (ADR-110).
+                "reinvested": True,
             }
             for r in cur
             if r["income_pence"] is not None

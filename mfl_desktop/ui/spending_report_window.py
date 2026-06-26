@@ -129,6 +129,15 @@ _INCOME_DIRECTION = _Direction(
     value_key="income_pence",
 )
 
+# Synthetic group id for the reinvested-dividend (DRIP) series (ADR-110). It's
+# not a real category — reinvested distributions are tagged with a cash income
+# category (e.g. Dividend Income), but the "Show Reinvested Dividends" toggle
+# surfaces them as their *own* legend series so they're visible distinctly
+# rather than silently merged into that category's bar. Negative so it can never
+# collide with a real category id (all positive) or UNCATEGORISED_ID (1).
+REINVESTED_GROUP_ID = -100
+REINVESTED_GROUP_LABEL = "Reinvested Dividends"
+
 
 def _auto_granularity_for(span_days: int) -> str:
     """Resolve granularity='auto' against a date-span size — mirrors the
@@ -433,6 +442,14 @@ class SpendingReportWindow(QMainWindow):
         )
         spending: dict[tuple[int, str], int] = {}
         for r in rows:
+            # Reinvested dividends (ADR-110): their own series, independent of the
+            # category filter — the "Show Reinvested Dividends" toggle is their
+            # visibility control, not the category picker (they aren't listed
+            # there). So they always appear when the toggle is on.
+            if r.get("reinvested"):
+                key = (REINVESTED_GROUP_ID, r["bucket"])
+                spending[key] = spending.get(key, 0) + r[value_key]
+                continue
             cid = r["category_id"]
             bid = rollup_map.get(cid, cid)
             if (
@@ -470,7 +487,9 @@ class SpendingReportWindow(QMainWindow):
         groups: list[tuple[int, str]] = [
             (
                 gid,
-                self._categories_by_id[gid].name
+                REINVESTED_GROUP_LABEL
+                if gid == REINVESTED_GROUP_ID
+                else self._categories_by_id[gid].name
                 if gid in self._categories_by_id else f"id={gid}",
             )
             for gid in groups_sorted_ids
@@ -648,9 +667,11 @@ class SpendingReportWindow(QMainWindow):
         category filter to the clicked group's descendants and descend
         the rollup level one notch (so the chart re-renders with the
         clicked group's children as the new stack)."""
-        # Clicking the Uncategorised sentinel has no children to drill
-        # into — ignore the click so we don't push a pointless snapshot.
-        if group_id == UNCATEGORISED_ID:
+        # Clicking the Uncategorised sentinel — or the synthetic Reinvested
+        # Dividends series (ADR-110), which isn't a real category and has no
+        # children — has nothing to drill into; ignore so we don't push a
+        # pointless snapshot.
+        if group_id in (UNCATEGORISED_ID, REINVESTED_GROUP_ID):
             return
         descendants = self._repo.category_descendants(group_id)
         if not descendants:
