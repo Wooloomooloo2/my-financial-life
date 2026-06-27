@@ -816,18 +816,69 @@ class RegisterWindow(QMainWindow):
         self._update_rates_action.triggered.connect(self._on_update_rates)
         tb.addAction(self._update_rates_action)
 
+        self._update_all_action = QAction("Update All", self)
+        self._update_all_action.setToolTip(
+            "Fetch the latest security prices and exchange rates in one go"
+        )
+        self._update_all_action.triggered.connect(self._on_update_all)
+        tb.addAction(self._update_all_action)
+
     def _on_go_home(self) -> None:
         """Toolbar Home — select Home in the sidebar and show the dashboard
         (mirrors the launch landing path)."""
         self._sidebar.select_home()
         self._show_home()
 
+    _PRICE_ERR_PREAMBLE = (
+        "Some prices failed (often a fund ticker Tiingo doesn't cover — price "
+        "those manually in Manage ▸ Securities):"
+    )
+    _RATE_ERR_PREAMBLE = "Some exchange rates failed:"
+
+    def _has_setting(self, key: str) -> bool:
+        return bool((self._repo.get_setting(key) or "").strip())
+
+    @staticmethod
+    def _count_phrase(n: Optional[int], noun: str) -> str:
+        """``3 → "3 prices"``, ``1 → "1 price"``, ``None → "prices: failed"``
+        (None means the refresh call raised; its message rides in the errors)."""
+        if n is None:
+            return f"{noun}s: failed"
+        return f"{n} {noun}{'' if n == 1 else 's'}"
+
+    def _warn_refresh_errors(self, title: str, preamble: str, errors) -> None:
+        shown = errors[:12]
+        more = len(errors) - len(shown)
+        body = "\n".join(shown) + (f"\n… and {more} more" if more > 0 else "")
+        QMessageBox.warning(self, title, f"{preamble}\n\n{body}")
+
+    def _refresh_prices(self) -> tuple[Optional[int], list]:
+        """Force-refresh security prices (Tiingo key assumed set) — the same
+        path Manage ▸ Securities ▸ Refresh Now uses. Returns
+        ``(count_or_None, errors)``; catches its own exception (→ ``None`` +
+        message) so a combined Update All can keep going."""
+        try:
+            result = prices.refresh_latest_prices_into(self._repo, force=True)
+        except Exception as e:  # noqa: BLE001
+            return None, [f"Could not update prices: {e}"]
+        return result.new_prices_count, result.errors
+
+    def _refresh_rates(self) -> tuple[Optional[int], list]:
+        """Force-refresh FX rates (openexchangerates key assumed set) — the same
+        path Manage ▸ Currencies ▸ Refresh Now uses. Returns
+        ``(count_or_None, errors)``; catches its own exception so Update All can
+        keep going."""
+        try:
+            result = fx.refresh_latest_into(self._repo, force=True)
+        except Exception as e:  # noqa: BLE001
+            return None, [f"Could not update rates: {e}"]
+        return result.new_rates_count, result.errors
+
     def _on_update_prices(self) -> None:
-        """Toolbar Update Prices — fetch latest security prices directly, the
-        same force-refresh Manage ▸ Securities ▸ Refresh Now runs, then refresh
-        sidebar balances so changed market values show immediately. Routes the
-        user to the Securities dialog when no Tiingo key is set yet."""
-        if not (self._repo.get_setting("tiingo_api_key") or "").strip():
+        """Toolbar Update Prices — fetch latest security prices directly, then
+        refresh sidebar balances so changed market values show immediately.
+        Routes to the Securities dialog when no Tiingo key is set yet."""
+        if not self._has_setting("tiingo_api_key"):
             QMessageBox.information(
                 self, "No Tiingo API key",
                 "Add your Tiingo API token in Manage ▸ Securities… before "
@@ -838,36 +889,23 @@ class RegisterWindow(QMainWindow):
             return
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         try:
-            result = prices.refresh_latest_prices_into(self._repo, force=True)
-        except Exception as e:  # noqa: BLE001
+            n, errors = self._refresh_prices()
+        finally:
             QApplication.restoreOverrideCursor()
-            QMessageBox.critical(
-                self, "Update failed", f"Could not update prices:\n\n{e}",
-            )
-            return
-        QApplication.restoreOverrideCursor()
         self._refresh_sidebar_balances()
-        n = result.new_prices_count
         self.statusBar().showMessage(
-            f"Prices updated · {n} price{'' if n == 1 else 's'} refreshed", 6000,
+            f"Updated {self._count_phrase(n, 'price')}", 6000,
         )
-        if result.errors:
-            shown = result.errors[:12]
-            more = len(result.errors) - len(shown)
-            msg = "\n".join(shown) + (f"\n… and {more} more" if more > 0 else "")
-            QMessageBox.warning(
-                self, "Some prices failed",
-                "Update finished with errors (often a fund ticker Tiingo "
-                "doesn't cover — price those manually in Manage ▸ "
-                f"Securities):\n\n{msg}",
+        if errors:
+            self._warn_refresh_errors(
+                "Some prices failed", self._PRICE_ERR_PREAMBLE, errors,
             )
 
     def _on_update_rates(self) -> None:
-        """Toolbar Update Rates — fetch latest FX rates directly, the same
-        force-refresh Manage ▸ Currencies ▸ Refresh Now runs, then refresh
-        sidebar balances so converted figures update. Routes the user to the
-        Currencies dialog when no openexchangerates key is set yet."""
-        if not (self._repo.get_setting("oxr_api_key") or "").strip():
+        """Toolbar Update Rates — fetch latest FX rates directly, then refresh
+        sidebar balances so converted figures update. Routes to the Currencies
+        dialog when no openexchangerates key is set yet."""
+        if not self._has_setting("oxr_api_key"):
             QMessageBox.information(
                 self, "No exchange-rate API key",
                 "Add your openexchangerates.org app_id in Manage ▸ "
@@ -877,23 +915,64 @@ class RegisterWindow(QMainWindow):
             return
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         try:
-            result = fx.refresh_latest_into(self._repo, force=True)
-        except Exception as e:  # noqa: BLE001
+            n, errors = self._refresh_rates()
+        finally:
             QApplication.restoreOverrideCursor()
-            QMessageBox.critical(
-                self, "Update failed", f"Could not update rates:\n\n{e}",
+        self._refresh_sidebar_balances()
+        self.statusBar().showMessage(
+            f"Updated {self._count_phrase(n, 'rate')}", 6000,
+        )
+        if errors:
+            self._warn_refresh_errors(
+                "Some rates failed", self._RATE_ERR_PREAMBLE, errors,
+            )
+
+    def _on_update_all(self) -> None:
+        """Toolbar Update All — refresh prices and FX rates in one click (the
+        backlog's F2 "Update all"). Each is run only if its API key is set; a
+        missing key is reported as skipped rather than popping a dialog (unlike
+        the single-action buttons), so one click can't spawn two modal asks. A
+        failure in one doesn't abort the other (each core catches its own).
+        Bank feeds are deliberately excluded — they need interactive consent
+        and live in their own Manage ▸ Bank Feeds dialog."""
+        has_tiingo = self._has_setting("tiingo_api_key")
+        has_oxr = self._has_setting("oxr_api_key")
+        if not (has_tiingo or has_oxr):
+            QMessageBox.information(
+                self, "Nothing to update",
+                "Add a Tiingo API token (Manage ▸ Securities…) for prices "
+                "and/or an openexchangerates app_id (Manage ▸ Currencies…) for "
+                "exchange rates, then Update All refreshes them in one click.",
             )
             return
-        QApplication.restoreOverrideCursor()
+        parts: list[str] = []
+        skipped: list[str] = []
+        errors: list = []
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            if has_tiingo:
+                n, errs = self._refresh_prices()
+                parts.append(self._count_phrase(n, "price"))
+                errors += errs
+            else:
+                skipped.append("prices (no Tiingo key)")
+            if has_oxr:
+                n, errs = self._refresh_rates()
+                parts.append(self._count_phrase(n, "rate"))
+                errors += errs
+            else:
+                skipped.append("rates (no exchange-rate key)")
+        finally:
+            QApplication.restoreOverrideCursor()
         self._refresh_sidebar_balances()
-        n = result.new_rates_count
-        self.statusBar().showMessage(
-            f"Rates updated · {n} rate{'' if n == 1 else 's'} refreshed", 6000,
-        )
-        if result.errors:
-            QMessageBox.warning(
-                self, "Some rates failed",
-                "Update finished with errors:\n\n" + "\n".join(result.errors),
+        msg = "Updated " + ", ".join(parts)
+        if skipped:
+            msg += " · skipped " + ", ".join(skipped)
+        self.statusBar().showMessage(msg, 8000)
+        if errors:
+            self._warn_refresh_errors(
+                "Update finished with errors",
+                "Update All finished with errors:", errors,
             )
 
     # ── menus ──

@@ -1,4 +1,4 @@
-# ADR-116 — Quick-action toolbar (Home · Update Prices · Update Rates)
+# ADR-116 — Quick-action toolbar (Home · Update Prices · Update Rates · Update All)
 
 **Date:** 2026-06-27
 **Status:** Accepted
@@ -24,7 +24,7 @@ polish** round.
 
 Add a persistent, non-movable `QToolBar` at the top of `RegisterWindow`
 (`_build_toolbar`, called right after `_build_menus`), text-only
-(`Qt.ToolButtonTextOnly` — there are no per-action icons), with three actions:
+(`Qt.ToolButtonTextOnly` — there are no per-action icons), with four actions:
 
 - **Home** — `select_home()` on the sidebar + `_show_home()`, mirroring the
   launch landing path.
@@ -34,8 +34,17 @@ Add a persistent, non-movable `QToolBar` at the top of `RegisterWindow`
   then `_refresh_sidebar_balances()` so changed market values show at once.
 - **Update Rates** — the FX equivalent (`fx.refresh_latest_into`,
   `force=True`), then refresh sidebar balances so converted figures update.
+- **Update All** — runs prices + rates in one click (the backlog's F2 "Update
+  all"). The shared refresh logic is factored into `_refresh_prices` /
+  `_refresh_rates` cores that each catch their own exceptions into the returned
+  error list, so one failing provider doesn't abort the other. Each provider
+  runs only if its API key is set; a missing key is reported as **skipped** in
+  the status line (e.g. `Updated 5 rates · skipped prices (no Tiingo key)`)
+  rather than popping a dialog — one click must not spawn two modal asks.
+  **Bank feeds are deliberately excluded**: they need interactive consent and
+  keep their own *Manage ▸ Bank Feeds* dialog.
 
-Both update handlers:
+The single-action update handlers (used by Update Prices / Update Rates):
 
 - **Route to the relevant dialog when the API key is unset** (Tiingo /
   openexchangerates) rather than silently no-op'ing — an info box explains where
@@ -60,6 +69,7 @@ catch network/rate-limit errors into `RefreshResult.errors` rather than raising.
   and stays single-sourced. Those dialogs remain the place for API keys, manual
   prices, and history backfill.
 - View layer only; no migration, no schema change.
-- The toolbar gives the P7 round a home for further quick actions if wanted
-  (e.g. an "Update all" that chains prices + rates + bank feeds, per the
-  backlog's F2 note) — out of scope here.
+- Update All covers the backlog's F2 "Update all" for the two non-interactive
+  data sources (prices + rates). Folding in bank feeds — which need consent —
+  stays with the Bank Feeds dialog; a future quick action could trigger an
+  OFX-Direct-only background feed refresh if wanted.
