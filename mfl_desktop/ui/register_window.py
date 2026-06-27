@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, QEvent, QStandardPaths, QUrl
-from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
+from PySide6.QtGui import QAction, QCursor, QKeySequence, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QApplication,
@@ -34,11 +34,13 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStatusBar,
     QTableView,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
 from mfl_desktop import data_library, snapshots
+from mfl_desktop import fx, prices
 from mfl_desktop import license_service
 from mfl_desktop import version
 from mfl_desktop.app_session import remember_last_db, set_snapshots_root
@@ -379,6 +381,7 @@ class RegisterWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar(self))
         self._build_menus()
+        self._build_toolbar()
 
         # ADR-061: coalesce status-bar refreshes. A single filter invalidation
         # emits rowsRemoved + rowsInserted + layoutChanged, and _update_status
@@ -771,6 +774,127 @@ class RegisterWindow(QMainWindow):
         if amount < 0:
             return f"Net: -{symbol}{body}"
         return f"Net: {symbol}{body}"
+
+    # ── quick-action toolbar (ADR-116) ──
+
+    def _build_toolbar(self) -> None:
+        """A quick-action header for the things that are otherwise buried.
+
+        ``Home`` is only reachable as a sidebar row (ADR-075) and is easy to
+        miss; ``Update Prices`` / ``Update Rates`` live three clicks deep inside
+        Manage ▸ Securities / Currencies. The toolbar surfaces all three at the
+        top of the window, and the two update buttons fetch *directly* (no
+        dialog) — the same synchronous, force-refresh path those dialogs' own
+        Refresh-Now buttons use.
+        """
+        tb = QToolBar("Quick actions", self)
+        tb.setObjectName("quick_actions_toolbar")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.addToolBar(Qt.TopToolBarArea, tb)
+        self._toolbar = tb
+
+        self._toolbar_home_action = QAction("Home", self)
+        self._toolbar_home_action.setToolTip("Go to the Home dashboard")
+        self._toolbar_home_action.triggered.connect(self._on_go_home)
+        tb.addAction(self._toolbar_home_action)
+
+        tb.addSeparator()
+
+        self._update_prices_action = QAction("Update Prices", self)
+        self._update_prices_action.setToolTip(
+            "Fetch the latest security prices from Tiingo now"
+        )
+        self._update_prices_action.triggered.connect(self._on_update_prices)
+        tb.addAction(self._update_prices_action)
+
+        self._update_rates_action = QAction("Update Rates", self)
+        self._update_rates_action.setToolTip(
+            "Fetch the latest currency exchange rates from openexchangerates now"
+        )
+        self._update_rates_action.triggered.connect(self._on_update_rates)
+        tb.addAction(self._update_rates_action)
+
+    def _on_go_home(self) -> None:
+        """Toolbar Home — select Home in the sidebar and show the dashboard
+        (mirrors the launch landing path)."""
+        self._sidebar.select_home()
+        self._show_home()
+
+    def _on_update_prices(self) -> None:
+        """Toolbar Update Prices — fetch latest security prices directly, the
+        same force-refresh Manage ▸ Securities ▸ Refresh Now runs, then refresh
+        sidebar balances so changed market values show immediately. Routes the
+        user to the Securities dialog when no Tiingo key is set yet."""
+        if not (self._repo.get_setting("tiingo_api_key") or "").strip():
+            QMessageBox.information(
+                self, "No Tiingo API key",
+                "Add your Tiingo API token in Manage ▸ Securities… before "
+                "updating prices. (Securities with no ticker can still be "
+                "priced manually there.)",
+            )
+            self._on_manage_securities()
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            result = prices.refresh_latest_prices_into(self._repo, force=True)
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self, "Update failed", f"Could not update prices:\n\n{e}",
+            )
+            return
+        QApplication.restoreOverrideCursor()
+        self._refresh_sidebar_balances()
+        n = result.new_prices_count
+        self.statusBar().showMessage(
+            f"Prices updated · {n} price{'' if n == 1 else 's'} refreshed", 6000,
+        )
+        if result.errors:
+            shown = result.errors[:12]
+            more = len(result.errors) - len(shown)
+            msg = "\n".join(shown) + (f"\n… and {more} more" if more > 0 else "")
+            QMessageBox.warning(
+                self, "Some prices failed",
+                "Update finished with errors (often a fund ticker Tiingo "
+                "doesn't cover — price those manually in Manage ▸ "
+                f"Securities):\n\n{msg}",
+            )
+
+    def _on_update_rates(self) -> None:
+        """Toolbar Update Rates — fetch latest FX rates directly, the same
+        force-refresh Manage ▸ Currencies ▸ Refresh Now runs, then refresh
+        sidebar balances so converted figures update. Routes the user to the
+        Currencies dialog when no openexchangerates key is set yet."""
+        if not (self._repo.get_setting("oxr_api_key") or "").strip():
+            QMessageBox.information(
+                self, "No exchange-rate API key",
+                "Add your openexchangerates.org app_id in Manage ▸ "
+                "Currencies… before updating rates.",
+            )
+            self._on_manage_currencies()
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            result = fx.refresh_latest_into(self._repo, force=True)
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self, "Update failed", f"Could not update rates:\n\n{e}",
+            )
+            return
+        QApplication.restoreOverrideCursor()
+        self._refresh_sidebar_balances()
+        n = result.new_rates_count
+        self.statusBar().showMessage(
+            f"Rates updated · {n} rate{'' if n == 1 else 's'} refreshed", 6000,
+        )
+        if result.errors:
+            QMessageBox.warning(
+                self, "Some rates failed",
+                "Update finished with errors:\n\n" + "\n".join(result.errors),
+            )
 
     # ── menus ──
 

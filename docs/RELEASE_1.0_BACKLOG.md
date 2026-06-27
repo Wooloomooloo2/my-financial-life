@@ -109,6 +109,16 @@ _Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold b
 - [x] Basic automated test pass green — **DONE (ADR-099).** `tests/` IRI guard green + an import-all/`compileall` smoke (135 modules import clean offscreen) as the cross-module gate. CI matrix on both OSes pends the packaging round.
 - [x] Decide a crash/error-reporting approach — **DONE (ADR-099): local-log + Export Diagnostics, no telemetry.** `diagnostics.py` = rotating file log + a last-resort excepthook (logs + a non-fatal "your data is safe / log is here" dialog) + Help ▸ **Export Diagnostics…** (PII-light blob to a user-chosen file). Nothing leaves the device.
 
+### P7 — Post-feature polish (gaps surfaced after the 2026-06-16 plan)
+**Why this exists:** P1–P6 closed the polish list as scoped on 2026-06-16. Everything below either (a) is a discoverability/UX gap the original audit didn't name, or (b) covers functionality shipped *after* the plan was written (bonds/options ADR-093, loans ADR-095, budget bills ADR-094, Investment Income report ADR-108, reports-include-closed ADR-115). Tracked here so the manual (W2) has a stable UI to document.
+- [x] **Quick-action header / toolbar — DONE (ADR-116).** A persistent top `QToolBar` on the main window: **Home · Update Prices · Update Rates**. Closes the owner-flagged "Home is easily missed as a sidebar row" (ADR-075) and surfaces price/FX refresh that were three clicks deep in Manage ▸ Securities / Currencies. The two update buttons fetch **directly** (no dialog) via the same synchronous force-refresh those dialogs' Refresh-Now buttons use (`prices.refresh_latest_prices_into` / `fx.refresh_latest_into`, `force=True`), refresh sidebar balances after, report counts on the status bar, and route to the relevant dialog when the API key is unset.
+- [ ] **Per-feature in-app help coverage** — the newest features have no Help/Getting-Started entry: bonds & options, loan accounts + amortization, budget bills + burn-down, Investment Income report, reports-include-closed default. Decide what's in-app (P5 Help links) vs. only in the website manual (W2). _Do not write screenshots before the UI is frozen._
+- [ ] **Investment Income filter dialog** is its own class, not on the shared `ReportFilterDialogBase` (ADR-084) — a minor P3-style consolidation candidate. Low priority; only if touched anyway.
+- [ ] **UI-freeze checkpoint before the manual** — once P7's UI items land, declare the UI steady-state so W2's screenshots don't go stale (owner's explicit sequencing: manual is the *last* task).
+
+### Open non-code owner action (carried from `backlog_notes.txt`)
+- [ ] **Post-ADR-112 category triage** — the pre-ADR-112 REI Master Card import forked 6 curated categories. Redo the merges by hand in Manage ▸ Categories (now also records import mappings, inoculating future imports): `Bills:Utilities:Cable and Internet`→`Bills:Cable and Internet`; `Bills:Utilities:Mobile Phone`→`Bills:Phone`; `Personal:Education:Tuition`/`:Books`→`Personal:Education`; `Fees:Charges`→owner's choice; `Cash`→`Personal:Cash`; then delete the emptied `Bills:Utilities` + `Fees`. Optionally enable "Match imports only".
+
 ---
 
 ## 2. Workstream K — Packaging, signing & store readiness
@@ -228,6 +238,7 @@ Cores already shipped (ADR-077): Enable Banking, SimpleFIN, Plaid, OFX Direct + 
 ### W2 — Support & docs
 - [ ] **Support contact** (a real monitored address — also serves as EB's data-protection email if appropriate) + a simple ticket/email flow.
 - [ ] **Getting-started docs / FAQ** (import a statement, set up a bank feed, multi-currency, investments). The in-app Help (P5) links here.
+- [ ] **Full user manual (web + PDF)** ⭐ (owner asked) — a complete manual covering **every** feature across the app (register, imports, transfers, schedules/bills, budgets, reports incl. Investment Income/Returns + Sankey, net worth, loans + amortization, bonds/options, multi-currency, bank feeds, data/backups), with **screenshots and clear explanations**, published on the website and exportable as a **PDF**. **Sequencing (owner): this is the LAST task** — write it only once the UI is in steady state (after the **P7 UI-freeze checkpoint**), otherwise screenshots and copy go stale immediately. Reuses the same polished build that feeds W1's marketing screenshots.
 - [ ] Changelog / release notes page (feeds the auto-updater too).
 - [ ] Status/known-issues page (optional but cheap).
 
