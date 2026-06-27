@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import data_library, snapshots
 from mfl_desktop import fx, prices
 from mfl_desktop import license_service
+from mfl_desktop import resources
 from mfl_desktop import version
 from mfl_desktop.app_session import remember_last_db, set_snapshots_root
 from mfl_desktop.licensing import STATE_EXPIRED, STATE_TRIAL
@@ -424,7 +425,7 @@ class RegisterWindow(QMainWindow):
         self._main_stack.addWidget(right_panel)        # index 1
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._sidebar)
+        splitter.addWidget(self._build_sidebar_panel())
         splitter.addWidget(self._main_stack)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -432,6 +433,7 @@ class RegisterWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         self.setStatusBar(QStatusBar(self))
+        self._add_company_logo_to_status_bar()
         self._build_toolbar()
         self._build_menus()
 
@@ -826,6 +828,54 @@ class RegisterWindow(QMainWindow):
         if amount < 0:
             return f"Net: -{symbol}{body}"
         return f"Net: {symbol}{body}"
+
+    # ── brand chrome (ADR-117) ──
+
+    def _build_sidebar_panel(self) -> QWidget:
+        """Wrap the sidebar tree under a small MFL brand header (icon +
+        wordmark), so the everyday left rail carries the product mark instead of
+        being all text. The header blends with the tree (same ``surface``
+        background) with a hairline rule below it."""
+        header = QWidget()
+        header.setObjectName("sidebar_brand")
+        tokens.themed(
+            header,
+            "QWidget#sidebar_brand { background: {surface}; "
+            "border-bottom: 1px solid {border}; }",
+        )
+        row = QHBoxLayout(header)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(8)
+        logo = QLabel()
+        pm = resources.brand_mark(26)
+        if not pm.isNull():
+            logo.setPixmap(pm)
+        name = QLabel("My Financial Life")
+        tokens.themed(name, "color: {accent}; font-weight: bold; font-size: 15px;")
+        row.addWidget(logo, 0, Qt.AlignVCenter)
+        row.addWidget(name, 1, Qt.AlignVCenter)
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(header)
+        layout.addWidget(self._sidebar, 1)
+        return panel
+
+    def _add_company_logo_to_status_bar(self) -> None:
+        """Pin the Garelochsoft publisher wordmark to the right of the status
+        bar (a permanent widget, so transient messages never overwrite it) —
+        an always-present but unobtrusive brand attribution."""
+        pm = resources.company_logo(18)
+        if pm.isNull():
+            return
+        label = QLabel()
+        label.setPixmap(pm)
+        label.setToolTip("My Financial Life — published by Garelochsoft")
+        label.setContentsMargins(0, 0, 8, 0)
+        self._company_logo_label = label
+        self.statusBar().addPermanentWidget(label)
 
     # ── quick-action toolbar (ADR-116) ──
 

@@ -40,7 +40,7 @@ def make_splash() -> QSplashScreen:
     p.setPen(QColor(_BORDER))
     p.drawRect(0, 0, _W - 1, _H - 1)
 
-    icon = resources.app_pixmap(104)
+    icon = resources.brand_mark(104)
     if not icon.isNull():
         p.drawPixmap((_W - 104) // 2, 36, icon)
 

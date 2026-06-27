@@ -43,9 +43,11 @@ class AboutDialog(QDialog):
         self.setWindowTitle(f"About {APP_NAME}")
         self.setModal(True)
 
-        # Brand header: app icon (ADR-103) beside the name + version + build.
+        # Brand header: app mark (ADR-103/117) beside the name + version + build.
+        # brand_mark = transparent-background hexagon, so it reads cleanly on the
+        # About box surface in both light and dark themes.
         icon_lbl = QLabel()
-        icon_lbl.setPixmap(resources.app_pixmap(64))
+        icon_lbl.setPixmap(resources.brand_mark(64))
         icon_lbl.setFixedSize(64, 64)
         icon_lbl.setScaledContents(True)
 

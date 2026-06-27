@@ -73,9 +73,9 @@ class FirstRunDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setSpacing(14)
 
-        # Brand header: app icon (ADR-103) beside the welcome heading.
+        # Brand header: app mark (ADR-103/117) beside the welcome heading.
         icon_lbl = QLabel()
-        icon_lbl.setPixmap(resources.app_pixmap(48))
+        icon_lbl.setPixmap(resources.brand_mark(48))
         icon_lbl.setFixedSize(48, 48)
         icon_lbl.setScaledContents(True)
         heading = QLabel("Welcome to My Financial Life")

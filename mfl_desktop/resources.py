@@ -59,6 +59,25 @@ def app_pixmap(size: int = 64):
     return app_icon().pixmap(QSize(size, size))
 
 
+def brand_mark(size: int = 28):
+    """A transparent-background MFL hexagon mark at ``size`` px, for the brand
+    chrome *inside* the UI (sidebar header, About). Distinct from ``app_pixmap``
+    — which derives from the dock/taskbar icon set whose PNGs carry a flat light
+    background that would show as a box on dark surfaces. Falls back to
+    ``app_pixmap`` if the dedicated transparent asset is missing."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap
+    p = asset_path("icons", "mfl_mark.png")
+    if not p.exists():
+        return app_pixmap(size)
+    pm = QPixmap(str(p))
+    if pm.isNull():
+        return app_pixmap(size)
+    return pm.scaled(
+        size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation,
+    )
+
+
 def company_logo(height: int = 32):
     """The Garelochsoft company wordmark scaled to ``height`` px (aspect kept),
     for the publisher attribution in the About box. Garelochsoft publishes My
