@@ -4395,6 +4395,52 @@ class Repository:
             (new_count, duplicate_count, matched_count, batch_id),
         )
 
+    def list_import_batches(self, limit: int = 50) -> list[dict]:
+        """Recent import batches, newest first, for the Undo-Import picker
+        (ADR-118). Each row carries the account name and the originally-recorded
+        counts so the user can identify the run they want to reverse."""
+        rows = self._conn.execute(
+            "SELECT b.id, b.source_format, b.source_filename, b.imported_at, "
+            "       b.new_count, b.account_id, a.name AS account_name, "
+            "       (SELECT COUNT(*) FROM txn WHERE txn.import_batch_id = b.id) "
+            "         AS live_count "
+            "FROM import_batch b "
+            "LEFT JOIN account a ON a.id = b.account_id "
+            "ORDER BY b.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_import_batch(self, batch_id: int) -> int:
+        """Undo an import (ADR-118): delete every transaction that batch created
+        and then the batch row. Returns the number of transactions removed.
+
+        ``txn_split`` lines and reconciliation rows cascade off the ``txn``
+        delete (ON DELETE CASCADE). The transactions are deleted **before** the
+        batch row because ``txn.import_batch_id`` is ``ON DELETE SET NULL`` —
+        dropping the batch first would sever the link and orphan the rows.
+
+        Caveats (surfaced to the user by the caller): rows the import merged into
+        a pre-existing manual placeholder (ADR-010) are not created by the batch
+        and so are not removed; imported cash rows are never transfers, so there
+        are no partner rows to consider."""
+        try:
+            n = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM txn WHERE import_batch_id = ?",
+                (batch_id,),
+            ).fetchone()["c"]
+            self._conn.execute(
+                "DELETE FROM txn WHERE import_batch_id = ?", (batch_id,),
+            )
+            self._conn.execute(
+                "DELETE FROM import_batch WHERE id = ?", (batch_id,),
+            )
+            self.commit()
+            return int(n)
+        except Exception:
+            self.rollback()
+            raise
+
     # ── Register (read + inline edits) ──
 
     def list_transactions_for_account(

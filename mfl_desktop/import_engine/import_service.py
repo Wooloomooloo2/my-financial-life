@@ -122,6 +122,34 @@ class ImportResult:
     matched: int
 
 
+@dataclass(frozen=True)
+class NewCategoryItem:
+    """A source category path the staged import would create — surfaced to the
+    import-time review dialog (ADR-118) so the user maps it, creates it, or
+    parks it in Needs Review instead of it silently forking the tree."""
+    raw: str            # original source path as the file wrote it
+    normalized: str     # the map key (lower/trim/':'-joined)
+    txn_count: int      # how many staged rows reference it
+
+
+def _transfer_ref_account(category_raw: str) -> Optional[str]:
+    """The account named by a Banktivity transfer reference in the category
+    column, or ``None`` for an ordinary category. Banktivity writes transfers as
+    a bracketed account name in the **last** path segment — bare
+    ``'[Chase Checking]'`` *or* grouped ``'Transfer:[Chase Checking]'`` — so the
+    test is on the final segment, not the whole string. The QIF parser handles
+    this upstream (ADR-111); the generic CSV path did not, so the value reached
+    category resolution and was created as a bogus category (ADR-118). Detected
+    centrally here so every format is safe."""
+    v = (category_raw or "").strip()
+    if not v:
+        return None
+    last = v.split(":")[-1].strip()
+    if len(last) >= 2 and last.startswith("[") and last.endswith("]"):
+        return last[1:-1].strip() or None
+    return None
+
+
 # ── Hash helper ─────────────────────────────────────────────────────────────
 
 
@@ -488,12 +516,19 @@ class ImportService:
         token: str,
         import_status: str,                # 'Cleared' | 'Uncleared'
         accepted_match_fitids: set[str],
+        category_decisions: Optional[dict] = None,
     ) -> ImportResult:
+        """Commit a staged import. ``category_decisions`` (ADR-118) maps a
+        normalised source-category path → ``(kind, payload)`` chosen in the
+        import-time review dialog: ``("map", target_id)`` /  ``("create", None)``
+        / ``("review", None)``. A ``"map"`` decision is also **persisted** as an
+        import mapping so future imports of that path follow the same routing."""
         pending = self._pending.get(token)
         if pending is None:
             raise ValueError("Import session not found or expired.")
         if import_status not in ("Cleared", "Uncleared"):
             raise ValueError(f"Unknown import status: {import_status!r}")
+        decisions = category_decisions or None
 
         try:
             batch_id = self._repo.create_import_batch(
@@ -501,6 +536,14 @@ class ImportService:
                 source_format=pending.file_format,
                 source_filename=pending.filename,
             )
+
+            # ADR-118: a "map this source path → my category" decision is durable
+            # — record it so the next import of the same export routes there
+            # automatically, exactly like a merge/delete/reparent does (ADR-112).
+            if decisions:
+                for key, (kind, payload) in decisions.items():
+                    if kind == "map" and payload is not None:
+                        self._repo.set_category_import_mapping(key, payload)
 
             # Investment import (ADR-043): create the securities master first,
             # building a name → id map so each transaction's `Y` reference
@@ -544,7 +587,18 @@ class ImportService:
                     continue
 
                 effective_status = tx.status_override or import_status
-                category_id = self._resolve_category_id(tx.category_raw)
+                category_id = self._resolve_category_id(tx.category_raw, decisions)
+                # ADR-118: a Banktivity transfer reference in the category column
+                # ("[Chase Checking]") isn't a category — it's left Uncategorised
+                # (above) and noted on the memo so Reconcile Transfers (ADR-037)
+                # can pair it, mirroring the QIF path (ADR-111). Skip when the
+                # parser already recorded a linked account (QIF does its own note).
+                memo = tx.memo
+                ref_account = _transfer_ref_account(tx.category_raw)
+                if ref_account and not tx.linked_account:
+                    direction = "from" if tx.tx_type == "credit" else "to"
+                    note = f"Transfer {direction} {ref_account}"
+                    memo = f"{memo} | {note}" if memo else note
                 # ADR-072 / ADR-028 round 2: resolve the raw payee to its
                 # canonical (aliases normalise to the canonical on the way in)
                 # and pick up its remembered auto-category. The memory only
@@ -569,6 +623,7 @@ class ImportService:
                 if (
                     not tx.splits
                     and category_id == self._repo.uncategorised_id()
+                    and ref_account is None      # ADR-118: a transfer isn't a spend
                 ):
                     chosen = rule_cat if rule_cat is not None else payee_default_cat
                     if chosen is not None:
@@ -596,7 +651,9 @@ class ImportService:
                 if tx.splits:
                     lines = [
                         (
-                            self._resolve_category_id(s.get("category_raw", "")),
+                            self._resolve_category_id(
+                                s.get("category_raw", ""), decisions,
+                            ),
                             s.get("memo", ""),
                             s["amount"],
                         )
@@ -607,7 +664,7 @@ class ImportService:
                         posted_date=tx.date_iso,
                         payee_id=payee_id,
                         status=effective_status,
-                        memo=tx.memo,
+                        memo=memo,
                         total_amount=signed_amount,
                         lines=lines,
                         import_hash=tx.import_hash,
@@ -631,7 +688,7 @@ class ImportService:
                     payee_id=payee_id,
                     category_id=category_id,
                     status=effective_status,
-                    memo=tx.memo,
+                    memo=memo,
                     import_hash=tx.import_hash,
                     import_batch_id=batch_id,
                     action=tx.action or None,
@@ -680,21 +737,41 @@ class ImportService:
             skipped=skipped, matched=matched,
         )
 
-    def _resolve_category_id(self, category_raw: str) -> int:
+    def _resolve_category_id(
+        self, category_raw: str, decisions: Optional[dict] = None,
+    ) -> int:
         """Resolve a source category path (Banktivity ':' separator) to a leaf
-        category id, honouring the user's curation (ADR-112):
+        category id, honouring the user's curation (ADR-112/118):
 
+        0. a transfer reference ``[Account]`` is **not** a category → Uncategorised
+           (the transfer note is added at the call site; ADR-118);
         1. empty path → Uncategorised;
-        2. an explicit import mapping (source path → my category) wins — this is
-           how a merged/deleted/reparented category keeps re-imports in line;
-        3. an existing path in the tree is used as-is (no duplicate created);
-        4. otherwise, in match-only mode the path parks in **Needs Review** for
-           triage; with match-only off it's created (the legacy behaviour that
-           lets a fresh file build its tree from the first import).
+        2. an import-time **decision** for this path (from the review dialog) wins
+           — map to an existing category / create / park in Needs Review;
+        3. an explicit import mapping (source path → my category) — how a
+           merged/deleted/reparented category keeps re-imports in line;
+        4. an existing path in the tree is used as-is (no duplicate created);
+        5. otherwise, in match-only mode the path parks in **Needs Review**; with
+           match-only off it's created (the legacy first-import tree-building).
         """
+        if _transfer_ref_account(category_raw) is not None:
+            return self._repo.uncategorised_id()
         if not category_raw or not category_raw.strip():
             return self._repo.uncategorised_id()
         segments = [s.strip() for s in category_raw.split(":") if s.strip()]
+
+        if decisions:
+            dec = decisions.get(self._repo.normalize_category_path(segments))
+            if dec is not None:
+                kind, payload = dec
+                if kind == "map":
+                    return payload
+                if kind == "review":
+                    return self._repo.needs_review_category_id()
+                if kind == "create":
+                    return self._repo.find_or_create_category_path(
+                        segments, source="import",
+                    )
 
         mapped = self._repo.get_category_import_mapping(segments)
         if mapped is not None:
@@ -707,3 +784,49 @@ class ImportService:
         if self._repo.import_match_only_categories():
             return self._repo.needs_review_category_id()
         return self._repo.find_or_create_category_path(segments, source="import")
+
+    def _staged_category_raws(self, pending: "PendingImport"):
+        """Yield every source category string the staged import will resolve —
+        each transaction's own category plus every split line's — so the
+        new-category scan and the commit loop classify the same set."""
+        for tx in pending.transactions:
+            if tx.status == "duplicate":
+                continue
+            if tx.splits:
+                for s in tx.splits:
+                    yield s.get("category_raw", "")
+            else:
+                yield tx.category_raw
+
+    def plan_new_categories(self, token: str) -> list[NewCategoryItem]:
+        """The distinct source categories this staged import would **create** —
+        i.e. not empty, not a ``[Account]`` transfer reference, and neither
+        already mapped (ADR-112) nor present in the tree. Drives the import-time
+        review dialog (ADR-118). Empty list ⇒ nothing new ⇒ no dialog needed."""
+        counts: dict[str, int] = {}
+        raws: dict[str, str] = {}
+        for category_raw in self._staged_category_raws(pending=self._require(token)):
+            if not category_raw or not category_raw.strip():
+                continue
+            if _transfer_ref_account(category_raw) is not None:
+                continue
+            segments = [s.strip() for s in category_raw.split(":") if s.strip()]
+            if not segments:
+                continue
+            key = self._repo.normalize_category_path(segments)
+            if self._repo.get_category_import_mapping(segments) is not None:
+                continue
+            if self._repo.find_category_path(segments) is not None:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            raws.setdefault(key, ":".join(segments))
+        return [
+            NewCategoryItem(raw=raws[k], normalized=k, txn_count=counts[k])
+            for k in sorted(counts, key=lambda k: (-counts[k], k))
+        ]
+
+    def _require(self, token: str) -> "PendingImport":
+        pending = self._pending.get(token)
+        if pending is None:
+            raise ValueError("Import session not found or expired.")
+        return pending

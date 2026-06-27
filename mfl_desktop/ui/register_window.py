@@ -61,6 +61,8 @@ from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.categories_dialog import CategoriesDialog
 from mfl_desktop.ui.csv_mapping_dialog import CsvMappingDialog
 from mfl_desktop.ui.import_review_dialog import ImportReviewDialog
+from mfl_desktop.ui.import_category_review_dialog import ImportCategoryReviewDialog
+from mfl_desktop.ui.import_history_dialog import ImportHistoryDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.home_view import HomeView
@@ -1119,6 +1121,13 @@ class RegisterWindow(QMainWindow):
         self._import_latest_action.triggered.connect(self._on_import_latest)
         file_menu.addAction(self._import_latest_action)
         self.addAction(self._import_latest_action)
+
+        self._undo_import_action = QAction("&Undo Import…", self)
+        self._undo_import_action.setToolTip(
+            "Reverse a past import, deleting the transactions it added"
+        )
+        self._undo_import_action.triggered.connect(self._on_undo_import)
+        file_menu.addAction(self._undo_import_action)
 
         file_menu.addSeparator()
 
@@ -2896,9 +2905,23 @@ class RegisterWindow(QMainWindow):
             accepted = review.accepted_fitids()
         else:
             accepted = set()
+
+        # ADR-118: if the import would create categories not in the tree, let the
+        # user map/create/park each before commit — so an import never silently
+        # forks the category list again. Nothing new ⇒ no dialog (silent commit).
+        category_decisions = None
+        new_cats = self._service.plan_new_categories(token)
+        if new_cats:
+            dlg = ImportCategoryReviewDialog(
+                new_cats, self._repo.list_categories_flat(), parent=self,
+            )
+            if dlg.exec() != QDialog.Accepted:
+                self._service.discard_pending(token)
+                return
+            category_decisions = dlg.decisions()
         try:
             result = self._service.commit_import(
-                token, pending.suggested_status, accepted,
+                token, pending.suggested_status, accepted, category_decisions,
             )
         except Exception as e:
             QMessageBox.critical(
@@ -2916,6 +2939,16 @@ class RegisterWindow(QMainWindow):
             f"(status: {pending.suggested_status})",
             10_000,
         )
+
+    def _on_undo_import(self) -> None:
+        """File ▸ Undo Import… (ADR-118) — pick a past import batch and delete
+        the transactions it created, then refresh the register + sidebar."""
+        dlg = ImportHistoryDialog(self._repo, parent=self)
+        dlg.exec()
+        if dlg.any_undone:
+            self._refresh_categories_view()
+            self._refresh_sidebar_balances()
+            self.statusBar().showMessage("Import undone", 6000)
 
     def _refresh_categories_view(self) -> None:
         """Reload everything that depends on the current category list:
