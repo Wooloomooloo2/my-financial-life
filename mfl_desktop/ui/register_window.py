@@ -13,8 +13,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QEvent, QStandardPaths, QUrl
-from PySide6.QtGui import QAction, QCursor, QKeySequence, QDesktopServices
+from PySide6.QtCore import (
+    Qt, QTimer, QEvent, QObject, QRunnable, QStandardPaths, QThreadPool, QUrl,
+    Signal,
+)
+from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QApplication,
@@ -158,6 +161,55 @@ _COLUMN_WIDTHS = {
     "quantity":        100,
     "price":           100,
 }
+
+
+class _MarketRefreshSignals(QObject):
+    """Carrier for the market-refresh worker's completion signal. Lives on the
+    main thread (created in the runnable's constructor) so the slot runs on the
+    main thread — the only place Qt widgets may be touched."""
+    done = Signal(object)   # payload dict (see _MarketRefreshRunnable.run)
+
+
+class _MarketRefreshRunnable(QRunnable):
+    """Off-thread security-price / FX refresh for the toolbar Update buttons.
+
+    Mirrors the launch-time refresh runnables (``__main__``): a **dedicated**
+    ``Repository`` connection (sqlite3 connections aren't shared across threads;
+    WAL lets this worker write while the main connection reads), each provider
+    wrapped so one failing doesn't sink the other, and the result handed back to
+    the main thread via a queued signal. The toolbar handler force-refreshes, so
+    the 24h launch throttle is bypassed exactly as the dialogs' Refresh-Now do.
+    """
+
+    def __init__(self, db_path, *, do_prices: bool, do_rates: bool) -> None:
+        super().__init__()
+        self._db_path = db_path
+        self._do_prices = do_prices
+        self._do_rates = do_rates
+        self.signals = _MarketRefreshSignals()
+
+    def run(self) -> None:
+        payload: dict = {"prices": None, "rates": None, "error": None}
+        try:
+            bg = Repository(self._db_path)
+            try:
+                if self._do_prices:
+                    try:
+                        r = prices.refresh_latest_prices_into(bg, force=True)
+                        payload["prices"] = (r.new_prices_count, list(r.errors))
+                    except Exception as e:  # noqa: BLE001
+                        payload["prices"] = (None, [f"Could not update prices: {e}"])
+                if self._do_rates:
+                    try:
+                        r = fx.refresh_latest_into(bg, force=True)
+                        payload["rates"] = (r.new_rates_count, list(r.errors))
+                    except Exception as e:  # noqa: BLE001
+                        payload["rates"] = (None, [f"Could not update rates: {e}"])
+            finally:
+                bg.close()
+        except Exception as e:  # noqa: BLE001 — couldn't even open the DB
+            payload["error"] = str(e)
+        self.signals.done.emit(payload)
 
 
 class RegisterWindow(QMainWindow):
@@ -380,8 +432,8 @@ class RegisterWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         self.setStatusBar(QStatusBar(self))
-        self._build_menus()
         self._build_toolbar()
+        self._build_menus()
 
         # ADR-061: coalesce status-bar refreshes. A single filter invalidation
         # emits rowsRemoved + rowsInserted + layoutChanged, and _update_status
@@ -852,32 +904,14 @@ class RegisterWindow(QMainWindow):
         body = "\n".join(shown) + (f"\n… and {more} more" if more > 0 else "")
         QMessageBox.warning(self, title, f"{preamble}\n\n{body}")
 
-    def _refresh_prices(self) -> tuple[Optional[int], list]:
-        """Force-refresh security prices (Tiingo key assumed set) — the same
-        path Manage ▸ Securities ▸ Refresh Now uses. Returns
-        ``(count_or_None, errors)``; catches its own exception (→ ``None`` +
-        message) so a combined Update All can keep going."""
-        try:
-            result = prices.refresh_latest_prices_into(self._repo, force=True)
-        except Exception as e:  # noqa: BLE001
-            return None, [f"Could not update prices: {e}"]
-        return result.new_prices_count, result.errors
-
-    def _refresh_rates(self) -> tuple[Optional[int], list]:
-        """Force-refresh FX rates (openexchangerates key assumed set) — the same
-        path Manage ▸ Currencies ▸ Refresh Now uses. Returns
-        ``(count_or_None, errors)``; catches its own exception so Update All can
-        keep going."""
-        try:
-            result = fx.refresh_latest_into(self._repo, force=True)
-        except Exception as e:  # noqa: BLE001
-            return None, [f"Could not update rates: {e}"]
-        return result.new_rates_count, result.errors
+    def _set_update_actions_enabled(self, enabled: bool) -> None:
+        for a in (self._update_prices_action, self._update_rates_action,
+                  self._update_all_action):
+            a.setEnabled(enabled)
 
     def _on_update_prices(self) -> None:
-        """Toolbar Update Prices — fetch latest security prices directly, then
-        refresh sidebar balances so changed market values show immediately.
-        Routes to the Securities dialog when no Tiingo key is set yet."""
+        """Toolbar Update Prices — fetch latest security prices in the
+        background. Routes to the Securities dialog when no Tiingo key is set."""
         if not self._has_setting("tiingo_api_key"):
             QMessageBox.information(
                 self, "No Tiingo API key",
@@ -887,24 +921,11 @@ class RegisterWindow(QMainWindow):
             )
             self._on_manage_securities()
             return
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        try:
-            n, errors = self._refresh_prices()
-        finally:
-            QApplication.restoreOverrideCursor()
-        self._refresh_sidebar_balances()
-        self.statusBar().showMessage(
-            f"Updated {self._count_phrase(n, 'price')}", 6000,
-        )
-        if errors:
-            self._warn_refresh_errors(
-                "Some prices failed", self._PRICE_ERR_PREAMBLE, errors,
-            )
+        self._start_market_refresh(do_prices=True, do_rates=False, skipped=[])
 
     def _on_update_rates(self) -> None:
-        """Toolbar Update Rates — fetch latest FX rates directly, then refresh
-        sidebar balances so converted figures update. Routes to the Currencies
-        dialog when no openexchangerates key is set yet."""
+        """Toolbar Update Rates — fetch latest FX rates in the background.
+        Routes to the Currencies dialog when no openexchangerates key is set."""
         if not self._has_setting("oxr_api_key"):
             QMessageBox.information(
                 self, "No exchange-rate API key",
@@ -913,28 +934,15 @@ class RegisterWindow(QMainWindow):
             )
             self._on_manage_currencies()
             return
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        try:
-            n, errors = self._refresh_rates()
-        finally:
-            QApplication.restoreOverrideCursor()
-        self._refresh_sidebar_balances()
-        self.statusBar().showMessage(
-            f"Updated {self._count_phrase(n, 'rate')}", 6000,
-        )
-        if errors:
-            self._warn_refresh_errors(
-                "Some rates failed", self._RATE_ERR_PREAMBLE, errors,
-            )
+        self._start_market_refresh(do_prices=False, do_rates=True, skipped=[])
 
     def _on_update_all(self) -> None:
         """Toolbar Update All — refresh prices and FX rates in one click (the
-        backlog's F2 "Update all"). Each is run only if its API key is set; a
+        backlog's F2 "Update all"). Each runs only if its API key is set; a
         missing key is reported as skipped rather than popping a dialog (unlike
-        the single-action buttons), so one click can't spawn two modal asks. A
-        failure in one doesn't abort the other (each core catches its own).
-        Bank feeds are deliberately excluded — they need interactive consent
-        and live in their own Manage ▸ Bank Feeds dialog."""
+        the single-action buttons), so one click can't spawn two modal asks.
+        Bank feeds are deliberately excluded — they need interactive consent and
+        live in their own Manage ▸ Bank Feeds dialog."""
         has_tiingo = self._has_setting("tiingo_api_key")
         has_oxr = self._has_setting("oxr_api_key")
         if not (has_tiingo or has_oxr):
@@ -945,35 +953,86 @@ class RegisterWindow(QMainWindow):
                 "exchange rates, then Update All refreshes them in one click.",
             )
             return
-        parts: list[str] = []
         skipped: list[str] = []
+        if not has_tiingo:
+            skipped.append("prices (no Tiingo key)")
+        if not has_oxr:
+            skipped.append("rates (no exchange-rate key)")
+        self._start_market_refresh(
+            do_prices=has_tiingo, do_rates=has_oxr, skipped=skipped,
+        )
+
+    def _start_market_refresh(
+        self, *, do_prices: bool, do_rates: bool, skipped: list[str],
+    ) -> None:
+        """Kick off the off-thread price/FX refresh so the UI never freezes.
+        Disables the Update actions while it runs (one refresh at a time) and
+        shows a 'Updating…' status; results land in ``_on_market_refresh_done``
+        on the main thread."""
+        if getattr(self, "_market_refresh_running", False):
+            return
+        self._market_refresh_running = True
+        self._pending_skipped = skipped
+        self._set_update_actions_enabled(False)
+        bits = [b for b, on in (("prices", do_prices), ("rates", do_rates)) if on]
+        self.statusBar().showMessage("Updating " + " and ".join(bits) + "…")
+        runnable = _MarketRefreshRunnable(
+            self._repo.db_path, do_prices=do_prices, do_rates=do_rates,
+        )
+        # Connect to a bound method of self (a main-thread QObject), NOT a bare
+        # lambda — an unbound functor has no thread affinity, so the slot could
+        # run on the worker thread and touch widgets. ``skipped`` rides on the
+        # instance (only one refresh runs at a time, guarded above).
+        runnable.signals.done.connect(self._on_market_refresh_done)
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_market_refresh_done(self, payload: dict) -> None:
+        """Main-thread completion handler for the market refresh (ADR-116)."""
+        skipped = getattr(self, "_pending_skipped", [])
+        self._market_refresh_running = False
+        self._set_update_actions_enabled(True)
+        if payload.get("error"):
+            self.statusBar().showMessage("Update failed", 6000)
+            QMessageBox.warning(
+                self, "Update failed",
+                f"Could not update market data:\n\n{payload['error']}",
+            )
+            return
+        parts: list[str] = []
         errors: list = []
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        try:
-            if has_tiingo:
-                n, errs = self._refresh_prices()
-                parts.append(self._count_phrase(n, "price"))
-                errors += errs
-            else:
-                skipped.append("prices (no Tiingo key)")
-            if has_oxr:
-                n, errs = self._refresh_rates()
-                parts.append(self._count_phrase(n, "rate"))
-                errors += errs
-            else:
-                skipped.append("rates (no exchange-rate key)")
-        finally:
-            QApplication.restoreOverrideCursor()
-        self._refresh_sidebar_balances()
-        msg = "Updated " + ", ".join(parts)
+        if payload.get("prices") is not None:
+            n, errs = payload["prices"]
+            parts.append(self._count_phrase(n, "price"))
+            errors += errs
+        if payload.get("rates") is not None:
+            n, errs = payload["rates"]
+            parts.append(self._count_phrase(n, "rate"))
+            errors += errs
+        # Reflect new prices/rates WITHOUT moving the user off their page.
+        self._refresh_after_market_update()
+        msg = ("Updated " + ", ".join(parts)) if parts else "Nothing updated"
         if skipped:
             msg += " · skipped " + ", ".join(skipped)
         self.statusBar().showMessage(msg, 8000)
         if errors:
             self._warn_refresh_errors(
                 "Update finished with errors",
-                "Update All finished with errors:", errors,
+                "Update finished with errors:", errors,
             )
+
+    def _refresh_after_market_update(self) -> None:
+        """Reflect new prices/rates in the sidebar and the visible page WITHOUT
+        changing the current view. ``_refresh_sidebar_balances`` re-selects an
+        account — which yanks a Home / All-transactions user onto the first
+        account — so reload preserving selection instead. The sidebar's reload
+        has no 'home' restore case (it falls back to All transactions), so when
+        Home is showing we re-assert it after the reload."""
+        on_home = self._main_stack.currentIndex() == 0
+        self._refresh_sidebar_keep_selection()
+        if on_home:
+            self._sidebar.select_home()
+            self._home_view.refresh()
+            self._main_stack.setCurrentIndex(0)
 
     # ── menus ──
 
@@ -1215,6 +1274,12 @@ class RegisterWindow(QMainWindow):
         self._dark_mode_action.setChecked(tokens.current_theme() == "dark")
         self._dark_mode_action.toggled.connect(self._on_toggle_dark_mode)
         view_menu.addAction(self._dark_mode_action)
+
+        # Restore path for the quick-action toolbar — Qt's built-in toolbar
+        # context menu can hide it, and toggleViewAction is the only way back.
+        toolbar_toggle = self._toolbar.toggleViewAction()
+        toolbar_toggle.setText("&Quick Actions Toolbar")
+        view_menu.addAction(toolbar_toggle)
 
         # ── Help ▸ Getting Started / About / licensing (ADR-079, ADR-098) ──
         help_menu = self.menuBar().addMenu("&Help")
