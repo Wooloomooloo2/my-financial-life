@@ -47,11 +47,18 @@ follows automatically. `commit_import` takes a `category_decisions` dict and
 applies it ahead of the create-or-match-only logic. No new categories ⇒ no
 dialog (silent commit, unchanged for clean imports).
 
-**3. Undo an import.** New `Repository.delete_import_batch` deletes exactly the
-transactions a batch created (splits/reconcile rows cascade), then the batch row
-(txns first — `import_batch_id` is `ON DELETE SET NULL`). `list_import_batches`
-+ the new **File ▸ Undo Import…** dialog let the user pick a past import to
-reverse, so a bad run can be undone and re-imported through the fixed code.
+**3. Undo an import — with empty-category cleanup.** New
+`Repository.delete_import_batch` deletes exactly the transactions a batch created
+(splits/reconcile rows cascade), then the batch row (txns first —
+`import_batch_id` is `ON DELETE SET NULL`). It returns the categories *that batch
+populated* which are now empty + import-sourced; the **File ▸ Undo Import…**
+dialog offers to delete them via `delete_empty_import_categories` — a **direct**
+delete that records **no** Needs-Review mapping (unlike the ADR-112
+`delete_category`), so a re-import re-offers them in the review dialog instead of
+silently re-using leftovers. The empty check is conservative (no txns, split
+lines, children, schedules, or budget lines reference it). Categories an
+*earlier*, already-undone import left orphaned aren't attributable to this batch
+and so aren't offered — those are a manual delete.
 
 ## Consequences
 

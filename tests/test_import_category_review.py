@@ -148,8 +148,8 @@ def test_undo_import_batch_removes_only_its_rows():
     t2 = _stage(svc, [_row("2026-02-02", "20.00", "B", "Groceries")])
     r2 = svc.commit_import(t2, "Cleared", set())
     assert repo.connection.execute("SELECT COUNT(*) c FROM txn").fetchone()["c"] == 2
-    removed = repo.delete_import_batch(r2.batch_id)
-    assert removed == 1
+    result = repo.delete_import_batch(r2.batch_id)
+    assert result["deleted_txns"] == 1
     assert repo.connection.execute("SELECT COUNT(*) c FROM txn").fetchone()["c"] == 1
     assert repo.connection.execute(
         "SELECT COUNT(*) c FROM import_batch WHERE id=?", (r2.batch_id,)
@@ -158,6 +158,50 @@ def test_undo_import_batch_removes_only_its_rows():
     assert repo.connection.execute(
         "SELECT COUNT(*) c FROM txn WHERE import_batch_id=?", (r1.batch_id,)
     ).fetchone()["c"] == 1
+
+
+def test_undo_reports_and_deletes_now_empty_import_categories():
+    repo = _fresh_repo()
+    svc = ImportService(repo)
+    # Import creates a brand-new category "Mystery" (the user clicks Create).
+    token = _stage(svc, [_row("2026-01-02", "10.00", "A", "Mystery")])
+    r = svc.commit_import(
+        token, "Cleared", set(),
+        {k.normalized: ("create", None) for k in svc.plan_new_categories(token)},
+    )
+    mystery = repo.find_category_path(["Mystery"])
+    assert mystery is not None and \
+        repo.connection.execute(
+            "SELECT source FROM category WHERE id=?", (mystery,)
+        ).fetchone()["source"] == "import"
+
+    result = repo.delete_import_batch(r.batch_id)
+    empty_ids = [cid for cid, _path in result["empty_categories"]]
+    assert mystery in empty_ids, result["empty_categories"]
+
+    removed = repo.delete_empty_import_categories(empty_ids)
+    assert removed == 1
+    assert repo.find_category_path(["Mystery"]) is None
+    # And no Needs-Review mapping was recorded (so a re-import re-offers it).
+    assert repo.get_category_import_mapping(["Mystery"]) is None
+
+
+def test_undo_keeps_category_still_used_by_another_batch():
+    repo = _fresh_repo()
+    svc = ImportService(repo)
+    t1 = _stage(svc, [_row("2026-01-02", "10.00", "A", "Shared")])
+    svc.commit_import(
+        t1, "Cleared", set(),
+        {k.normalized: ("create", None) for k in svc.plan_new_categories(t1)},
+    )
+    shared = repo.find_category_path(["Shared"])
+    # A second import lands more rows on the same (now-existing) category.
+    t2 = _stage(svc, [_row("2026-02-02", "20.00", "B", "Shared")])
+    r2 = svc.commit_import(t2, "Cleared", set())
+    # Undoing the second batch must NOT offer to delete the still-used category.
+    result = repo.delete_import_batch(r2.batch_id)
+    assert shared not in [cid for cid, _ in result["empty_categories"]]
+    assert repo.find_category_path(["Shared"]) == shared
 
 
 # ── bare-script runner ──────────────────────────────────────────────────────

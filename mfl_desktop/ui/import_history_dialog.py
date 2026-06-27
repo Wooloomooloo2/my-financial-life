@@ -116,13 +116,52 @@ class ImportHistoryDialog(QDialog):
         if confirm != QMessageBox.Yes:
             return
         try:
-            n = self._repo.delete_import_batch(batch_id)
+            result = self._repo.delete_import_batch(batch_id)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(
                 self, "Undo failed", f"Could not undo the import:\n\n{e}",
             )
             return
         self.any_undone = True
+        n = result["deleted_txns"]
+        empties = result.get("empty_categories") or []
+
+        # ADR-118: offer to delete the categories this import created that are
+        # now empty — so a clean re-import re-offers them in the review dialog
+        # instead of silently re-using the leftovers.
+        if empties:
+            names = "\n".join(f"  • {path}" for _cid, path in empties)
+            choice = QMessageBox.question(
+                self, "Delete empty categories?",
+                f"Removed {n:,} transaction(s).\n\n"
+                f"{len(empties)} categor"
+                f"{'y' if len(empties) == 1 else 'ies'} this import created "
+                f"{'is' if len(empties) == 1 else 'are'} now empty:\n\n{names}\n\n"
+                "Delete them too? (A re-import will re-offer them so you can map "
+                "or create them.)",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if choice == QMessageBox.Yes:
+                try:
+                    removed = self._repo.delete_empty_import_categories(
+                        [cid for cid, _ in empties]
+                    )
+                except Exception as e:  # noqa: BLE001
+                    QMessageBox.warning(
+                        self, "Category cleanup failed",
+                        f"Transactions were removed, but the empty categories "
+                        f"could not be deleted:\n\n{e}",
+                    )
+                else:
+                    QMessageBox.information(
+                        self, "Import undone",
+                        f"Removed {n:,} transaction(s) and {removed} empty "
+                        "categor"
+                        f"{'y' if removed == 1 else 'ies'}. You can now "
+                        "re-import the file.",
+                    )
+                    self._reload()
+                    return
         QMessageBox.information(
             self, "Import undone",
             f"Removed {n:,} transaction(s). You can now re-import the file.",

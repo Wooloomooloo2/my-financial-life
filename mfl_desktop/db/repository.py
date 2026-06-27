@@ -4411,20 +4411,40 @@ class Repository:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def delete_import_batch(self, batch_id: int) -> int:
-        """Undo an import (ADR-118): delete every transaction that batch created
-        and then the batch row. Returns the number of transactions removed.
+    def delete_import_batch(self, batch_id: int) -> dict:
+        """Undo an import (ADR-118): delete every transaction that batch created,
+        then the batch row. Returns ``{"deleted_txns": int, "empty_categories":
+        [(id, display_path), …]}`` — the second list is the categories this
+        import populated that are now **empty and import-sourced**, offered to the
+        caller for optional cleanup (a re-import re-creates/maps them via the
+        review dialog only if they're gone).
 
         ``txn_split`` lines and reconciliation rows cascade off the ``txn``
-        delete (ON DELETE CASCADE). The transactions are deleted **before** the
-        batch row because ``txn.import_batch_id`` is ``ON DELETE SET NULL`` —
-        dropping the batch first would sever the link and orphan the rows.
+        delete (ON DELETE CASCADE). Transactions are deleted **before** the batch
+        row because ``txn.import_batch_id`` is ``ON DELETE SET NULL`` — dropping
+        the batch first would sever the link and orphan the rows.
 
-        Caveats (surfaced to the user by the caller): rows the import merged into
-        a pre-existing manual placeholder (ADR-010) are not created by the batch
-        and so are not removed; imported cash rows are never transfers, so there
-        are no partner rows to consider."""
+        Caveats: rows the import merged into a pre-existing manual placeholder
+        (ADR-010) are not batch-created and so are not removed; imported cash
+        rows are never transfers, so there are no partner rows."""
         try:
+            # Capture the categories this batch touched (direct + split lines)
+            # *before* deleting, so we can spot the ones it leaves empty.
+            touched: set[int] = set()
+            for r in self._conn.execute(
+                "SELECT DISTINCT category_id FROM txn "
+                "WHERE import_batch_id = ? AND category_id IS NOT NULL",
+                (batch_id,),
+            ):
+                touched.add(r["category_id"])
+            for r in self._conn.execute(
+                "SELECT DISTINCT s.category_id FROM txn_split s "
+                "JOIN txn t ON t.id = s.txn_id "
+                "WHERE t.import_batch_id = ? AND s.category_id IS NOT NULL",
+                (batch_id,),
+            ):
+                touched.add(r["category_id"])
+
             n = self._conn.execute(
                 "SELECT COUNT(*) AS c FROM txn WHERE import_batch_id = ?",
                 (batch_id,),
@@ -4435,8 +4455,58 @@ class Repository:
             self._conn.execute(
                 "DELETE FROM import_batch WHERE id = ?", (batch_id,),
             )
+            empties = [
+                (cid, self.category_display_path(cid))
+                for cid in touched
+                if self._is_empty_import_category(cid)
+            ]
+            empties.sort(key=lambda t: t[1])
             self.commit()
-            return int(n)
+            return {"deleted_txns": int(n), "empty_categories": empties}
+        except Exception:
+            self.rollback()
+            raise
+
+    def _is_empty_import_category(self, cid: int) -> bool:
+        """True when category ``cid`` is import-created and now carries nothing —
+        no direct txns, no split lines, no child categories, and isn't wired into
+        a schedule or budget. The conservative test behind Undo-Import's category
+        cleanup (ADR-118); deleting such a row can't orphan anything."""
+        row = self._conn.execute(
+            "SELECT source FROM category WHERE id = ?", (cid,),
+        ).fetchone()
+        if row is None or row["source"] != "import":
+            return False
+        checks = (
+            ("txn", "category_id"),
+            ("txn_split", "category_id"),
+            ("category", "parent_id"),
+            ("scheduled_txn", "category_id"),
+            ("budget_line", "category_id"),
+        )
+        for table, col in checks:
+            hit = self._conn.execute(
+                f"SELECT 1 FROM {table} WHERE {col} = ? LIMIT 1", (cid,),
+            ).fetchone()
+            if hit is not None:
+                return False
+        return True
+
+    def delete_empty_import_categories(self, ids: list[int]) -> int:
+        """Delete empty import-created categories outright — **no** Needs-Review
+        mapping recorded (unlike :meth:`delete_category`), so a later re-import
+        re-offers them in the review dialog (ADR-118). Each id is re-checked for
+        emptiness defensively; anything no longer empty is skipped."""
+        deleted = 0
+        try:
+            for cid in ids:
+                if self._is_empty_import_category(cid):
+                    self._conn.execute(
+                        "DELETE FROM category WHERE id = ?", (cid,),
+                    )
+                    deleted += 1
+            self.commit()
+            return deleted
         except Exception:
             self.rollback()
             raise
