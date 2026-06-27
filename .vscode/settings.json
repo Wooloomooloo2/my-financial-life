@@ -1,0 +1,16 @@
+{
+  "//": "Teal chrome so the MFL window is unmistakable vs MRL (sunset-orange).",
+  "window.titleBarStyle": "custom",
+  "workbench.colorCustomizations": {
+    "titleBar.activeBackground": "#0F766E",
+    "titleBar.inactiveBackground": "#115E59",
+    "titleBar.activeForeground": "#F0FDFA",
+    "titleBar.inactiveForeground": "#99F6E4",
+    "activityBar.background": "#0F766E",
+    "activityBar.foreground": "#F0FDFA",
+    "activityBar.inactiveForeground": "#5EEAD4",
+    "statusBar.background": "#115E59",
+    "statusBar.foreground": "#F0FDFA",
+    "statusBar.noFolderBackground": "#115E59"
+  }
+}
