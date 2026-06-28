@@ -135,6 +135,31 @@ QPushButton:disabled {{
     border-color: {t("border")};
 }}
 
+/* ── Button variants (ADR-119) ────────────────────────────────────────────
+   Opt-in via the dynamic property ``mflVariant`` ("primary" | "ghost"), so any
+   QPushButton joins the hierarchy without a subclass:
+       btn.setProperty("mflVariant", "primary")
+   "primary" is the one filled call-to-action per screen (New Transaction, Save
+   …); "ghost" is a borderless secondary that only fills on hover. */
+QPushButton[mflVariant="primary"] {{
+    background: {t("accent")};
+    color: {t("on_accent")};
+    border: 1px solid {t("accent")};
+    font-weight: 600;
+}}
+QPushButton[mflVariant="primary"]:hover {{ background: {t("accent_hover")}; border-color: {t("accent_hover")}; }}
+QPushButton[mflVariant="primary"]:pressed {{ background: {t("accent_hover")}; }}
+QPushButton[mflVariant="primary"]:disabled {{
+    background: {t("surface_alt")}; color: {t("disabled")}; border-color: {t("border")};
+}}
+QPushButton[mflVariant="ghost"] {{
+    background: transparent;
+    border: 1px solid transparent;
+    color: {t("muted_strong")};
+}}
+QPushButton[mflVariant="ghost"]:hover {{ background: {t("surface_alt")}; color: {t("text")}; }}
+QPushButton[mflVariant="ghost"]:pressed {{ background: {t("border")}; }}
+
 QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox {{
     padding: 4px 8px;
     border: 1px solid {t("border_strong")};
@@ -175,6 +200,19 @@ QListWidget::item:selected, QTreeWidget::item:selected, QTreeView::item:selected
     background: {t("accent_subtle")};
     color: {t("text")};
 }}
+
+/* ── Sidebar as a navigation panel (ADR-119) ──────────────────────────────
+   The left rail is a borderless flush panel (the brand header + footer frame
+   it), with airier rows than a stock tree so it reads as nav, not a grid.
+   Scoped by objectName so other trees/lists keep their bordered card look. */
+QTreeWidget#sidebar {{
+    border: none;
+    border-radius: 0;
+    background: {t("surface")};
+    outline: 0;
+}}
+QTreeWidget#sidebar::item {{ padding: 6px 4px; }}
+QTreeWidget#sidebar::item:selected {{ background: {t("accent_subtle")}; color: {t("text")}; }}
 
 /* Shared dashboard/section card (ADR-075/076) — themed by object name so it
    switches live without per-instance styling. */

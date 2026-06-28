@@ -57,12 +57,16 @@ CLOSED_ROLE = Qt.UserRole + 2
 # Section header + closed-account colours come from the design tokens
 # (ADR-076) so the sidebar follows the light/dark theme. Resolved at build
 # time and re-applied by ``_restyle`` on a theme change.
+# ADR-119: section headers read as MRL-style muted-caps *labels*, not a grey
+# band — so the foreground is the lighter ``muted`` token and the background
+# matches the panel ``surface`` (no fill). The uppercase + letter-spacing is
+# applied to the font in ``_make_section_header``.
 def _header_fg() -> QBrush:
-    return QBrush(QColor(tokens.c("heading")))
+    return QBrush(QColor(tokens.c("muted")))
 
 
 def _header_bg() -> QBrush:
-    return QBrush(QColor(tokens.c("surface_alt")))
+    return QBrush(QColor(tokens.c("surface")))
 
 
 def _closed_fg() -> QBrush:
@@ -104,6 +108,9 @@ class Sidebar(QTreeWidget):
         # bare sum for mixed folders; single-currency folders never convert.
         self._repo = repo
         self._display_currency = self._resolve_display_currency()
+        # ADR-119: objectName binds the flush, airier "navigation panel" QSS in
+        # ui/theme.py (borderless, roomier rows) without affecting other trees.
+        self.setObjectName("sidebar")
         self.setMinimumWidth(240)
         # No max width — the splitter handle is the constraint. The
         # earlier 540px cap left long account names ("Smile Current
@@ -325,6 +332,9 @@ class Sidebar(QTreeWidget):
         font.setBold(True)
         font.setCapitalization(QFont.AllUppercase)
         font.setPointSizeF(font.pointSizeF() * 0.85)
+        # ADR-119: a little tracking makes the muted-caps label read as a
+        # section heading rather than shouted text.
+        font.setLetterSpacing(QFont.PercentageSpacing, 108)
         item.setFont(0, font)
         item.setForeground(0, _header_fg())
         item.setBackground(0, _header_bg())

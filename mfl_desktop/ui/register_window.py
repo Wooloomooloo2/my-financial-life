@@ -329,7 +329,9 @@ class RegisterWindow(QMainWindow):
         # capability for other callers; it's simply no longer driven here.
 
         filter_bar = QHBoxLayout()
-        filter_bar.setContentsMargins(8, 8, 8, 4)
+        # ADR-119: a roomier header strip above the register.
+        filter_bar.setContentsMargins(16, 12, 16, 10)
+        filter_bar.setSpacing(6)
         filter_bar.addWidget(QLabel("Search:"))
         filter_bar.addWidget(search, stretch=2)
         filter_bar.addSpacing(12)
@@ -352,6 +354,8 @@ class RegisterWindow(QMainWindow):
         # A3 (2026-06-14): a visible New Transaction button for mouse/trackpad
         # users — same handler as the Transaction menu item and Ctrl/⌘+N.
         self._new_txn_btn = QPushButton("＋ New Transaction")
+        # ADR-119: the one filled call-to-action on the register.
+        self._new_txn_btn.setProperty("mflVariant", "primary")
         self._new_txn_btn.clicked.connect(self._on_new_transaction)
         filter_bar.addWidget(self._new_txn_btn)
         filter_bar.addSpacing(12)
@@ -388,7 +392,8 @@ class RegisterWindow(QMainWindow):
             | QTableView.EditKeyPressed
         )
         self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(22)
+        # ADR-119: a touch more row height — still a dense register, less cramped.
+        self._table.verticalHeader().setDefaultSectionSize(26)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -435,7 +440,8 @@ class RegisterWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         self.setStatusBar(QStatusBar(self))
-        self._add_company_logo_to_status_bar()
+        # ADR-119: the publisher mark now lives in the sidebar footer (built in
+        # _build_sidebar_panel), not the status bar.
         self._build_toolbar()
         self._build_menus()
 
@@ -834,10 +840,12 @@ class RegisterWindow(QMainWindow):
     # ── brand chrome (ADR-117) ──
 
     def _build_sidebar_panel(self) -> QWidget:
-        """Wrap the sidebar tree under a small MFL brand header (icon +
-        wordmark), so the everyday left rail carries the product mark instead of
-        being all text. The header blends with the tree (same ``surface``
-        background) with a hairline rule below it."""
+        """Wrap the sidebar tree as an MRL-style navigation panel (ADR-119):
+        a brand header (mark + wordmark + subtitle) on top, the flush
+        borderless tree in the middle, and a publisher footer pinned to the
+        foot. The panel carries a right-edge rule so it separates cleanly from
+        the content area."""
+        # ── brand header: mark + wordmark over a subtitle ──
         header = QWidget()
         header.setObjectName("sidebar_brand")
         tokens.themed(
@@ -846,38 +854,64 @@ class RegisterWindow(QMainWindow):
             "border-bottom: 1px solid {border}; }",
         )
         row = QHBoxLayout(header)
-        row.setContentsMargins(12, 10, 12, 10)
-        row.setSpacing(8)
+        row.setContentsMargins(14, 12, 14, 12)
+        row.setSpacing(10)
         logo = QLabel()
-        pm = resources.brand_mark(26)
+        pm = resources.brand_mark(30)
         if not pm.isNull():
             logo.setPixmap(pm)
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(0)
         name = QLabel("My Financial Life")
         tokens.themed(name, "color: {accent}; font-weight: bold; font-size: 15px;")
+        subtitle = QLabel("personal finance")
+        tokens.themed(subtitle, "color: {muted}; font-size: 11px;")
+        text_col.addWidget(name)
+        text_col.addWidget(subtitle)
         row.addWidget(logo, 0, Qt.AlignVCenter)
-        row.addWidget(name, 1, Qt.AlignVCenter)
+        row.addLayout(text_col, 1)
 
         panel = QWidget()
+        panel.setObjectName("sidebar_panel")
+        tokens.themed(
+            panel,
+            "QWidget#sidebar_panel { background: {surface}; "
+            "border-right: 1px solid {border}; }",
+        )
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(header)
         layout.addWidget(self._sidebar, 1)
+        layout.addWidget(self._build_sidebar_footer())
         return panel
 
-    def _add_company_logo_to_status_bar(self) -> None:
-        """Pin the Garelochsoft publisher wordmark to the right of the status
-        bar (a permanent widget, so transient messages never overwrite it) —
-        an always-present but unobtrusive brand attribution."""
+    def _build_sidebar_footer(self) -> QWidget:
+        """The MRL-style 'PUBLISHED BY' block pinned to the foot of the left
+        rail (ADR-119) — the Garelochsoft wordmark, moved here from the status
+        bar so the attribution sits with the brand header that opens the rail."""
+        foot = QWidget()
+        foot.setObjectName("sidebar_footer")
+        tokens.themed(
+            foot,
+            "QWidget#sidebar_footer { background: {surface}; "
+            "border-top: 1px solid {border}; }",
+        )
+        col = QVBoxLayout(foot)
+        col.setContentsMargins(14, 8, 14, 10)
+        col.setSpacing(3)
+        caption = QLabel("PUBLISHED BY")
+        tokens.themed(caption, "color: {subtle}; font-size: 9px; font-weight: 600;")
+        col.addWidget(caption)
         pm = resources.company_logo(18)
-        if pm.isNull():
-            return
-        label = QLabel()
-        label.setPixmap(pm)
-        label.setToolTip("My Financial Life — published by Garelochsoft")
-        label.setContentsMargins(0, 0, 8, 0)
-        self._company_logo_label = label
-        self.statusBar().addPermanentWidget(label)
+        if not pm.isNull():
+            logo = QLabel()
+            logo.setPixmap(pm)
+            logo.setToolTip("My Financial Life — published by Garelochsoft")
+            self._company_logo_label = logo
+            col.addWidget(logo)
+        return foot
 
     # ── quick-action toolbar (ADR-116) ──
 
