@@ -641,6 +641,8 @@ class RegisterWindow(QMainWindow):
         currency label). Cheap; called once after the welcome dialog closes."""
         self._home_view.refresh()
         self._refresh_sidebar_balances()
+        # Onboarding can set the account holder's name — update the chip too.
+        self._refresh_person_chip()
 
     def start_first_run_import(self, account_iri: str) -> None:
         """Navigate to ``account_iri`` and open the import picker on it
@@ -1010,30 +1012,49 @@ class RegisterWindow(QMainWindow):
         if chip is not None:
             self._app_header.add_right_widget(chip)
 
-    def _make_person_chip(self) -> Optional[QLabel]:
-        """A small circular initials 'avatar' for the right of the header."""
+    def _person_name(self) -> str:
+        """The account-holder's name from the *current* repo's person row."""
         row = self._repo.connection.execute(
             "SELECT name FROM person ORDER BY id LIMIT 1"
         ).fetchone()
-        name = (row[0] if row else "") or ""
+        return (row[0] if row else "") or ""
+
+    @staticmethod
+    def _person_initials(name: str) -> str:
         parts = [p for p in name.split() if p]
         if not parts:
-            initials = "ME"
-        elif len(parts) == 1:
-            initials = parts[0][:2].upper()
-        else:
-            initials = (parts[0][0] + parts[-1][0]).upper()
-        chip = QLabel(initials)
+            return "ME"
+        if len(parts) == 1:
+            return parts[0][:2].upper()
+        return (parts[0][0] + parts[-1][0]).upper()
+
+    def _make_person_chip(self) -> QLabel:
+        """A small circular initials 'avatar' for the right of the header.
+        Kept on ``self._person_chip`` so ``_refresh_person_chip`` can update it
+        when a different file is opened (File ▸ Open swaps the repo)."""
+        chip = QLabel()
         chip.setObjectName("personChip")
         chip.setFixedSize(28, 28)
         chip.setAlignment(Qt.AlignCenter)
-        chip.setToolTip(name or "Account holder")
         tokens.themed(
             chip,
             "QLabel#personChip { background: {accent}; color: {on_accent}; "
             "border-radius: 14px; font-weight: 600; font-size: 11px; }",
         )
+        self._person_chip = chip
+        self._refresh_person_chip()
         return chip
+
+    def _refresh_person_chip(self) -> None:
+        """Re-read the person from the live repo and update the chip's initials
+        and tooltip — called on launch and on every File ▸ Open repo swap, so the
+        chip never shows the previously-open file's account holder."""
+        chip = getattr(self, "_person_chip", None)
+        if chip is None:
+            return
+        name = self._person_name()
+        chip.setText(self._person_initials(name))
+        chip.setToolTip(name or "Account holder")
 
     def _on_go_home(self) -> None:
         """Toolbar Home — select Home in the sidebar and show the dashboard
@@ -2746,6 +2767,9 @@ class RegisterWindow(QMainWindow):
         # _show_account / _show_all_transactions which rebuild the model.
         self._reload_sidebar(select_iri=None)
         self._update_window_title()
+        # The header person chip is per-file too — repoint it at the new repo's
+        # account holder (ADR-119) so it doesn't keep the old file's initials.
+        self._refresh_person_chip()
         # Retention policy is per-file (ADR-060), so re-arm the capture timer to
         # the newly-adopted file's cadence.
         self._apply_snapshot_interval()
