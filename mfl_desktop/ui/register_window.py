@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStatusBar,
     QTableView,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -66,6 +65,8 @@ from mfl_desktop.ui.import_history_dialog import ImportHistoryDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.home_view import HomeView
+from mfl_desktop.ui.app_header import AppHeader
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
 from mfl_desktop.ui.bank_feeds_dialog import BankFeedsDialog
@@ -431,19 +432,40 @@ class RegisterWindow(QMainWindow):
         self._main_stack.addWidget(self._home_view)    # index 0
         self._main_stack.addWidget(right_panel)        # index 1
 
+        # ADR-119: the content column is a contextual page header (title +
+        # subtitle) above the Home/register stack.
+        self._page_header = PageHeader()
+        content = QWidget()
+        content_v = QVBoxLayout(content)
+        content_v.setContentsMargins(0, 0, 0, 0)
+        content_v.setSpacing(0)
+        content_v.addWidget(self._page_header)
+        content_v.addWidget(self._main_stack, 1)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._build_sidebar_panel())
-        splitter.addWidget(self._main_stack)
+        splitter.addWidget(content)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([360, 1000])
-        self.setCentralWidget(splitter)
+
+        # ADR-119: a flat app header spans the top — the menus-as-buttons plus a
+        # utility cluster — replacing the native QMenuBar and the ADR-116
+        # quick-action QToolBar.
+        self._app_header = AppHeader()
+        central = QWidget()
+        central_v = QVBoxLayout(central)
+        central_v.setContentsMargins(0, 0, 0, 0)
+        central_v.setSpacing(0)
+        central_v.addWidget(self._app_header)
+        central_v.addWidget(splitter, 1)
+        self.setCentralWidget(central)
 
         self.setStatusBar(QStatusBar(self))
         # ADR-119: the publisher mark now lives in the sidebar footer (built in
         # _build_sidebar_panel), not the status bar.
-        self._build_toolbar()
-        self._build_menus()
+        self._build_header_utilities()   # Home + Update + dark-mode + chip
+        self._build_header_menus()       # File … Help dropdowns
 
         # ADR-061: coalesce status-bar refreshes. A single filter invalidation
         # emits rowsRemoved + rowsInserted + layoutChanged, and _update_status
@@ -680,6 +702,24 @@ class RegisterWindow(QMainWindow):
         # ADR-079: a quiet, always-visible trial/expired cue in the title bar.
         lic = getattr(self, "_license_title_suffix", "")
         self.setWindowTitle(f"My Financial Life — {filename} — {suffix}{lic}")
+        self._update_page_header()
+
+    def _update_page_header(self) -> None:
+        """Keep the in-window page header (ADR-119) in step with the active view.
+        Home and the all-transactions register both have ``_account is None``, so
+        the stack index distinguishes them."""
+        if not hasattr(self, "_page_header"):
+            return
+        if self._main_stack.currentIndex() == 0:
+            self._page_header.set_heading("Home", "Your finances at a glance")
+        elif self._account is None:
+            self._page_header.set_heading(
+                "All transactions", "Every account, one register"
+            )
+        else:
+            self._page_header.set_heading(
+                self._account.name, self._account.currency
+            )
 
     def _set_account_action_state(self, account_selected: bool) -> None:
         """Enable Edit/Delete/Summary only when a specific account is being viewed."""
@@ -913,53 +953,87 @@ class RegisterWindow(QMainWindow):
             col.addWidget(logo)
         return foot
 
-    # ── quick-action toolbar (ADR-116) ──
+    # ── app-header utility cluster (ADR-119, folds in the ADR-116 actions) ──
 
-    def _build_toolbar(self) -> None:
-        """A quick-action header for the things that are otherwise buried.
-
-        ``Home`` is only reachable as a sidebar row (ADR-075) and is easy to
-        miss; ``Update Prices`` / ``Update Rates`` live three clicks deep inside
-        Manage ▸ Securities / Currencies. The toolbar surfaces all three at the
-        top of the window, and the two update buttons fetch *directly* (no
-        dialog) — the same synchronous, force-refresh path those dialogs' own
-        Refresh-Now buttons use.
+    def _build_header_utilities(self) -> None:
+        """Populate the app header's clusters (ADR-119): a leading Home button
+        on the left, and a right-hand utility cluster — the ADR-116 Update
+        actions folded into one 'Update ▾' dropdown, a dark-mode toggle, and a
+        person chip. The QActions are unchanged (same handlers, same direct
+        force-refresh path), only their host moved off the old QToolBar.
         """
-        tb = QToolBar("Quick actions", self)
-        tb.setObjectName("quick_actions_toolbar")
-        tb.setMovable(False)
-        tb.setFloatable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self.addToolBar(Qt.TopToolBarArea, tb)
-        self._toolbar = tb
-
+        # Home — leading button (Home is otherwise only a sidebar row, ADR-075).
         self._toolbar_home_action = QAction("Home", self)
         self._toolbar_home_action.setToolTip("Go to the Home dashboard")
         self._toolbar_home_action.triggered.connect(self._on_go_home)
-        tb.addAction(self._toolbar_home_action)
+        self._app_header.add_action_button(self._toolbar_home_action, label="Home")
 
-        tb.addSeparator()
-
+        # Update — Prices / Rates / All in one right-hand dropdown. Each fetches
+        # directly (no dialog), the same synchronous force-refresh path the
+        # Securities / Currencies dialogs' own Refresh-Now buttons use.
         self._update_prices_action = QAction("Update Prices", self)
         self._update_prices_action.setToolTip(
             "Fetch the latest security prices from Tiingo now"
         )
         self._update_prices_action.triggered.connect(self._on_update_prices)
-        tb.addAction(self._update_prices_action)
 
         self._update_rates_action = QAction("Update Rates", self)
         self._update_rates_action.setToolTip(
             "Fetch the latest currency exchange rates from openexchangerates now"
         )
         self._update_rates_action.triggered.connect(self._on_update_rates)
-        tb.addAction(self._update_rates_action)
 
         self._update_all_action = QAction("Update All", self)
         self._update_all_action.setToolTip(
             "Fetch the latest security prices and exchange rates in one go"
         )
         self._update_all_action.triggered.connect(self._on_update_all)
-        tb.addAction(self._update_all_action)
+
+        update_menu = QMenu(self)
+        update_menu.addAction(self._update_prices_action)
+        update_menu.addAction(self._update_rates_action)
+        update_menu.addSeparator()
+        update_menu.addAction(self._update_all_action)
+        self._app_header.add_right_menu_button("Update", update_menu)
+
+        # Dark-mode toggle (ADR-076) — the only live item the old View menu
+        # carried; promoted to a checkable header button.
+        self._dark_mode_action = QAction("◐", self)
+        self._dark_mode_action.setCheckable(True)
+        self._dark_mode_action.setToolTip("Toggle dark mode")
+        self._dark_mode_action.setChecked(tokens.current_theme() == "dark")
+        self._dark_mode_action.toggled.connect(self._on_toggle_dark_mode)
+        self._app_header.add_right_action_button(self._dark_mode_action)
+
+        # Person chip — initials avatar, MRL-style.
+        chip = self._make_person_chip()
+        if chip is not None:
+            self._app_header.add_right_widget(chip)
+
+    def _make_person_chip(self) -> Optional[QLabel]:
+        """A small circular initials 'avatar' for the right of the header."""
+        row = self._repo.connection.execute(
+            "SELECT name FROM person ORDER BY id LIMIT 1"
+        ).fetchone()
+        name = (row[0] if row else "") or ""
+        parts = [p for p in name.split() if p]
+        if not parts:
+            initials = "ME"
+        elif len(parts) == 1:
+            initials = parts[0][:2].upper()
+        else:
+            initials = (parts[0][0] + parts[-1][0]).upper()
+        chip = QLabel(initials)
+        chip.setObjectName("personChip")
+        chip.setFixedSize(28, 28)
+        chip.setAlignment(Qt.AlignCenter)
+        chip.setToolTip(name or "Account holder")
+        tokens.themed(
+            chip,
+            "QLabel#personChip { background: {accent}; color: {on_accent}; "
+            "border-radius: 14px; font-weight: 600; font-size: 11px; }",
+        )
+        return chip
 
     def _on_go_home(self) -> None:
         """Toolbar Home — select Home in the sidebar and show the dashboard
@@ -1122,8 +1196,15 @@ class RegisterWindow(QMainWindow):
 
     # ── menus ──
 
-    def _build_menus(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
+    def _build_header_menus(self) -> None:
+        """Build the menus as flat dropdown buttons on the app header (ADR-119).
+
+        These are the *same* QMenus/QActions as the old native menu bar — only
+        their host changed. The View menu is gone (its Dark Mode item became the
+        header toggle; its toolbar-visibility toggle is obsolete now the toolbar
+        is replaced). After building, every shortcut-bearing action is registered
+        on the window so its accelerator still fires without a menu bar."""
+        file_menu = QMenu(self)
 
         open_action = QAction("&Open…", self)
         open_action.setShortcut(QKeySequence.Open)
@@ -1170,7 +1251,7 @@ class RegisterWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        txn_menu = self.menuBar().addMenu("&Transaction")
+        txn_menu = QMenu(self)
 
         self._new_txn_action = QAction("&New Transaction…", self)
         self._new_txn_action.setShortcut(QKeySequence.New)
@@ -1195,7 +1276,7 @@ class RegisterWindow(QMainWindow):
         self.addAction(self._delete_txn_action)
         self.addAction(self._bulk_edit_action)
 
-        account_menu = self.menuBar().addMenu("&Account")
+        account_menu = QMenu(self)
 
         # Ctrl+Shift+I (not Ctrl+I — that's File ▸ Import). No StandardKey
         # exists for an account-summary action.
@@ -1255,7 +1336,7 @@ class RegisterWindow(QMainWindow):
         self._new_folder_action.triggered.connect(self._on_new_folder)
         account_menu.addAction(self._new_folder_action)
 
-        manage_menu = self.menuBar().addMenu("&Manage")
+        manage_menu = QMenu(self)
 
         self._manage_payees_action = QAction("&Payees…", self)
         self._manage_payees_action.triggered.connect(self._on_manage_payees)
@@ -1305,7 +1386,7 @@ class RegisterWindow(QMainWindow):
         manage_menu.addAction(self._reconcile_transfers_action)
         self.addAction(self._reconcile_transfers_action)
 
-        reports_menu = self.menuBar().addMenu("&Reports")
+        reports_menu = QMenu(self)
 
         self._spending_report_action = QAction("&Spending Over Time…", self)
         self._spending_report_action.triggered.connect(self._on_spending_report)
@@ -1351,7 +1432,7 @@ class RegisterWindow(QMainWindow):
         self._net_worth_action.triggered.connect(self._on_net_worth)
         reports_menu.addAction(self._net_worth_action)
 
-        budget_menu = self.menuBar().addMenu("&Budget")
+        budget_menu = QMenu(self)
 
         self._budget_action = QAction("&Open Budget…", self)
         self._budget_action.setShortcut(QKeySequence("Ctrl+B"))
@@ -1360,22 +1441,11 @@ class RegisterWindow(QMainWindow):
         # Expose on the window so the shortcut fires while the table has focus.
         self.addAction(self._budget_action)
 
-        # ── View ▸ Appearance (ADR-076) ──
-        view_menu = self.menuBar().addMenu("&View")
-        self._dark_mode_action = QAction("&Dark Mode", self)
-        self._dark_mode_action.setCheckable(True)
-        self._dark_mode_action.setChecked(tokens.current_theme() == "dark")
-        self._dark_mode_action.toggled.connect(self._on_toggle_dark_mode)
-        view_menu.addAction(self._dark_mode_action)
-
-        # Restore path for the quick-action toolbar — Qt's built-in toolbar
-        # context menu can hide it, and toggleViewAction is the only way back.
-        toolbar_toggle = self._toolbar.toggleViewAction()
-        toolbar_toggle.setText("&Quick Actions Toolbar")
-        view_menu.addAction(toolbar_toggle)
+        # (View menu removed — ADR-119. Dark Mode is now the header toggle built
+        # in _build_header_utilities; the toolbar-visibility toggle is obsolete.)
 
         # ── Help ▸ Getting Started / About / licensing (ADR-079, ADR-098) ──
-        help_menu = self.menuBar().addMenu("&Help")
+        help_menu = QMenu(self)
         getting_started_action = QAction("&Getting Started…", self)
         getting_started_action.triggered.connect(
             lambda: QDesktopServices.openUrl(QUrl(version.DOCS_URL))
@@ -1402,6 +1472,32 @@ class RegisterWindow(QMainWindow):
             lambda: QDesktopServices.openUrl(QUrl(license_service.BUY_URL))
         )
         help_menu.addAction(buy_action)
+
+        # ── host the menus as flat dropdown buttons on the app header ──
+        for label, menu in (
+            ("File", file_menu),
+            ("Transaction", txn_menu),
+            ("Account", account_menu),
+            ("Manage", manage_menu),
+            ("Reports", reports_menu),
+            ("Budget", budget_menu),
+            ("Help", help_menu),
+        ):
+            self._app_header.add_menu_button(label, menu)
+
+        # Without a native menu bar, a QAction's accelerator only fires if the
+        # action is registered on a live window widget. Several already are
+        # (added inline above for table-focus reach); add any remaining
+        # shortcut-bearing action exactly once so every accelerator still works.
+        already = set(self.actions())
+        for menu in (
+            file_menu, txn_menu, account_menu, manage_menu,
+            reports_menu, budget_menu, help_menu,
+        ):
+            for act in menu.actions():
+                if not act.shortcut().isEmpty() and act not in already:
+                    self.addAction(act)
+                    already.add(act)
 
     def _on_about(self) -> None:
         """Help ▸ About — version + license state (ADR-079)."""

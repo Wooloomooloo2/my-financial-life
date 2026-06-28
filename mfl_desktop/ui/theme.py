@@ -160,6 +160,26 @@ QPushButton[mflVariant="ghost"] {{
 QPushButton[mflVariant="ghost"]:hover {{ background: {t("surface_alt")}; color: {t("text")}; }}
 QPushButton[mflVariant="ghost"]:pressed {{ background: {t("border")}; }}
 
+/* ── App-header buttons (ADR-119) ──────────────────────────────────────────
+   The flat menu/utility buttons that replace the OS menu bar + toolbar. They
+   read as text until hovered, then fill softly — so the top strip is quiet. */
+QToolButton[mflHeaderButton="true"] {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 5px 10px;
+    color: {t("heading")};
+    font-weight: 500;
+}}
+QToolButton[mflHeaderButton="true"]:hover {{ background: {t("surface_alt")}; color: {t("text")}; }}
+QToolButton[mflHeaderButton="true"]:pressed {{ background: {t("border")}; }}
+QToolButton[mflHeaderButton="true"]:checked {{
+    background: {t("accent_subtle")}; color: {t("text")};
+}}
+/* The native menu indicator draws in an awkward spot on a flat button; we
+   append our own chevron to the label instead. */
+QToolButton[mflHeaderButton="true"]::menu-indicator {{ image: none; width: 0; }}
+
 QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox {{
     padding: 4px 8px;
     border: 1px solid {t("border_strong")};
