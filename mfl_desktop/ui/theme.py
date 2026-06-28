@@ -242,6 +242,15 @@ QFrame#homeCard {{
     border-radius: 10px;
 }}
 
+/* The Home hero card (ADR-119) — net worth — gets a brand-accent left edge and
+   sits full-width above the two-column card grid, MRL-style. */
+QFrame#homeHeroCard {{
+    background: {t("surface")};
+    border: 1px solid {t("border")};
+    border-left: 4px solid {t("accent")};
+    border-radius: 10px;
+}}
+
 QSplitter::handle {{ background: {t("border")}; }}
 QSplitter::handle:horizontal {{ width: 1px; }}
 QSplitter::handle:vertical   {{ height: 1px; }}

@@ -49,20 +49,30 @@ class _Card(QFrame):
     background/border come from the global `QFrame#homeCard` QSS (ADR-076)."""
     clicked = Signal()
 
-    def __init__(self, title: str, parent=None) -> None:
+    def __init__(self, title: str, parent=None, action: str = "") -> None:
         super().__init__(parent)
         self.setObjectName("homeCard")
         self._clickable = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
+        # Header row: muted-caps title on the left, an optional accent "action →"
+        # link on the right (ADR-119) — the MRL affordance for a clickable card.
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
         header = QLabel(title)
         tokens.themed(
             header,
             "font-size: 11px; font-weight: 600; color: {muted}; "
             "letter-spacing: 0.04em;",
         )
-        lay.addWidget(header)
+        header_row.addWidget(header, 1)
+        if action:
+            link = QLabel(action)
+            tokens.themed(link, "font-size: 11px; font-weight: 600; color: {accent};")
+            header_row.addWidget(link, 0)
+        lay.addLayout(header_row)
         self._body = QVBoxLayout()
         self._body.setSpacing(4)
         lay.addLayout(self._body)
@@ -182,9 +192,12 @@ class HomeView(QWidget):
             return
         container = QWidget()
         tokens.themed(container, "background: {canvas};")
-        outer = QHBoxLayout(container)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(16)
+        root = QVBoxLayout(container)
+        root.setContentsMargins(16, 4, 16, 16)
+        root.setSpacing(16)
+
+        # ADR-119: the net-worth hero spans the full width above the grid.
+        root.addWidget(self._hero_card(data))
 
         # Two independently-packed columns (greedy-balanced by an approximate
         # per-card height weight) so a tall card never leaves the other column
@@ -211,15 +224,20 @@ class HomeView(QWidget):
         left_wrap.setLayout(left)
         right_wrap = QWidget()
         right_wrap.setLayout(right)
-        outer.addWidget(left_wrap, 1)
-        outer.addWidget(right_wrap, 1)
+        grid = QHBoxLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(16)
+        grid.addWidget(left_wrap, 1)
+        grid.addWidget(right_wrap, 1)
+        grid_wrap = QWidget()
+        grid_wrap.setLayout(grid)
+        root.addWidget(grid_wrap)
 
         self._scroll.setWidget(container)
         self._container = container
 
     def _build_cards(self, data) -> list:
         return [
-            self._net_worth_card(data),
             self._budget_card(data),
             self._accounts_card(data),
             self._bills_card(data),
@@ -231,12 +249,21 @@ class HomeView(QWidget):
 
     # ── individual cards ──
 
-    def _net_worth_card(self, data) -> _Card:
-        card = _Card("NET WORTH")
-        card._weight = 3 if data.net_worth_excluded else 2
+    def _hero_card(self, data) -> _Card:
+        """The full-width net-worth hero (ADR-119) — big number, accent left
+        edge (via the homeHeroCard object name), with a short summary line."""
+        card = _Card("NET WORTH", action="Net worth →")
+        card.setObjectName("homeHeroCard")
         big = QLabel(_fmt(data.net_worth, data.display_ccy, decimals=0))
-        tokens.themed(big, "font-size: 30px; font-weight: 700; color: {text};")
+        tokens.themed(big, "font-size: 40px; font-weight: 700; color: {text};")
         card.body().addWidget(big)
+        n_accts = sum(len(g.accounts) for g in data.account_groups)
+        if n_accts:
+            sub = QLabel(
+                f"across {n_accts} account{'s' if n_accts != 1 else ''}"
+            )
+            tokens.themed(sub, "color: {muted}; font-size: 12px;")
+            card.body().addWidget(sub)
         if data.net_worth_excluded:
             note = QLabel(
                 f"{data.net_worth_excluded} account"
@@ -253,7 +280,7 @@ class HomeView(QWidget):
         b = data.budget
         if b is None:
             return None
-        card = _Card(f"BUDGET · {b.month_label.upper()}")
+        card = _Card(f"BUDGET · {b.month_label.upper()}", action="Open budget →")
         card._weight = 4
         line = QLabel(
             f"{_fmt(b.spent, b.currency)} of {_fmt(b.planned, b.currency)} spent"
@@ -316,7 +343,7 @@ class HomeView(QWidget):
         title = "UPCOMING BILLS"
         if data.bills_overdue:
             title += f"  ·  {data.bills_overdue} OVERDUE"
-        card = _Card(title)
+        card = _Card(title, action="Schedules →")
         card._weight = len(data.bills) + 1
         if not data.bills:
             card.body().addWidget(_muted("Nothing scheduled."))
@@ -358,7 +385,7 @@ class HomeView(QWidget):
         return card
 
     def _top_payees_card(self, data) -> _Card:
-        card = _Card("TOP PAYEES · THIS MONTH")
+        card = _Card("TOP PAYEES · THIS MONTH", action="Payees →")
         card._weight = len(data.top_payees) + 1
         if not data.top_payees:
             card.body().addWidget(_muted("No spending yet this month."))
@@ -372,7 +399,7 @@ class HomeView(QWidget):
         return card
 
     def _top_categories_card(self, data) -> _Card:
-        card = _Card("TOP CATEGORIES · THIS MONTH")
+        card = _Card("TOP CATEGORIES · THIS MONTH", action="Spending →")
         card._weight = len(data.top_categories) + 1
         if not data.top_categories:
             card.body().addWidget(_muted("No spending yet this month."))
