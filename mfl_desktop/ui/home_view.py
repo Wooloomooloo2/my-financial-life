@@ -86,9 +86,12 @@ class _Card(QFrame):
         self.setCursor(Qt.PointingHandCursor)
 
     def mousePressEvent(self, e) -> None:  # noqa: N802 (Qt override)
+        # Run base handling first, then emit — the clicked slot can navigate /
+        # refresh Home and destroy this very card, so we must not touch ``self``
+        # (e.g. super().mousePressEvent) afterwards (use-after-free crash).
+        super().mousePressEvent(e)
         if self._clickable:
             self.clicked.emit()
-        super().mousePressEvent(e)
 
 
 class _Row(QFrame):
@@ -117,9 +120,11 @@ class _Row(QFrame):
         lay.addWidget(right_lbl, stretch=0)
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
+        # super() before emit: the clicked slot may delete this row (Home
+        # rebuild on navigation), so never touch self after emitting.
+        super().mousePressEvent(e)
         if self._clickable:
             self.clicked.emit()
-        super().mousePressEvent(e)
 
 
 class _AccordionHeader(QFrame):
@@ -151,8 +156,10 @@ class _AccordionHeader(QFrame):
     def mousePressEvent(self, e) -> None:  # noqa: N802
         self._expanded = not self._expanded
         self._chev.setText("▾" if self._expanded else "▸")
-        self.toggled.emit(self._expanded)
+        # super() before emit so we never call into a freed object if the
+        # toggle slot ever rebuilds this header.
         super().mousePressEvent(e)
+        self.toggled.emit(self._expanded)
 
 
 class HomeView(QWidget):
