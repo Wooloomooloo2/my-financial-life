@@ -44,3 +44,8 @@ A token-first, component-driven uplift delivered in arcs, each verified offscree
 - View/QSS layer only — no schema change, no migration, no repository change.
 - Larger surface area than a normal change, hence the branch + multi-arc sequencing with an offscreen render check and screenshot at each arc boundary.
 - Light/dark parity is held by construction (new tokens carry both values; the global re-style/`notifier.changed` path is unchanged).
+
+## Addenda (follow-ups during the build)
+
+- **Account-holder chip + profile editor.** The header avatar derives its initials from the file's `person.name`. It reads from the *current* repo and is refreshed on every repo swap (`_adopt_repository` — covers File ▸ Open and Data Library loads — and after first-run), so it never shows a previously-open file's holder. There was no way to set the name (first-run only sets the *account* name, and the seed person is "Me"), so clicking the chip now opens a small `ProfileDialog` (live initials preview) that writes `person.name` via the new `Repository.set_person_name`.
+- **Use-after-free fix on Home cards.** The clickable `_Card`/`_Row`/`_AccordionHeader` emitted `clicked` (whose slot can rebuild Home and delete the widget) *before* calling `super().mousePressEvent`, crashing on the freed C++ object once Home became reachable from both the sidebar and the new header Home button. Reordered to run base handling first and emit last.

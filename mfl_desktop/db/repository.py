@@ -6530,6 +6530,26 @@ class Repository:
             self.rollback()
             raise
 
+    def set_person_name(self, name: str) -> None:
+        """Set the account holder's display name (ADR-119).
+
+        Drives the header avatar initials and personalises the app. Trims; an
+        empty name is rejected. Targets the primary (lowest-id) person row — the
+        app is single-person at the MRL boundary."""
+        clean = (name or "").strip()
+        if not clean:
+            raise ValueError("Name cannot be empty.")
+        try:
+            self._conn.execute(
+                "UPDATE person SET name = ? "
+                "WHERE id = (SELECT MIN(id) FROM person)",
+                (clean,),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
     # ── Foreign-exchange rates (ADR-035) ───────────────────────────────────
 
     def upsert_fx_rate(

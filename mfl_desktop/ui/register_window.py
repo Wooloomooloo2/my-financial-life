@@ -67,6 +67,7 @@ from mfl_desktop.ui.data_library_dialog import DataLibraryDialog
 from mfl_desktop.ui.home_view import HomeView
 from mfl_desktop.ui.app_header import AppHeader
 from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.profile_dialog import ProfileDialog, initials_for
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
 from mfl_desktop.ui.bank_feeds_dialog import BankFeedsDialog
@@ -1019,27 +1020,24 @@ class RegisterWindow(QMainWindow):
         ).fetchone()
         return (row[0] if row else "") or ""
 
-    @staticmethod
-    def _person_initials(name: str) -> str:
-        parts = [p for p in name.split() if p]
-        if not parts:
-            return "ME"
-        if len(parts) == 1:
-            return parts[0][:2].upper()
-        return (parts[0][0] + parts[-1][0]).upper()
+    def _make_person_chip(self) -> QPushButton:
+        """The round initials 'avatar' on the right of the header (ADR-119).
 
-    def _make_person_chip(self) -> QLabel:
-        """A small circular initials 'avatar' for the right of the header.
-        Kept on ``self._person_chip`` so ``_refresh_person_chip`` can update it
-        when a different file is opened (File ▸ Open swaps the repo)."""
-        chip = QLabel()
+        A button, not a label — clicking it opens the profile editor so the user
+        (or a customer) can set their name and hence their initials. Kept on
+        ``self._person_chip`` so ``_refresh_person_chip`` can update it when a
+        different file is opened (File ▸ Open swaps the repo)."""
+        chip = QPushButton()
         chip.setObjectName("personChip")
         chip.setFixedSize(28, 28)
-        chip.setAlignment(Qt.AlignCenter)
+        chip.setCursor(Qt.PointingHandCursor)
+        chip.clicked.connect(self._on_edit_profile)
         tokens.themed(
             chip,
-            "QLabel#personChip { background: {accent}; color: {on_accent}; "
-            "border-radius: 14px; font-weight: 600; font-size: 11px; }",
+            "QPushButton#personChip { background: {accent}; color: {on_accent}; "
+            "border: none; border-radius: 14px; padding: 0; font-weight: 600; "
+            "font-size: 11px; } "
+            "QPushButton#personChip:hover { background: {accent_hover}; }",
         )
         self._person_chip = chip
         self._refresh_person_chip()
@@ -1053,8 +1051,29 @@ class RegisterWindow(QMainWindow):
         if chip is None:
             return
         name = self._person_name()
-        chip.setText(self._person_initials(name))
-        chip.setToolTip(name or "Account holder")
+        chip.setText(initials_for(name))
+        who = name or "Account holder"
+        chip.setToolTip(f"{who} — click to edit your profile")
+
+    def _on_edit_profile(self) -> None:
+        """Avatar clicked — edit the account holder's name (ADR-119). Updates the
+        chip initials live across the app on save."""
+        dlg = ProfileDialog(self._person_name(), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name = dlg.name()
+        if not name:
+            return
+        try:
+            self._repo.set_person_name(name)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Could not save",
+                f"Your name could not be saved:\n\n{e}",
+            )
+            return
+        self._refresh_person_chip()
+        self.statusBar().showMessage(f"Profile updated — {name}", 4000)
 
     def _on_go_home(self) -> None:
         """Toolbar Home — select Home in the sidebar and show the dashboard
