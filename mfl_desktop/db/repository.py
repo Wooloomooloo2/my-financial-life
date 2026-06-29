@@ -1279,6 +1279,15 @@ class Repository:
         ).fetchone()
         return opening + pence_to_decimal(sum_row["s"])
 
+    def earliest_posted_date(self) -> Optional[str]:
+        """The earliest ``posted_date`` ('YYYY-MM-DD') across all transactions,
+        or None if the ledger is empty. The floor for an "All" net-worth-over-
+        time range (ADR-121)."""
+        row = self._conn.execute(
+            "SELECT MIN(posted_date) AS d FROM txn WHERE posted_date IS NOT NULL"
+        ).fetchone()
+        return row["d"] if row and row["d"] else None
+
     def compute_account_values(
         self, include_closed: bool = False,
     ) -> dict[int, Decimal]:

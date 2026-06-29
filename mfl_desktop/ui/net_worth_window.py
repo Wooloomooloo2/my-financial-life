@@ -24,7 +24,7 @@ at 1:1) and surfaced in a banner with a one-click path to set the rate.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -54,8 +55,12 @@ from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui.account_dialog import AccountDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.donut_chart import DonutChart, DonutChild, DonutSegment
+from mfl_desktop.ui.net_worth_history_chart import NetWorthHistoryChart
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui import tokens
+from mfl_desktop.net_worth_history import (
+    gather_net_worth_history, month_end_samples,
+)
 
 
 # Family → (display label, color, kind) where kind ∈ {"asset","debt"}.
@@ -139,6 +144,14 @@ class NetWorthWindow(QMainWindow):
         self._family_totals: list[_FamilyTotal] = []
         self._symbol: str = "£"
 
+        # Net-worth-over-time view (ADR-121): a "Now | Over time" toggle swaps
+        # the point-in-time donut/columns for a historical chart. The history is
+        # heavier to compute, so it's built lazily on first view + when the
+        # period / currency / closed-toggle change while it's showing.
+        self._view: str = "now"
+        self._history_period: str = "1y"
+        self._history_dirty: bool = True
+
         # ── page header (ADR-119): title + the display-currency selector and
         # show-closed toggle in the action slot ──
         self._ccy_combo = QComboBox()
@@ -151,8 +164,34 @@ class NetWorthWindow(QMainWindow):
         self._show_closed_chk.toggled.connect(self._on_show_closed_toggled)
         self._populate_ccy_combo()
 
+        # Now | Over time view toggle (ADR-121) — same pill control as the
+        # Assets | Debts donut toggle.
+        self._now_btn = QPushButton("Now")
+        self._overtime_btn = QPushButton("Over time")
+        for b in (self._now_btn, self._overtime_btn):
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            tokens.themed(
+                b,
+                "QPushButton { padding: 4px 14px; border: 1px solid {border_strong}; "
+                "border-radius: 13px; background-color: {surface}; color: {heading}; "
+                "font-size: 12px; }"
+                "QPushButton:checked { background-color: {accent}; color: {surface}; "
+                "border-color: {accent}; font-weight: bold; }"
+                "QPushButton:hover:!checked { background-color: {surface_alt}; }",
+            )
+        self._now_btn.setChecked(True)
+        view_group = QButtonGroup(self)
+        view_group.setExclusive(True)
+        view_group.addButton(self._now_btn)
+        view_group.addButton(self._overtime_btn)
+        self._now_btn.clicked.connect(lambda: self._set_view("now"))
+        self._overtime_btn.clicked.connect(lambda: self._set_view("overtime"))
+
         top_bar = PageHeader(show_rule=True)
         top_bar.set_heading("Net Worth", "Assets, debts, and what you're worth")
+        top_bar.add_leading(self._now_btn)
+        top_bar.add_leading(self._overtime_btn)
         top_bar.add_action(QLabel("Display currency:"))
         top_bar.add_action(self._ccy_combo)
         top_bar.add_action(self._show_closed_chk)
@@ -194,13 +233,27 @@ class NetWorthWindow(QMainWindow):
         splitter.setStretchFactor(2, 1)
         splitter.setSizes([500, 370, 370])
 
+        # Page 0 — the point-in-time view (banner + donut/columns).
+        now_page = QWidget()
+        now_v = QVBoxLayout(now_page)
+        now_v.setContentsMargins(0, 0, 0, 0)
+        now_v.setSpacing(8)
+        now_v.addWidget(self._banner)
+        now_v.addWidget(splitter, stretch=1)
+
+        # Page 1 — net worth over time (ADR-121).
+        history_page = self._build_history_page()
+
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(now_page)        # index 0
+        self._view_stack.addWidget(history_page)    # index 1
+
         central = QWidget()
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(8)
         central_layout.addWidget(top_bar)
-        central_layout.addWidget(self._banner)
-        central_layout.addWidget(splitter, stretch=1)
+        central_layout.addWidget(self._view_stack, stretch=1)
         self.setCentralWidget(central)
         self._refresh()
 
@@ -532,6 +585,107 @@ class NetWorthWindow(QMainWindow):
         # Debts column header total + tree.
         self._debts_total_lbl.setText(self._format(debt_total))
         self._fill_tree(self._debts_tree, type_totals, kind="debt")
+
+        # The underlying data may have changed — the history view (if showing)
+        # rebuilds now; otherwise it's marked stale for the next time it opens.
+        self._history_dirty = True
+        if self._view == "overtime":
+            self._refresh_history()
+
+    # ── net worth over time (ADR-121) ──
+
+    def _build_history_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(20, 8, 20, 16)
+        v.setSpacing(8)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
+        controls.addWidget(QLabel("Period:"))
+        self._history_period_combo = QComboBox()
+        for label, key in [
+            ("Last 12 months", "1y"),
+            ("Last 3 years", "3y"),
+            ("Last 5 years", "5y"),
+            ("All time", "all"),
+        ]:
+            self._history_period_combo.addItem(label, key)
+        self._history_period_combo.currentIndexChanged.connect(
+            self._on_history_period_changed
+        )
+        controls.addWidget(self._history_period_combo)
+        controls.addStretch(1)
+
+        self._history_chart = NetWorthHistoryChart()
+        v.addLayout(controls)
+        v.addWidget(self._history_chart, stretch=1)
+        return page
+
+    def _set_view(self, view: str) -> None:
+        if view == self._view:
+            return
+        self._view = view
+        self._now_btn.setChecked(view == "now")
+        self._overtime_btn.setChecked(view == "overtime")
+        self._view_stack.setCurrentIndex(0 if view == "now" else 1)
+        if view == "overtime" and self._history_dirty:
+            self._refresh_history()
+
+    def _on_history_period_changed(self, _idx: int) -> None:
+        key = self._history_period_combo.currentData()
+        if key:
+            self._history_period = key
+            self._refresh_history()
+
+    def _history_sample_dates(self) -> list:
+        """Sample dates for the chosen period — month-ends from the period start
+        to today. 'all' starts at the earliest transaction (ADR-121)."""
+        today = date.today()
+        if self._history_period == "all":
+            earliest = self._repo.earliest_posted_date()
+            start = date.fromisoformat(earliest) if earliest else today.replace(
+                year=max(1, today.year - 5)
+            )
+        else:
+            years = {"1y": 1, "3y": 3, "5y": 5}.get(self._history_period, 1)
+            start = today - timedelta(days=365 * years)
+        if start > today:
+            start = today
+        return month_end_samples(start, today)
+
+    def _refresh_history(self) -> None:
+        """Recompute + render the net-worth-over-time series for the current
+        display currency / period / closed scope."""
+        family_kinds = {fam: kind for fam, _l, _c, kind in _FAMILY_VIEW}
+        samples = self._history_sample_dates()
+        hist = gather_net_worth_history(
+            self._repo,
+            sample_dates=samples,
+            display_ccy=self._display_ccy,
+            family_kinds=family_kinds,
+            include_closed=self._include_closed,
+        )
+        self._history_dirty = False
+        if len(hist.points) < 2:
+            self._history_chart.show_empty("Not enough history to chart yet.")
+            return
+        asset_families = [
+            (fam, label, color)
+            for fam, label, color, kind in _FAMILY_VIEW if kind == "asset"
+        ]
+        debt_families = [
+            (fam, label, color)
+            for fam, label, color, kind in _FAMILY_VIEW if kind == "debt"
+        ]
+        self._history_chart.render(
+            points=hist.points,
+            asset_families=asset_families,
+            debt_families=debt_families,
+            symbol=_symbol(self._display_ccy) or "£",
+            any_excluded=hist.excluded_any,
+        )
 
     def _render_active_side(self) -> None:
         """Draw the active balance-sheet side (assets or debts) into the one
