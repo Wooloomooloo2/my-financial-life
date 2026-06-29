@@ -48,6 +48,10 @@ jobs:
         if: runner.os == 'macOS'
         run: bash packaging/build_macos.sh
 
+      - name: Install Inno Setup (Windows installer)
+        if: runner.os == 'Windows'
+        run: choco install innosetup --no-progress -y
+
       - name: Build Windows app
         if: runner.os == 'Windows'
         run: pwsh -ExecutionPolicy Bypass -File packaging/build_windows.ps1
@@ -65,5 +69,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mfl-windows
-          path: dist/My Financial Life
+          path: dist/*-setup.exe
           if-no-files-found: error
