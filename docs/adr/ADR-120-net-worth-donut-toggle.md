@@ -19,6 +19,7 @@ Replace the big-assets / small-debts pair with **one big donut** in the centre p
 - Per-refresh the window computes **both** sides' donut segments + totals once and **caches** them (`_side_segments` / `_side_total` / `_family_totals`); toggling calls `_render_active_side()` which redraws from the cache — no recompute, no re-query.
 - The **legend** below the donut now shows only the **active** side's family colour key (the toggle already names the side, so the old ASSETS / DEBTS section headings were dropped).
 - An all-asset file falls back to Assets and **disables** the Debts toggle button (`_side_segments["debt"]` empty).
+- The legend area **reserves a constant height** (= the side with the most families, measured from a probe row), so the stretch-driven donut keeps the same size when the toggle swaps to a side with fewer rows. Without this the donut visibly grew/shrank on toggle (it absorbed the legend's freed space); the smaller side now just leaves whitespace below its rows. (Follow-up after first real use, 2026-06-29.)
 - Drill-down is preserved: the single donut's `account_clicked` → `account_activated` works for whichever side is shown (ADR-083).
 
 ## Consequences

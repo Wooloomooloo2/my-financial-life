@@ -290,6 +290,7 @@ class NetWorthWindow(QMainWindow):
         legend.setSpacing(4)
         legend_holder = QWidget()
         legend_holder.setLayout(legend)
+        self._legend_holder = legend_holder
 
         layout.addWidget(title)
         layout.addWidget(total_lbl)
@@ -504,6 +505,17 @@ class NetWorthWindow(QMainWindow):
         self._side_total = {"asset": asset_total, "debt": debt_total}
         self._family_totals = family_totals
 
+        # Reserve a constant legend height = the side with the most families,
+        # so the donut above (stretch=1) keeps the same size when the toggle
+        # swaps to a side with fewer rows (otherwise the donut grows/shrinks).
+        asset_rows = sum(
+            1 for ft in family_totals if ft.kind == "asset" and ft.total > 0
+        )
+        debt_rows = sum(
+            1 for ft in family_totals if ft.kind == "debt" and ft.total > 0
+        )
+        self._reserve_legend_height(max(asset_rows, debt_rows))
+
         # The Debts side is only offered when there are debts; an all-asset
         # file falls back to Assets and disables the Debts toggle.
         has_debts = bool(self._side_segments["debt"])
@@ -644,6 +656,20 @@ class NetWorthWindow(QMainWindow):
         for ft in self._family_totals:
             if ft.kind == kind and ft.total > 0:
                 self._legend_layout.addWidget(self._legend_row(ft))
+
+    def _reserve_legend_height(self, rows: int) -> None:
+        """Pin the legend area to the pixel height of ``rows`` legend rows, so
+        the stretch-driven donut above keeps a constant size across the
+        Assets | Debts toggle (the smaller side just leaves whitespace below
+        its rows instead of letting the donut grow)."""
+        if rows <= 0 or not self._family_totals:
+            self._legend_holder.setMinimumHeight(0)
+            return
+        probe = self._legend_row(self._family_totals[0])
+        row_h = probe.sizeHint().height()
+        probe.deleteLater()
+        spacing = max(0, self._legend_layout.spacing())
+        self._legend_holder.setMinimumHeight(rows * row_h + (rows - 1) * spacing)
 
     def _legend_row(self, ft: _FamilyTotal) -> QWidget:
         row = QWidget()
