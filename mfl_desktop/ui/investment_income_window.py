@@ -59,6 +59,7 @@ from mfl_desktop.ui.investment_income_chart import IncomeBarChart
 from mfl_desktop.ui.investment_income_filter_dialog import (
     InvestmentIncomeFilterDialog,
 )
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter,
 )
@@ -148,23 +149,14 @@ class InvestmentIncomeWindow(QMainWindow):
         self._last_d_from: Optional[date] = None
         self._last_d_to: Optional[date] = None
 
-        # ── top bar ──
-        self._title_label = QLabel("Investment Income")
-        tokens.themed(self._title_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
+        # ── page header (ADR-119) ──
         self._filter_button = QPushButton("Filter…")
+        self._filter_button.setProperty("mflVariant", "primary")
         self._filter_button.clicked.connect(self._on_open_filter)
 
-        top_bar = QWidget()
-        top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(10, 8, 10, 8)
-        top_layout.setSpacing(8)
-        top_layout.addWidget(self._title_label, stretch=1)
-        top_layout.addWidget(self._filter_button)
-
-        top_rule = QFrame()
-        top_rule.setFrameShape(QFrame.HLine)
-        top_rule.setFrameShadow(QFrame.Sunken)
-        tokens.themed(top_rule, "color: {border};")
+        top_bar = PageHeader(show_rule=True)
+        top_bar.set_heading("Investment Income", "Dividends, interest & distributions")
+        top_bar.add_action(self._filter_button)
 
         # ── body: (chart over table) | summary ──
         self._chart = IncomeBarChart()
@@ -206,7 +198,6 @@ class InvestmentIncomeWindow(QMainWindow):
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         central_layout.addWidget(top_bar)
-        central_layout.addWidget(top_rule)
         central_layout.addWidget(body_splitter, stretch=1)
         self.setCentralWidget(central)
 

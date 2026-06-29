@@ -46,6 +46,7 @@ from mfl_desktop.reports.payee_report import build_report
 from mfl_desktop.ui.chart_helpers import fmt_currency
 from mfl_desktop.ui.payee_chart import PayeeChart
 from mfl_desktop.ui.payee_filter_dialog import PayeeFilterDialog
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter,
@@ -114,35 +115,26 @@ class PayeeReportWindow(QMainWindow):
             else PayeeReportFilters.default()
         )
 
-        # ── top bar ──
-        self._name_label = QLabel()
-        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
-
+        # ── page header (ADR-119) ──
         self._ccy_combo = QComboBox()
         self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
 
         self._filter_button = QPushButton("Filter…")
+        self._filter_button.setProperty("mflVariant", "primary")
         self._filter_button.clicked.connect(self._on_open_filter)
         self._save_button = QPushButton("Save")
+        self._save_button.setProperty("mflVariant", "ghost")
         self._save_button.clicked.connect(self._on_save)
         self._save_as_button = QPushButton("Save As…")
+        self._save_as_button.setProperty("mflVariant", "ghost")
         self._save_as_button.clicked.connect(self._on_save_as)
 
-        top_bar = QWidget()
-        top_bar_layout = QHBoxLayout(top_bar)
-        top_bar_layout.setContentsMargins(10, 8, 10, 8)
-        top_bar_layout.setSpacing(8)
-        top_bar_layout.addWidget(self._name_label, stretch=1)
-        top_bar_layout.addWidget(QLabel("Display in:"))
-        top_bar_layout.addWidget(self._ccy_combo)
-        top_bar_layout.addWidget(self._filter_button)
-        top_bar_layout.addWidget(self._save_button)
-        top_bar_layout.addWidget(self._save_as_button)
-
-        top_rule = QFrame()
-        top_rule.setFrameShape(QFrame.HLine)
-        top_rule.setFrameShadow(QFrame.Sunken)
-        tokens.themed(top_rule, "color: {border};")
+        self._page_header = PageHeader(show_rule=True)
+        self._page_header.add_action(QLabel("Display in:"))
+        self._page_header.add_action(self._ccy_combo)
+        self._page_header.add_action(self._filter_button)
+        self._page_header.add_action(self._save_button)
+        self._page_header.add_action(self._save_as_button)
 
         # ── chart over table (left) ──
         self._chart = PayeeChart()
@@ -181,8 +173,7 @@ class PayeeReportWindow(QMainWindow):
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
-        central_layout.addWidget(top_bar)
-        central_layout.addWidget(top_rule)
+        central_layout.addWidget(self._page_header)
         central_layout.addWidget(body_splitter, stretch=1)
         self.setCentralWidget(central)
 
@@ -629,8 +620,7 @@ class PayeeReportWindow(QMainWindow):
 
     def _update_name_label(self) -> None:
         if self._loaded_name is None:
-            self._name_label.setText("Untitled Payee report")
-            tokens.themed(self._name_label, "color: {muted}; font-style: italic; font-weight: bold; padding: 4px 8px;")
+            self._page_header.set_heading("Untitled", "Payee Spending")
             self.setWindowTitle("Payee — Untitled")
             return
         prefix = ""
@@ -640,8 +630,7 @@ class PayeeReportWindow(QMainWindow):
                     prefix = f"{f.name} / "
                     break
         dirty_mark = "*" if self._dirty else ""
-        self._name_label.setText(f"{prefix}{self._loaded_name}{dirty_mark}")
-        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
+        self._page_header.set_heading(f"{prefix}{self._loaded_name}{dirty_mark}", "Payee Spending")
         self.setWindowTitle(
             f"Payee — {prefix}{self._loaded_name}{dirty_mark}"
         )

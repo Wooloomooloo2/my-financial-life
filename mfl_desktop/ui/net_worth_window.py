@@ -53,6 +53,7 @@ from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui.account_dialog import AccountDialog
 from mfl_desktop.ui.currencies_dialog import CurrenciesDialog
 from mfl_desktop.ui.donut_chart import DonutChart, DonutChild, DonutSegment
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui import tokens
 
 
@@ -123,23 +124,23 @@ class NetWorthWindow(QMainWindow):
         # re-includes their balances in every total + the donuts + columns.
         self._include_closed = False
 
-        # ── top bar: display-currency selector + show-closed toggle ──
-        top_bar = QWidget()
-        top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(20, 12, 20, 0)
-        top_layout.addWidget(QLabel("Display currency:"))
+        # ── page header (ADR-119): title + the display-currency selector and
+        # show-closed toggle in the action slot ──
         self._ccy_combo = QComboBox()
         self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
-        top_layout.addWidget(self._ccy_combo)
-        top_layout.addStretch(1)
         self._show_closed_chk = QCheckBox("Show closed accounts")
         self._show_closed_chk.setToolTip(
             "Include closed (archived) accounts and their balances in the "
             "totals, donuts, and columns (ADR-069)."
         )
         self._show_closed_chk.toggled.connect(self._on_show_closed_toggled)
-        top_layout.addWidget(self._show_closed_chk)
         self._populate_ccy_combo()
+
+        top_bar = PageHeader(show_rule=True)
+        top_bar.set_heading("Net Worth", "Assets, debts, and what you're worth")
+        top_bar.add_action(QLabel("Display currency:"))
+        top_bar.add_action(self._ccy_combo)
+        top_bar.add_action(self._show_closed_chk)
 
         # ── missing-rate banner (hidden unless something can't convert) ──
         self._banner = QFrame()

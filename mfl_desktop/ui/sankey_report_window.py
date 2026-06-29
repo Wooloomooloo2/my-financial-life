@@ -41,6 +41,7 @@ from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency
 from mfl_desktop.ui.custom_period_dialog import CustomPeriodDialog
 from mfl_desktop.ui.sankey_chart import SankeyChart, SankeyNode
 from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter,
@@ -146,25 +147,25 @@ class SankeyReportWindow(QMainWindow):
     # ── build ──
 
     def _build_top_bar(self) -> QWidget:
-        bar = QWidget()
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(12, 8, 12, 8)
-        self._name_label = QLabel()
-        tokens.themed(self._name_label, "color: {heading}; font-weight: bold;")
-        row.addWidget(self._name_label)
-        row.addStretch(1)
-        row.addWidget(QLabel("Display in:"))
+        # MRL-style page header (ADR-119): title/subtitle on the left, the
+        # display-currency selector + save verbs in the action slot. No rule —
+        # the controls row immediately below draws its own.
         self._ccy_combo = QComboBox()
         self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
-        row.addWidget(self._ccy_combo)
         self._populate_ccy_combo()
         self._save_button = QPushButton("Save")
+        self._save_button.setProperty("mflVariant", "ghost")
         self._save_button.clicked.connect(self._on_save)
         self._save_as_button = QPushButton("Save As…")
+        self._save_as_button.setProperty("mflVariant", "ghost")
         self._save_as_button.clicked.connect(self._on_save_as)
-        row.addWidget(self._save_button)
-        row.addWidget(self._save_as_button)
-        return bar
+
+        self._page_header = PageHeader()
+        self._page_header.add_action(QLabel("Display in:"))
+        self._page_header.add_action(self._ccy_combo)
+        self._page_header.add_action(self._save_button)
+        self._page_header.add_action(self._save_as_button)
+        return self._page_header
 
     def _build_controls(self) -> QWidget:
         bar = QWidget()
@@ -210,6 +211,7 @@ class SankeyReportWindow(QMainWindow):
         row.addWidget(self._value_combo)
 
         self._filter_button = QPushButton("Filter…")
+        self._filter_button.setProperty("mflVariant", "primary")
         self._filter_button.clicked.connect(self._on_filter)
         row.addWidget(self._filter_button)
         self._filter_note = QLabel("")
@@ -628,8 +630,20 @@ class SankeyReportWindow(QMainWindow):
         self.reports_changed.emit()
 
     def _update_name_label(self) -> None:
-        name = self._loaded_name or "Sankey (unsaved)"
-        self._name_label.setText(name + ("  •" if self._dirty else ""))
+        prefix = ""
+        if self._loaded_folder_id is not None:
+            for f in self._repo.list_report_folders():
+                if f.id == self._loaded_folder_id:
+                    prefix = f"{f.name} / "
+                    break
+        dirty_mark = "*" if self._dirty else ""
+        title = (
+            f"{prefix}{self._loaded_name}{dirty_mark}"
+            if self._loaded_name is not None
+            else "Untitled"
+        )
+        self._page_header.set_heading(title, "Cash Flow")
+        self.setWindowTitle(f"Cash Flow — {title}")
 
     def _update_save_buttons(self) -> None:
         bare = self._report_id is None

@@ -56,6 +56,7 @@ from mfl_desktop.reports.filters import (
     TYPE_SPENDING_OVER_TIME,
 )
 from mfl_desktop.ui.chart_helpers import colour_for, legend_chip
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.spending_chart import SpendingChart
 from mfl_desktop.ui.spending_filter_dialog import (
@@ -219,36 +220,30 @@ class SpendingReportWindow(QMainWindow):
             else filters_cls.default()
         )
 
-        # ── top bar ──
+        # ── page header (ADR-119) ──
+        # MRL-style title (report name) + subtitle (report type) with the
+        # report verbs in the header's right-hand action slot.
         self._back_button = QPushButton("← Back")
+        self._back_button.setProperty("mflVariant", "ghost")
         self._back_button.clicked.connect(self._on_back)
         self._back_button.setVisible(False)
 
-        self._name_label = QLabel()
-        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
-
         self._filter_button = QPushButton("Filter…")
+        self._filter_button.setProperty("mflVariant", "primary")
         self._filter_button.clicked.connect(self._on_open_filter)
 
         self._save_button = QPushButton("Save")
+        self._save_button.setProperty("mflVariant", "ghost")
         self._save_button.clicked.connect(self._on_save)
         self._save_as_button = QPushButton("Save As…")
+        self._save_as_button.setProperty("mflVariant", "ghost")
         self._save_as_button.clicked.connect(self._on_save_as)
 
-        top_bar = QWidget()
-        top_bar_layout = QHBoxLayout(top_bar)
-        top_bar_layout.setContentsMargins(10, 8, 10, 8)
-        top_bar_layout.setSpacing(8)
-        top_bar_layout.addWidget(self._back_button)
-        top_bar_layout.addWidget(self._name_label, stretch=1)
-        top_bar_layout.addWidget(self._filter_button)
-        top_bar_layout.addWidget(self._save_button)
-        top_bar_layout.addWidget(self._save_as_button)
-
-        top_rule = QFrame()
-        top_rule.setFrameShape(QFrame.HLine)
-        top_rule.setFrameShadow(QFrame.Sunken)
-        tokens.themed(top_rule, "color: {border};")
+        self._page_header = PageHeader(show_rule=True)
+        self._page_header.add_leading(self._back_button)
+        self._page_header.add_action(self._filter_button)
+        self._page_header.add_action(self._save_button)
+        self._page_header.add_action(self._save_as_button)
 
         # ── chart + right summary panel ──
         self._chart = SpendingChart()
@@ -275,8 +270,7 @@ class SpendingReportWindow(QMainWindow):
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
-        central_layout.addWidget(top_bar)
-        central_layout.addWidget(top_rule)
+        central_layout.addWidget(self._page_header)
         central_layout.addWidget(body_splitter, stretch=1)
         self.setCentralWidget(central)
 
@@ -883,8 +877,7 @@ class SpendingReportWindow(QMainWindow):
     def _update_name_label(self) -> None:
         label = self._DIRECTION.type_label
         if self._loaded_name is None:
-            self._name_label.setText(f"Untitled {label}")
-            tokens.themed(self._name_label, "color: {muted}; font-style: italic; font-weight: bold; padding: 4px 8px;")
+            self._page_header.set_heading("Untitled", label)
             self.setWindowTitle(f"{label} — Untitled")
             return
         prefix = ""
@@ -894,8 +887,7 @@ class SpendingReportWindow(QMainWindow):
                     prefix = f"{f.name} / "
                     break
         dirty_mark = "*" if self._dirty else ""
-        self._name_label.setText(f"{prefix}{self._loaded_name}{dirty_mark}")
-        tokens.themed(self._name_label, "color: {heading}; font-weight: bold; padding: 4px 8px;")
+        self._page_header.set_heading(f"{prefix}{self._loaded_name}{dirty_mark}", label)
         self.setWindowTitle(
             f"{label} — {prefix}{self._loaded_name}{dirty_mark}"
         )

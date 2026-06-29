@@ -14,14 +14,28 @@ from mfl_desktop.ui import tokens
 
 
 class PageHeader(QWidget):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, show_rule: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("pageHeader")
-        tokens.themed(self, "QWidget#pageHeader { background: {canvas}; }")
+        # Report windows ask for a hairline under the header to separate it from
+        # the chart/table below (they used to draw their own top rule); the
+        # register's header sits above a framed grid and wants none.
+        rule = " border-bottom: 1px solid {border};" if show_rule else ""
+        tokens.themed(
+            self, "QWidget#pageHeader { background: {canvas};" + rule + " }"
+        )
 
         row = QHBoxLayout(self)
         row.setContentsMargins(20, 14, 20, 8)
         row.setSpacing(12)
+        self._row = row
+
+        # Leading slot — a back affordance sits left of the title (filled by the
+        # owning window only when it has one; empty otherwise).
+        self._leading = QHBoxLayout()
+        self._leading.setContentsMargins(0, 0, 0, 0)
+        self._leading.setSpacing(8)
+        row.addLayout(self._leading, 0)
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
@@ -48,3 +62,7 @@ class PageHeader(QWidget):
 
     def add_action(self, w: QWidget) -> None:
         self._actions.addWidget(w)
+
+    def add_leading(self, w: QWidget) -> None:
+        """Add a widget left of the title (e.g. a drill-down Back button)."""
+        self._leading.addWidget(w)
