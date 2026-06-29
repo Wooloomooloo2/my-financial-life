@@ -32,6 +32,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -121,8 +122,22 @@ class NetWorthWindow(QMainWindow):
         self._missing: list[tuple[AccountSummary, Decimal]] = []
         self._fallback_used = False
         # Closed accounts are excluded by default (ADR-069); the toggle below
-        # re-includes their balances in every total + the donuts + columns.
+        # re-includes their balances in every total + the donut + columns.
         self._include_closed = False
+
+        # Which balance-sheet side the centre donut shows. A donut can't carry
+        # a negative slice, so assets and debts are separate datasets; an
+        # Assets | Debts toggle swaps between them in one big donut rather than
+        # cramming a second, too-small donut beside the legend. Per-refresh
+        # segments + totals are cached so the toggle re-renders without a
+        # recompute.
+        self._side: str = "asset"
+        self._side_segments: dict[str, list[DonutSegment]] = {"asset": [], "debt": []}
+        self._side_total: dict[str, Decimal] = {
+            "asset": Decimal("0.00"), "debt": Decimal("0.00"),
+        }
+        self._family_totals: list[_FamilyTotal] = []
+        self._symbol: str = "£"
 
         # ── page header (ADR-119): title + the display-currency selector and
         # show-closed toggle in the action slot ──
@@ -161,12 +176,10 @@ class NetWorthWindow(QMainWindow):
 
         # ── columns ──
         self._summary_panel, self._summary_total_lbl, \
-            self._assets_donut, self._debts_donut, self._debts_donut_title, \
-            self._legend_layout = self._build_summary_panel()
+            self._donut, self._legend_layout = self._build_summary_panel()
         # Outer-ring slice click → re-emit the account id for the register
         # window to open the Account Summary (ADR-083).
-        self._assets_donut.account_clicked.connect(self.account_activated)
-        self._debts_donut.account_clicked.connect(self.account_activated)
+        self._donut.account_clicked.connect(self.account_activated)
         self._assets_panel, self._assets_total_lbl, \
             self._assets_tree = self._build_side_panel(is_asset=True)
         self._debts_panel, self._debts_total_lbl, \
@@ -219,7 +232,7 @@ class NetWorthWindow(QMainWindow):
 
     def _build_summary_panel(
         self,
-    ) -> tuple[QWidget, QLabel, DonutChart, DonutChart, QLabel, QVBoxLayout]:
+    ) -> tuple[QWidget, QLabel, DonutChart, QVBoxLayout]:
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -237,45 +250,56 @@ class NetWorthWindow(QMainWindow):
         big.setBold(True)
         total_lbl.setFont(big)
 
-        # Assets donut — the main visual, takes the available vertical space.
-        assets_donut = DonutChart()
-        assets_donut.setMinimumHeight(240)
+        # Assets | Debts segmented toggle (centred) — swaps which side the one
+        # big donut shows. Matches the Income & Expense donut toggle (ADR-113).
+        toggle_row = QHBoxLayout()
+        toggle_row.setContentsMargins(0, 0, 0, 0)
+        toggle_row.setSpacing(6)
+        toggle_row.addStretch(1)
+        self._assets_btn = QPushButton("Assets")
+        self._debts_btn = QPushButton("Debts")
+        for b in (self._assets_btn, self._debts_btn):
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            tokens.themed(
+                b,
+                "QPushButton { padding: 4px 14px; border: 1px solid {border_strong}; "
+                "border-radius: 13px; background-color: {surface}; color: {heading}; "
+                "font-size: 12px; }"
+                "QPushButton:checked { background-color: {accent}; color: {surface}; "
+                "border-color: {accent}; font-weight: bold; }"
+                "QPushButton:hover:!checked { background-color: {surface_alt}; }",
+            )
+            toggle_row.addWidget(b)
+        toggle_row.addStretch(1)
+        self._assets_btn.setChecked(True)
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        group.addButton(self._assets_btn)
+        group.addButton(self._debts_btn)
+        self._assets_btn.clicked.connect(lambda: self._set_side("asset"))
+        self._debts_btn.clicked.connect(lambda: self._set_side("debt"))
 
-        # Debts donut (smaller) sits beside the legend in a row below.
-        debts_donut_title = QLabel("DEBTS")
-        tokens.themed(debts_donut_title, "color: {muted}; letter-spacing: 1px; margin-top: 6px;")
-        debts_donut = DonutChart()
-        debts_donut.setFixedSize(190, 190)
+        # The one big donut — takes the available vertical space.
+        donut = DonutChart()
+        donut.setMinimumHeight(260)
 
-        # Legend rows are added dynamically by _refresh.
+        # Legend rows (the active side's family colour key) added by _refresh.
         legend = QVBoxLayout()
         legend.setContentsMargins(0, 0, 0, 0)
         legend.setSpacing(4)
         legend_holder = QWidget()
         legend_holder.setLayout(legend)
 
-        bottom_row = QHBoxLayout()
-        bottom_row.setContentsMargins(0, 0, 0, 0)
-        bottom_row.setSpacing(12)
-        debts_col = QVBoxLayout()
-        debts_col.setContentsMargins(0, 0, 0, 0)
-        debts_col.setSpacing(2)
-        debts_col.addWidget(debts_donut_title)
-        debts_col.addWidget(debts_donut)
-        debts_col.addStretch(1)
-        bottom_row.addLayout(debts_col, 0)
-        bottom_row.addWidget(legend_holder, 1)
-
         layout.addWidget(title)
         layout.addWidget(total_lbl)
-        layout.addSpacing(6)
-        layout.addWidget(assets_donut, stretch=1)
         layout.addSpacing(4)
-        layout.addLayout(bottom_row)
-        return (
-            panel, total_lbl, assets_donut, debts_donut,
-            debts_donut_title, legend,
-        )
+        layout.addLayout(toggle_row)
+        layout.addSpacing(4)
+        layout.addWidget(donut, stretch=1)
+        layout.addSpacing(4)
+        layout.addWidget(legend_holder)
+        return (panel, total_lbl, donut, legend)
 
     def _build_side_panel(self, *, is_asset: bool) -> tuple[QWidget, QLabel, QTreeWidget]:
         panel = QWidget()
@@ -472,24 +496,22 @@ class NetWorthWindow(QMainWindow):
         # donut can't carry a negative slice; debts are over positive
         # magnitudes (the stored-negative balances are flipped in
         # _compute_type_totals / _donut_segments).
-        symbol = _symbol(self._display_ccy) or "£"
-        asset_segs = self._donut_segments(type_totals, kind="asset")
-        self._assets_donut.set_data(
-            segments=asset_segs, center_label="Assets",
-            center_sub=self._format(asset_total), symbol=symbol,
-        )
-        debt_segs = self._donut_segments(type_totals, kind="debt")
-        has_debts = bool(debt_segs)
-        self._debts_donut.setVisible(has_debts)
-        self._debts_donut_title.setVisible(has_debts)
-        if has_debts:
-            self._debts_donut.set_data(
-                segments=debt_segs, center_label="Debts",
-                center_sub=self._format(debt_total), symbol=symbol,
-            )
+        self._symbol = _symbol(self._display_ccy) or "£"
+        self._side_segments = {
+            "asset": self._donut_segments(type_totals, kind="asset"),
+            "debt":  self._donut_segments(type_totals, kind="debt"),
+        }
+        self._side_total = {"asset": asset_total, "debt": debt_total}
+        self._family_totals = family_totals
 
-        # Legend (family-level colour key, shared with the donut inner ring).
-        self._rebuild_legend(family_totals)
+        # The Debts side is only offered when there are debts; an all-asset
+        # file falls back to Assets and disables the Debts toggle.
+        has_debts = bool(self._side_segments["debt"])
+        self._debts_btn.setEnabled(has_debts)
+        if self._side == "debt" and not has_debts:
+            self._side = "asset"
+            self._assets_btn.setChecked(True)
+        self._render_active_side()
 
         # Assets column header total + tree.
         self._assets_total_lbl.setText(self._format(asset_total))
@@ -498,6 +520,32 @@ class NetWorthWindow(QMainWindow):
         # Debts column header total + tree.
         self._debts_total_lbl.setText(self._format(debt_total))
         self._fill_tree(self._debts_tree, type_totals, kind="debt")
+
+    def _render_active_side(self) -> None:
+        """Draw the active balance-sheet side (assets or debts) into the one
+        big donut + the legend, from the cached per-refresh data — the toggle
+        re-renders without recomputing anything."""
+        side = self._side
+        segs = self._side_segments.get(side, [])
+        label = "Assets" if side == "asset" else "Debts"
+        if not segs:
+            self._donut.show_empty(f"No {label.lower()}")
+        else:
+            self._donut.set_data(
+                segments=segs, center_label=label,
+                center_sub=self._format(self._side_total[side]),
+                symbol=self._symbol,
+            )
+        self._rebuild_legend(side)
+
+    def _set_side(self, side: str) -> None:
+        if side == self._side:
+            return
+        self._side = side
+        # Keep the toggle in sync even when called programmatically.
+        self._assets_btn.setChecked(side == "asset")
+        self._debts_btn.setChecked(side == "debt")
+        self._render_active_side()
 
     def _compute_type_totals(
         self,
@@ -582,7 +630,10 @@ class NetWorthWindow(QMainWindow):
         factor = 112 + int(48 * index / (count - 1))
         return base.lighter(factor)
 
-    def _rebuild_legend(self, family_totals: list[_FamilyTotal]) -> None:
+    def _rebuild_legend(self, kind: str) -> None:
+        """Render the colour key for just the active side's families — the
+        Assets | Debts toggle already names the side, so no section heading is
+        needed (it would only repeat the toggle)."""
         # Drop every previous legend row.
         while self._legend_layout.count():
             item = self._legend_layout.takeAt(0)
@@ -590,24 +641,9 @@ class NetWorthWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
 
-        # Assets first.
-        any_assets = any(ft.kind == "asset" and ft.total > 0 for ft in family_totals)
-        any_debts = any(ft.kind == "debt" and ft.total > 0 for ft in family_totals)
-        if any_assets:
-            self._legend_layout.addWidget(self._heading_row("ASSETS"))
-            for ft in family_totals:
-                if ft.kind == "asset" and ft.total > 0:
-                    self._legend_layout.addWidget(self._legend_row(ft))
-        if any_debts:
-            self._legend_layout.addWidget(self._heading_row("DEBTS"))
-            for ft in family_totals:
-                if ft.kind == "debt" and ft.total > 0:
-                    self._legend_layout.addWidget(self._legend_row(ft))
-
-    def _heading_row(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        tokens.themed(lbl, "color: {muted}; letter-spacing: 1px; margin-top: 8px;")
-        return lbl
+        for ft in self._family_totals:
+            if ft.kind == kind and ft.total > 0:
+                self._legend_layout.addWidget(self._legend_row(ft))
 
     def _legend_row(self, ft: _FamilyTotal) -> QWidget:
         row = QWidget()
