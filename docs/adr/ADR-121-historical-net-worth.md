@@ -38,11 +38,13 @@ There is no stored balance-snapshot table, and we don't add one — the series r
 ## Consequences
 
 - The balance sheet gains its time axis without a schema change, a migration, or stored snapshots — it recomputes from the ledger + price + FX history, consistent with ADR-044/046/055.
-- **Known v1 limitations** (documented, deferred): property / vehicle / other manual-valuation accounts have no valuation pipeline, so they render as **flat lines at their recorded value** until revalued (same caveat the point-in-time screen flags with its amber banner). FX/price coverage that doesn't reach far enough back makes early points exclude some accounts (surfaced via the existing banner) — the series is only as deep as the data. A clicked point does **not** yet drill into that date's composition (future round).
+- **Property / vehicle valuation is transaction-driven (works correctly), not market-fed.** These families have no automatic price feed (unlike securities), but the series values every account by its running balance (`opening + Σ amount ≤ date`), so **revaluation entries posted inside the asset account are tracked over time** — the owner's Banktivity workflow (a dated appreciation/depreciation transaction, plus selling-cost entries at disposal). A house bought, revalued up over the years, and sold rises and falls correctly (verified: 0 → 300k → 350k → 400k → 0). The only "flat" case is an asset the user simply never revalues — that's a data-entry choice, not an engine limitation. A dedicated valuation-timeline UI is therefore **not needed** (it would duplicate the transaction mechanism).
+- **Known v1 limitations** (documented, deferred): FX/price coverage that doesn't reach far enough back makes early points exclude some accounts (surfaced via the existing banner) — the series is only as deep as the data. A clicked point does **not** yet drill into that date's composition (future round).
 - Cost: ~one `compute_value_history` FIFO pass per investment account + one cash replay per account + memoised FX per `(ccy, date)` — ~100 ms for a typical file; recomputed on open and on currency/period/closed-toggle change.
 - Pure compute (`net_worth_history.py`) is unit-testable headless; the chart + toggle are verified offscreen on `mfl_public.mfl`.
 
 ### Deferred to later rounds
 - Click-a-point drill-down to that date's composition (or to the underlying accounts).
-- Property/vehicle revaluation history (a manual valuation timeline) so non-cash assets aren't flat.
 - A saved-report variant (if the owner later wants persisted period/account scoping in the sidebar).
+
+(A property/vehicle valuation-timeline UI was considered and **dropped** — the owner revalues via transactions inside the asset account, which the running-balance valuation already tracks, so a separate feature would be redundant.)
