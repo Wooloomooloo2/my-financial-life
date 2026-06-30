@@ -393,8 +393,13 @@ class BudgetMatrixModel(QAbstractTableModel):
                 return _total_bg()
             return None
 
-        # Rolled-over carry on a (month) Budget cell: annotate it so Budget /
-        # Actual / Diff visibly reconcile (Diff uses available = alloc + carry).
+        # Rolled-over carry on a (month) Budget cell. Drives the cell's yellow
+        # background (_rollover_bg) and its reconciliation tooltip — Budget /
+        # Actual / Diff still reconcile via available = alloc + carry. It is
+        # *not* rendered inline: the "(+205.00)" annotation overflowed the
+        # fixed 86px month column and was elided away, hiding the budget figure
+        # itself (ADR-124). The yellow background + tooltip + the ↻ label glyph
+        # signal the rollover without clipping the number.
         carry = (
             mr.cells[month_idx].carry_in
             if (row.kind == _METRIC and metric == "budget" and not is_total)
@@ -404,8 +409,6 @@ class BudgetMatrixModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             if metric == "diff" and value > 0:
                 return f"+{_fmt(value)}"
-            if carry != 0:
-                return f"{_fmt(value)}  ({carry:+,.2f})"
             return _fmt(value)
         if role == Qt.EditRole and self._editable(row, col):
             return _fmt(value)
