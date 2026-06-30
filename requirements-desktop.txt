@@ -20,3 +20,9 @@
 PySide6==6.11.1        # Qt for Python — the entire UI + QSettings + QtCharts-free paintEvent charts
 cryptography==49.0.0   # Ed25519 offline license verification (ADR-079) + bank-feed credential crypto
 ofxtools==0.9.5        # OFX / QFX statement parsing + OFX Direct Connect (ADR-077); imported lazily at the import sites
+
+# macOS-only: security-scoped bookmarks for the App Sandbox / Mac App Store build
+# (ADR-125). Qt has no bookmark API, so mfl_desktop/sandbox.py drops to PyObjC.
+# Import-guarded everywhere — never imported on non-macOS or in unsandboxed dev
+# runs, so it is harmless when absent; pinned only so the MAS build is reproducible.
+pyobjc-framework-Cocoa==12.2.1 ; sys_platform == "darwin"

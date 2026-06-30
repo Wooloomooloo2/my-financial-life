@@ -32,7 +32,9 @@ from mfl_desktop.licensing import (
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.license_dialog import LicenseDialog
-from mfl_desktop.version import APP_NAME, __version__, build_revision
+from mfl_desktop.version import (
+    APP_NAME, __version__, build_revision, is_store_build,
+)
 
 
 class AboutDialog(QDialog):
@@ -140,6 +142,17 @@ class AboutDialog(QDialog):
 
     def _refresh(self) -> None:
         """Re-read and render the current license status."""
+        # Store build (ADR-125): the store owns the purchase, so there's no key
+        # to enter or buy-link to show — render a simple owned line and hide both
+        # action buttons (current_status reports LICENSED with no info here).
+        if is_store_build():
+            self._state_lbl.setText(
+                "<b style='color:#1a7f37'>Purchased</b> via the App Store — "
+                "thank you!"
+            )
+            self._enter_btn.setVisible(False)
+            self._buy_btn.setVisible(False)
+            return
         status = license_service.current_status()
         if status.state == STATE_LICENSED and status.info is not None:
             who = status.info.name or status.info.email or "this device"

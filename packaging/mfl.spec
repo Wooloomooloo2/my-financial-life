@@ -79,7 +79,9 @@ exe = EXE(
     disable_windowed_traceback=False,
     target_arch=None,         # build native; macOS universal2 handled by the CI runner
     codesign_identity=None,   # signing is done in the build scripts, post-build
-    entitlements_file=None,
+    entitlements_file=None,   # macOS signing is script-side: Developer-ID in
+                              # build_macos.sh, sandbox entitlements in
+                              # build_mas.sh (ADR-125).
     icon=bundle_icon,
 )
 

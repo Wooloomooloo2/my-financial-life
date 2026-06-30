@@ -9,8 +9,9 @@ multi-currency file, a card-payoff scenario, …).
 Two ideas, both at-rest file operations with no Qt and no live connection, so
 they stay pure and testable:
 
-- **Saved datasets** live in a ``Library/`` folder beside the live database. A
-  save is an atomic backup copy (via the live ``Repository.save_copy``); the
+- **Saved datasets** live in an ``MFL Library/`` folder under the app-data root
+  (``app_session.library_root`` — ADR-125; defaults to the OS app-data location).
+  A save is an atomic backup copy (via the live ``Repository.save_copy``); the
   resulting library entry is an ordinary, schema-upgradeable ``.mfl``.
 - **Loading a working copy** clones a library entry (or an ADR-057 snapshot)
   *onto the live working file* so the saved original stays pristine — load a
@@ -19,8 +20,14 @@ they stay pure and testable:
   the pristine copy) and writes through a temp file + atomic replace, so a
   failure mid-clone leaves the working file intact rather than half-written.
 
-``Library/`` sits beside the live db, parallel to ADR-057's ``Snapshots/``, so
-both follow the live file across a load.
+The library folder used to sit *beside* the live db (parallel to ADR-057's
+``Snapshots/``), but ADR-125 moved it to the app-data root so the macOS App
+Sandbox build never needs write access to a folder beside a user-chosen file
+(a file-scoped bookmark can't grant that). The legacy beside-the-file
+``Library/`` is still **read** (unioned into :func:`list_saved`) so no existing
+saved datasets are orphaned — exactly the same relocation ADR-109 applied to
+snapshots. Like ``snapshots``, this stays Qt-free via a lazily-imported
+``app_session`` indirection so it still imports on the base interpreter.
 """
 from __future__ import annotations
 
@@ -33,7 +40,13 @@ from pathlib import Path
 
 from mfl_desktop import snapshots
 
-LIBRARY_DIRNAME = "Library"
+# New (written) folder name under the app-data root (ADR-125). Renamed from the
+# bare "Library" — which is ambiguous in a shared app-data folder — exactly as
+# ADR-109 renamed "Snapshots" → "MFL Snapshots".
+LIBRARY_DIRNAME = "MFL Library"
+# The pre-ADR-125 folder name, used *beside* the live database. Still read (so an
+# upgrader's saved datasets aren't orphaned) but never written to.
+_LEGACY_LIBRARY_DIRNAME = "Library"
 
 
 @dataclass(frozen=True)
@@ -47,9 +60,29 @@ class DataFile:
     kind: str            # "current" | "saved" | "snapshot"
 
 
+def _library_root() -> Path:
+    """The configured parent folder for the ``MFL Library/`` directory (ADR-125).
+
+    Thin, lazily-imported indirection (mirrors ``snapshots._snapshots_root``) so
+    this module stays importable on a Qt-free interpreter and unit tests can
+    monkeypatch the root without pulling in ``QSettings``."""
+    from mfl_desktop import app_session
+    return app_session.library_root()
+
+
 def library_dir(db_path: Path | str) -> Path:
-    """The ``Library/`` folder beside the live database."""
-    return Path(db_path).resolve().parent / LIBRARY_DIRNAME
+    """The ``MFL Library/`` folder under the configured app-data root (ADR-125).
+
+    No longer beside the live database (the macOS App Sandbox forbids writing
+    beside a user-chosen file). ``db_path`` is kept in the signature for call-site
+    symmetry and forward compatibility, mirroring ``snapshots.snapshot_dir``."""
+    return _library_root() / LIBRARY_DIRNAME
+
+
+def _legacy_library_dir(db_path: Path | str) -> Path:
+    """The pre-ADR-125 ``Library/`` folder beside the live database — read for
+    backward compatibility so an upgrader's saved datasets still appear."""
+    return Path(db_path).resolve().parent / _LEGACY_LIBRARY_DIRNAME
 
 
 def sanitize_name(name: str) -> str:
@@ -96,13 +129,22 @@ def current_file(db_path: Path | str) -> DataFile:
 
 
 def list_saved(db_path: Path | str) -> list[DataFile]:
-    """Saved datasets in the library, newest first."""
-    folder = library_dir(db_path)
-    if not folder.is_dir():
-        return []
+    """Saved datasets in the library, newest first.
+
+    Unions the configured :func:`library_dir` (app-data root) with the legacy
+    beside-the-file ``Library/`` folder (ADR-125 backward compat) so no upgrader's
+    saved datasets are orphaned. A dataset present in both folders is de-duplicated
+    by filename, preferring the new location — mirrors
+    ``snapshots.existing_snapshots``."""
+    by_name: dict[str, Path] = {}
+    # Legacy first, then new — the dict update lets the new location win a clash.
+    for folder in (_legacy_library_dir(db_path), library_dir(db_path)):
+        if folder.is_dir():
+            for p in folder.glob("*.mfl"):
+                by_name[p.name] = p
     files = [
         DataFile(p, p.stem, _mtime(p), _size(p), "saved")
-        for p in folder.glob("*.mfl")
+        for p in by_name.values()
     ]
     return sorted(files, key=lambda f: f.saved_at, reverse=True)
 

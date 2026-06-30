@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -80,6 +81,32 @@ def test_ensure_available_times_out():
 def test_request_download_swallows_failures():
     # Missing file + (likely) missing brctl: must never raise.
     cloud.request_download(_tmpdir() / "ghost.mfl")
+
+
+def test_request_download_skips_brctl_when_sandboxed():
+    """ADR-125: a sandboxed app can't spawn ``brctl`` — request_download must skip
+    the subprocess and fall through to read-to-hydrate. (darwin-only: the brctl
+    branch is gated on ``sys.platform == 'darwin'``.)"""
+    if sys.platform != "darwin":
+        print("    (skipped: brctl path is darwin-only)")
+        return
+    d = _tmpdir()
+    real = d / "Money.mfl"
+    real.write_bytes(b"x")
+    (d / ".Money.mfl.icloud").write_bytes(b"")   # placeholder → brctl branch eligible
+
+    calls: list = []
+    saved_sb, saved_sp = cloud.sandbox, cloud.subprocess
+    cloud.subprocess = SimpleNamespace(run=lambda *a, **k: calls.append(a))
+    try:
+        cloud.sandbox = SimpleNamespace(is_sandboxed=lambda: True)
+        cloud.request_download(real)
+        assert calls == []                       # sandboxed → no brctl spawn
+        cloud.sandbox = SimpleNamespace(is_sandboxed=lambda: False)
+        cloud.request_download(real)
+        assert len(calls) == 1                    # unsandboxed → brctl invoked
+    finally:
+        cloud.sandbox, cloud.subprocess = saved_sb, saved_sp
 
 
 # ── bare-script runner ──────────────────────────────────────────────────────

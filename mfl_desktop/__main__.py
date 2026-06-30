@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from PySide6.QtCore import QThreadPool, QRunnable
 
-from mfl_desktop import launch
+from mfl_desktop import launch, sandbox
 from mfl_desktop.app_session import remember_last_db
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui.file_recovery_dialog import FileRecoveryDialog
@@ -111,6 +111,35 @@ def _seed_starter_db(repo: Repository) -> None:
     repo.commit()
 
 
+def _prompt_first_run_location(default_path: Path) -> Path:
+    """Sandbox first run (ADR-125): ask the user which folder to keep their new
+    ``.mfl`` in, so it lives somewhere visible and backup-able rather than the
+    hidden sandbox container.
+
+    Shown over the splash (no parent). The folder dialog is the macOS powerbox,
+    so picking a folder grants this session read/write to it — enough to create
+    the file there; ``remember_last_db`` then mints the security-scoped bookmark
+    that reopens it next launch. Cancelling falls back to ``default_path`` (the
+    container default), so a hesitant user still gets a working app."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    QMessageBox.information(
+        None,
+        "Choose where to keep your data",
+        "Pick a folder for your My Financial Life data file — somewhere you can "
+        "find and back up, like your Documents or an iCloud Drive folder.\n\n"
+        "You can move it later from Manage Data.",
+    )
+    chosen = QFileDialog.getExistingDirectory(
+        None,
+        "Choose a folder for your data file",
+        str(Path.home() / "Documents"),
+    )
+    if not chosen:
+        return default_path
+    return Path(chosen) / launch.DEFAULT_DB_FILENAME
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mfl_desktop")
     parser.add_argument("--db", type=Path, default=None,
@@ -161,6 +190,14 @@ def main(argv: list[str] | None = None) -> int:
         return res.exit_code
     db_path = res.db_path
     seed_if_empty = res.seed_if_empty
+
+    # Sandbox first run (ADR-125): before creating the brand-new file, let the
+    # user place it in a real, visible folder (held thereafter via a security-
+    # scoped bookmark) instead of the hidden sandbox container. Only for the
+    # unattended first-run default, and only when sandboxed — the dev / direct
+    # build keeps the ADR-109 ~/Documents default with no extra prompt.
+    if res.first_run_default and sandbox.is_sandboxed():
+        db_path = _prompt_first_run_location(db_path)
 
     # Every resolved path is now an explicit choice (the pointer, --db, the
     # first-run default, or a file the user picked in recovery), so we always

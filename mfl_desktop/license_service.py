@@ -11,8 +11,10 @@ from __future__ import annotations
 from datetime import date
 
 from mfl_desktop import app_session, licensing
-from mfl_desktop.licensing import LicenseError, LicenseInfo, LicenseStatus
-from mfl_desktop.version import APP_EDITION
+from mfl_desktop.licensing import (
+    STATE_LICENSED, LicenseError, LicenseInfo, LicenseStatus,
+)
+from mfl_desktop.version import APP_EDITION, is_store_build
 
 # Where the About / Enter-License dialogs send the user to purchase. Points at
 # the Garelochsoft company site (RELEASE_1.0_BACKLOG workstream W); kept here as
@@ -34,7 +36,18 @@ def ensure_trial_started(today: date | None = None) -> str:
 
 def current_status(today: date | None = None) -> LicenseStatus:
     """The resolved :class:`LicenseStatus` for this launch — the one call the
-    UI needs. Starts the trial clock if it hasn't begun."""
+    UI needs. Starts the trial clock if it hasn't begun.
+
+    In a **store build** the store owns the purchase + entitlement (ADR-125),
+    so the offline-key / trial machinery is dormant: return a fixed "owned"
+    status and never start the trial clock. This is the single chokepoint every
+    UI surface reads, so the launch nag, the trial title-cue, and the About box
+    all go quiet for free."""
+    if is_store_build():
+        return LicenseStatus(
+            state=STATE_LICENSED, unlocked=True,
+            message="Purchased via the App Store",
+        )
     now = today or date.today()
     trial_start = ensure_trial_started(now)
     key = app_session.get_license_key()

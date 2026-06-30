@@ -125,7 +125,12 @@ _Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold b
 
 ## 2. Workstream K — Packaging, signing & store readiness
 
-### ✅ DECISION K0 (LOCKED) — Direct signed+notarised downloads for 1.0; App Stores deferred to 1.1+
+> **⚠ SUPERSEDED — distribution reversed twice since this section was written (2026-06-16). Current plan:**
+> - **Windows → Microsoft Store-only** (MSIX, MS-signed, MS = Merchant-of-Record) for 1.0.1 — **ADR-123** (supersedes K0 below). 1.0 stays a local Inno `.exe` for early-access sideload (ADR-122).
+> - **macOS → Mac App Store-only** (sandboxed, paid up-front) — **ADR-125** (reverses ADR-123's "macOS out of scope"; implements the macOS leg of K3). The K1 direct Developer-ID DMG (ADR-104) is demoted to a dev-only convenience.
+> - **Net effect:** both stores sign + act as Merchant-of-Record; we self-manage no signing certs or cross-border tax. The K0 "direct-first, stores deferred" decision and the K1/K3 framing below are **historical** — read them for the sandbox/effort analysis, not the current plan. The MAS sandbox work K3 worried about is now the **active macOS arc** (ADR-125 A–F).
+
+### ✅ DECISION K0 (LOCKED 2026-06-16; SUPERSEDED by ADR-123/125) — Direct signed+notarised downloads for 1.0; App Stores deferred to 1.1+
 There are **two different things** the owner referred to as "notarised … so it's seen as legit and safe," and they are NOT the same effort:
 
 | Path | Trust signal | Effort | Tax/payments | Sandbox? |

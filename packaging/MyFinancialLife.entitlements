@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mac App Store sandbox entitlements for My Financial Life (ADR-125).
+
+  Applied to the app bundle at codesign time by packaging/build_mas.sh. The set
+  is deliberately minimal — App Store review scrutinises every entitlement:
+
+    app-sandbox                  Mandatory on the Mac App Store.
+    files.user-selected.read-write
+                                 Read/write the .mfl files the user picks via the
+                                 open/save panel (the "powerbox"). Qt's QFileDialog
+                                 routes through it, so picking grants access.
+    files.bookmarks.app-scope    Persist + resolve security-scoped bookmarks so the
+                                 chosen working file reopens on the next launch
+                                 (mfl_desktop/sandbox.py / app_session.py).
+    network.client               Outbound only — FX rates, security prices, and
+                                 (BYO) bank feeds. No inbound server.
+
+  Sidecars (snapshots, the data library, logs, QSettings) live in the app
+  container under AppDataLocation (ADR-109 + ADR-125 increment C), so no
+  beside-the-file folder access is needed.
+
+  NOTE for the QA pass: report export (Desktop/Downloads) must go through a save
+  panel to stay powerbox-covered; if any export writes a fixed path without a
+  panel, add com.apple.security.files.downloads.read-write here.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

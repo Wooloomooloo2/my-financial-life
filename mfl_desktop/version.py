@@ -42,3 +42,32 @@ def build_revision() -> str:
 def build_string() -> str:
     """``"1.0.0 (source)"`` — version + build revision, for one-line display."""
     return f"{__version__} ({build_revision()})"
+
+
+def is_store_build() -> bool:
+    """True when this build is distributed through an app store, so the store —
+    not our own license key — owns the purchase + entitlement (ADR-125 / ADR-123).
+
+    In a store build the ADR-079 offline-key + 30-day-trial machinery is dormant:
+    the app is paid up-front via the store, so there's no in-app license to enter
+    or trial to count, and (on the Mac App Store) Apple forbids external purchase
+    links. Resolution:
+
+    1. an explicit ``STORE_BUILD`` flag stamped into the gitignored
+       ``_build_info.py`` by the store build scripts (``build_mas.sh`` passes
+       ``--store`` to ``stamp_build_info.py``) — this also covers a future
+       Windows MSIX store build; else
+    2. a fallback to "are we sandboxed?" — the macOS App Store build is the only
+       sandboxed build (ADR-125 MAS-only), so an unstamped MAS run is still
+       correctly treated as a store build.
+
+    A plain source checkout / the direct dev build has neither, so this is
+    ``False`` and licensing behaves exactly as before."""
+    try:
+        from mfl_desktop import _build_info  # type: ignore
+        if getattr(_build_info, "STORE_BUILD", False):
+            return True
+    except Exception:
+        pass
+    from mfl_desktop import sandbox
+    return sandbox.is_sandboxed()

@@ -29,6 +29,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from mfl_desktop import sandbox
+
 
 def icloud_placeholder(path: Path | str) -> Optional[Path]:
     """The iCloud eviction placeholder sibling for ``path``, if present.
@@ -77,15 +79,23 @@ def request_download(path: Path | str) -> None:
 
     - **macOS / iCloud:** if an ``.icloud`` placeholder is present, ask the
       File Provider to fetch it via ``brctl download`` (no-op / harmless if
-      ``brctl`` is missing, sandboxed, or the file isn't an iCloud file).
-    - **Everywhere else (OneDrive / Dropbox / Google Drive on Windows, etc.):**
-      simply *opening* a placeholder is what triggers on-demand hydration, so a
-      one-byte read kicks the provider into fetching the bytes. The read itself
-      may block briefly; callers run this off the UI thread (see
-      :func:`ensure_available`)."""
+      ``brctl`` is missing or the file isn't an iCloud file). **Skipped under the
+      macOS App Sandbox** (ADR-125): a sandboxed app can't spawn a helper
+      executable, so we fall straight through to the generic read-to-hydrate
+      below — which works for the file we hold access to (the bookmarked working
+      file, or a powerbox-picked file).
+    - **Everywhere else (OneDrive / Dropbox / Google Drive on Windows, etc.) —
+      and the sandboxed-macOS case:** simply *opening* a placeholder is what
+      triggers on-demand hydration, so a one-byte read kicks the provider into
+      fetching the bytes. The read itself may block briefly; callers run this off
+      the UI thread (see :func:`ensure_available`)."""
     path = Path(path)
     try:
-        if sys.platform == "darwin" and icloud_placeholder(path) is not None:
+        if (
+            sys.platform == "darwin"
+            and not sandbox.is_sandboxed()
+            and icloud_placeholder(path) is not None
+        ):
             subprocess.run(
                 ["brctl", "download", str(path)],
                 capture_output=True,

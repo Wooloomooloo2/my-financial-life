@@ -1503,15 +1503,20 @@ class RegisterWindow(QMainWindow):
         diagnostics_action = QAction("Export &Diagnostics…", self)
         diagnostics_action.triggered.connect(self._on_export_diagnostics)
         help_menu.addAction(diagnostics_action)
-        help_menu.addSeparator()
-        enter_license_action = QAction("Enter &License…", self)
-        enter_license_action.triggered.connect(self._on_enter_license)
-        help_menu.addAction(enter_license_action)
-        buy_action = QAction("&Buy My Financial Life…", self)
-        buy_action.triggered.connect(
-            lambda: QDesktopServices.openUrl(QUrl(license_service.BUY_URL))
-        )
-        help_menu.addAction(buy_action)
+        # Enter-License + Buy are hidden in a store build (ADR-125): the store
+        # owns the purchase/entitlement, there's no key to enter, and Apple
+        # forbids external purchase links. current_status() also reports the app
+        # as owned, so the launch nag + trial title-cue stay silent.
+        if not version.is_store_build():
+            help_menu.addSeparator()
+            enter_license_action = QAction("Enter &License…", self)
+            enter_license_action.triggered.connect(self._on_enter_license)
+            help_menu.addAction(enter_license_action)
+            buy_action = QAction("&Buy My Financial Life…", self)
+            buy_action.triggered.connect(
+                lambda: QDesktopServices.openUrl(QUrl(license_service.BUY_URL))
+            )
+            help_menu.addAction(buy_action)
 
         # ── host the menus as flat dropdown buttons on the app header ──
         for label, menu in (

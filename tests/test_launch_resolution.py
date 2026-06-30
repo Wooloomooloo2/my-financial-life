@@ -93,6 +93,7 @@ def test_pointer_available_opens():
     pointer = _tmpfile()
     with _Patch(
         last_db_path=lambda: pointer,
+        begin_main_file_access=lambda: None,
         cloud=_fake_cloud([True]),
         _opens=lambda p: True,
     ):
@@ -106,6 +107,7 @@ def test_evicted_then_retry_materialises():
     dlg = _Dialog([_choice(retry=True)])
     with _Patch(
         last_db_path=lambda: pointer,
+        begin_main_file_access=lambda: None,
         cloud=_fake_cloud([False, True]),  # offline, then downloaded
         _opens=lambda p: True,
     ):
@@ -120,6 +122,7 @@ def test_evicted_then_open_other():
     remembered = {"path": None}
     with _Patch(
         last_db_path=lambda: pointer,
+        begin_main_file_access=lambda: None,
         cloud=_fake_cloud([False]),
         _opens=lambda p: True,
         remember_last_db=lambda p: remembered.__setitem__("path", Path(p)),
@@ -135,6 +138,7 @@ def test_evicted_then_new_file_seeds():
     fresh = Path(tempfile.mkdtemp(prefix="mfl_launch_")) / "new.mfl"
     with _Patch(
         last_db_path=lambda: pointer,
+        begin_main_file_access=lambda: None,
         cloud=_fake_cloud([False]),
         _opens=lambda p: True,
         remember_last_db=lambda p: None,
@@ -142,12 +146,16 @@ def test_evicted_then_new_file_seeds():
         dlg = _Dialog([_choice(new_file=True, path=fresh)])
         res = launch.resolve_database(_args(), dialog_factory=lambda p, r: dlg)
     assert res.db_path == fresh and res.seed_if_empty is True
+    # A recovery-picked new file is NOT the unattended first-run default, so it
+    # must not trigger the sandbox folder picker (ADR-125).
+    assert res.first_run_default is False
 
 
 def test_dialog_closed_quits():
     pointer = _tmpfile()
     with _Patch(
         last_db_path=lambda: pointer,
+        begin_main_file_access=lambda: None,
         cloud=_fake_cloud([False]),
         _opens=lambda p: True,
         remember_last_db=lambda p: None,
@@ -155,6 +163,60 @@ def test_dialog_closed_quits():
         dlg = _Dialog([_choice()])  # all-False == closed the dialog
         res = launch.resolve_database(_args(), dialog_factory=lambda p, r: dlg)
     assert res.exit_code == 0 and res.db_path is None
+
+
+class _FakeLocation:
+    """Stand-in for sandbox.ResolvedLocation: records start/stop and a path."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+        return True
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_sandbox_bookmark_carries_location():
+    """ADR-125: when a security-scoped bookmark resolves, the resolver opens the
+    bookmark's path (authoritative over a stale plain pointer) and carries the
+    live location out in the Resolution so the caller keeps access for the
+    session. (Starting access is ``begin_main_file_access``'s job — see the
+    app_session test — so it's bypassed here along with the rest of that hook.)"""
+    bookmarked = _tmpfile("from_bookmark.mfl")
+    loc = _FakeLocation(bookmarked)
+    with _Patch(
+        # The plain pointer is a now-stale path; the bookmark is authoritative.
+        last_db_path=lambda: Path("/stale/old/path.mfl"),
+        begin_main_file_access=lambda: loc,
+        cloud=_fake_cloud([True]),
+        _opens=lambda p: True,
+    ):
+        res = launch.resolve_database(_args(), dialog_factory=lambda p, r: None)
+    assert res.db_path == bookmarked          # bookmark path wins over stale path
+    assert res.location is loc                  # carried for the session
+
+
+def test_sandbox_bookmark_released_on_recovery_swap():
+    """If the bookmarked file can't be opened and the user picks another, the
+    bookmark's security-scoped access is released."""
+    other = _tmpfile("other.mfl")
+    loc = _FakeLocation(_tmpfile("gone.mfl"))
+    with _Patch(
+        last_db_path=lambda: Path("/stale/old/path.mfl"),
+        begin_main_file_access=lambda: loc,
+        cloud=_fake_cloud([False]),
+        _opens=lambda p: True,
+        remember_last_db=lambda p: None,
+    ):
+        dlg = _Dialog([_choice(open_other=True, path=other)])
+        res = launch.resolve_database(_args(), dialog_factory=lambda p, r: dlg)
+    assert res.db_path == other
+    assert loc.stopped is True
 
 
 def test_no_pointer_uses_first_run_default():
@@ -166,6 +228,8 @@ def test_no_pointer_uses_first_run_default():
     ):
         res = launch.resolve_database(_args(), dialog_factory=lambda p, r: None)
     assert res.db_path == fresh and res.seed_if_empty is True
+    # Flagged so the caller can offer the sandbox first-run folder picker (ADR-125).
+    assert res.first_run_default is True
 
 
 def test_legacy_used_only_when_pointer_absent():
@@ -176,6 +240,22 @@ def test_legacy_used_only_when_pointer_absent():
     ):
         res = launch.resolve_database(_args(), dialog_factory=lambda p, r: None)
     assert res.db_path == legacy and res.seed_if_empty is False
+
+
+def test_sandboxed_skips_legacy_cwd_uses_first_run():
+    """ADR-125: under the sandbox the cwd dev file (mfl_dev.mfl) is unreadable, so
+    a first launch with no pointer goes to the first-run default, not the legacy
+    cwd file — even when one exists."""
+    legacy = _tmpfile("mfl_dev.mfl")
+    fresh = Path(tempfile.mkdtemp(prefix="mfl_launch_")) / "MyFinancialLife.mfl"
+    with _Patch(
+        last_db_path=lambda: None,
+        sandbox=SimpleNamespace(is_sandboxed=lambda: True),
+        LEGACY_DB_CANDIDATES=[legacy],
+        first_run_default_path=lambda: fresh,
+    ):
+        res = launch.resolve_database(_args(), dialog_factory=lambda p, r: None)
+    assert res.db_path == fresh and res.seed_if_empty is True
 
 
 def test_explicit_db_present_used():
