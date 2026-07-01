@@ -4827,17 +4827,19 @@ class Repository:
         include_uncategorised: bool = True,
         payee_ids: Optional[list[int]] = None,
     ) -> list[dict]:
-        """Outflow spending per (bucket, category_id) over a date range.
+        """Net spending per (bucket, category_id) over a date range.
 
-        v1 uses a **strict outflow** definition: only transactions whose
-        amount is negative on a `kind='expense'` category contribute. This
-        keeps the chart's bars unambiguously positive and avoids the
-        "Uncategorised has £20k of income misclassified as expense" trap
-        (ADR-014 wrong-bucket risk, ADR-018 §spending semantics).
-
-        Refund handling — where a positive amount on an expense category
-        reduces the bucket — is deferred to the future Cash Flow report,
-        which interprets signed amounts directly.
+        **Net expense** definition (ADR-129): every ``kind='expense'`` line
+        contributes its **signed** amount, so a positive amount (a refund /
+        reimbursement) *reduces* the category's spend — ``SUM(-amount)`` over
+        all of the category's lines in the bucket. A category whose refunds
+        meet or exceed its outflows for the bucket nets ``≤ 0`` and is
+        **clamped to £0** (dropped): a stacked bar can't draw a negative
+        segment, and the returned pence stay unambiguously ``> 0``. This
+        matches the Income & Expense / Sankey / Payee reports, which share the
+        definition, and reconciles with a category drill-down (net of refunds).
+        Income misclassified as an expense category no longer inflates a bar —
+        as a positive amount it now *reduces* the (already-clamped) net.
 
         ``payee_ids``, when supplied non-empty, narrows the result to
         transactions whose payee is in the set (ADR-039 saved-report
@@ -4899,20 +4901,25 @@ class Repository:
             f"JOIN category c ON c.id = t.category_id "
             f"WHERE t.posted_date BETWEEN ? AND ? "
             f"  AND c.kind = 'expense' "
-            f"  AND t.amount < 0 "  # strict outflow — see docstring
+            # Net expense (ADR-129): all signs — a positive line (refund)
+            # reduces the category's spend. Net-negative categories are
+            # clamped below.
             f"  {filter_sql} "
             f"GROUP BY bucket, t.category_id "
             f"ORDER BY bucket"
         )
         cur = self._conn.execute(sql, params)
-        return [
-            {
+        out: list[dict] = []
+        for r in cur:
+            net = int(r["spending_pence"])
+            if net <= 0:
+                continue  # net refund/zero → £0 in the stack (ADR-129)
+            out.append({
                 "bucket": r["bucket"],
                 "category_id": int(r["category_id"]),
-                "spending_pence": int(r["spending_pence"]),
-            }
-            for r in cur
-        ]
+                "spending_pence": net,
+            })
+        return out
 
     def income_aggregates(
         self,
@@ -4929,12 +4936,13 @@ class Repository:
         income-side mirror of :meth:`spending_aggregates` (ADR-088, Income
         Over Time report).
 
-        Uses the symmetric **strict inflow** definition: only transactions
-        whose amount is positive on a ``kind='income'`` category contribute,
-        so the chart's bars are unambiguously positive and a negative
-        correction on an income category doesn't flip a bar negative (the
-        mirror of the strict-outflow rule documented on
-        :meth:`spending_aggregates`).
+        Uses a **strict inflow** definition: only transactions whose amount is
+        positive on a ``kind='income'`` category contribute, so the chart's
+        bars are unambiguously positive and a negative correction on an income
+        category doesn't flip a bar negative. Note the asymmetry (ADR-129): the
+        expense side (:meth:`spending_aggregates`) now *nets* refunds rather
+        than counting strict outflows, because reimbursements are an
+        expense-side workflow; the income side keeps the strict rule.
 
         ``include_uncategorised`` is accepted for signature parity with
         ``spending_aggregates`` but is effectively inert here: the reserved
@@ -5087,7 +5095,7 @@ class Repository:
 
         A trade moves cash *within* the portfolio (cash ⇄ securities), so it is
         neither spending nor income — but a Buy is ``amount < 0`` on the
-        Uncategorised (``kind='expense'``) category, so the strict-outflow rule
+        Uncategorised (``kind='expense'``) category, so the expense rule
         would otherwise miscount it as spending (and, having no payee, dump it
         into the Payee report's "(No payee)" bucket). Filters by **txn id** —
         the split-unrolled ``txn_category_line`` view exposes ``txn_id`` but not
@@ -5115,15 +5123,16 @@ class Repository:
         display_currency: Optional[str] = None,
         include_transfers: bool = False,
     ) -> dict:
-        """Outflow spending per **canonical payee** over a date range
+        """Net spending per **canonical payee** over a date range
         (ADR-066 / Arc E, E2 — Payee report).
 
-        Uses the same **strict-outflow** definition as
-        :meth:`spending_aggregates`: only ``kind='expense'`` categories with
-        ``amount < 0`` contribute, so the bars are unambiguously positive and
-        income / refunds never leak in. Reads the split-unrolled
-        ``txn_category_line`` view (ADR-051) so a split lands on each line's
-        own category.
+        Uses the same **net-expense** definition as
+        :meth:`spending_aggregates` (ADR-129): every ``kind='expense'`` line
+        contributes its signed amount, so a refund / reimbursement reduces the
+        payee's spend; a payee whose refunds meet or exceed its outflows nets
+        ``≤ 0`` and is **clamped to £0** (dropped), keeping bars unambiguously
+        positive. Reads the split-unrolled ``txn_category_line`` view (ADR-051)
+        so a split lands on each line's own category.
 
         Aliases are rolled up to their canonical payee (ADR-028/029) via
         ``COALESCE(p.canonical_id, p.id)`` — "AMZN" and "Amazon UK" count as
@@ -5151,8 +5160,7 @@ class Repository:
         """
         clauses = [
             "t.posted_date BETWEEN ? AND ?",
-            "c.kind = 'expense'",
-            "t.amount < 0",
+            "c.kind = 'expense'",  # net of refunds (ADR-129) — all signs
         ]
         params: list = [date_from, date_to]
         acc = list(account_ids) if account_ids else []
@@ -5211,7 +5219,10 @@ class Repository:
                 payees[canon_id] = entry
             entry["spending_pence"] += pence
             entry["txn_count"] += count
-        return {"payees": list(payees.values()), "unconverted": unconverted}
+        # Clamp net-refund payees to £0 (drop) — a payee whose refunds exceed
+        # its outflows nets ≤ 0 and can't be a positive bar (ADR-129).
+        kept = [e for e in payees.values() if e["spending_pence"] > 0]
+        return {"payees": kept, "unconverted": unconverted}
 
     def category_payee_matrix(
         self,
@@ -5222,12 +5233,14 @@ class Repository:
         display_currency: Optional[str] = None,
         include_transfers: bool = False,
     ) -> dict:
-        """Outflow spending per **(category, canonical payee)** cell over a
+        """Net spending per **(category, canonical payee)** cell over a
         date range (ADR-068 / Arc E, E3 — Category & Payee report).
 
-        Same **strict-outflow** definition as :meth:`spending_aggregates` /
-        :meth:`payee_spending_aggregates` (``kind='expense'`` and
-        ``amount < 0``), over the split-unrolled ``txn_category_line`` view
+        Same **net-expense** definition as :meth:`spending_aggregates` /
+        :meth:`payee_spending_aggregates` (ADR-129): every ``kind='expense'``
+        line contributes its signed amount (a refund reduces the cell), and a
+        cell that nets ``≤ 0`` is **clamped to £0** (dropped). Over the
+        split-unrolled ``txn_category_line`` view
         (ADR-051). ``category_id`` is the transaction's **leaf** category —
         the caller rolls it up to the budget-line level
         (``category_group_map``) and pivots either dimension. The payee is
@@ -5247,8 +5260,7 @@ class Repository:
         """
         clauses = [
             "t.posted_date BETWEEN ? AND ?",
-            "c.kind = 'expense'",
-            "t.amount < 0",
+            "c.kind = 'expense'",  # net of refunds (ADR-129) — all signs
         ]
         params: list = [date_from, date_to]
         acc = list(account_ids) if account_ids else []
@@ -5305,7 +5317,10 @@ class Repository:
                 cells[key] = cell
             cell["spending_pence"] += pence
             cell["txn_count"] += count
-        return {"cells": list(cells.values()), "unconverted": unconverted}
+        # Clamp net-refund cells to £0 (drop) — a (category, payee) cell whose
+        # refunds exceed its outflows nets ≤ 0 (ADR-129).
+        kept = [c for c in cells.values() if c["spending_pence"] > 0]
+        return {"cells": kept, "unconverted": unconverted}
 
     def sankey_category_totals(
         self, *, date_from: str, date_to: str,
@@ -5317,8 +5332,9 @@ class Repository:
         report (ADR-056).
 
         Income = inflows (``amount > 0``) on ``kind='income'`` categories;
-        expense = outflows (``amount < 0``) on ``kind='expense'`` categories
-        (strict, matching ``spending_aggregates`` semantics). Transfers
+        expense = **net** of all signed amounts on ``kind='expense'``
+        categories (ADR-129: a refund reduces the category; a category that
+        nets ≤ 0 is dropped), matching ``spending_aggregates``. Transfers
         (``kind='transfer'``) are excluded entirely — they move money between
         the owner's own accounts and are neither income nor expense. Reads the
         split-unrolled ``txn_category_line`` view (ADR-051), so a split lands on
@@ -5352,7 +5368,7 @@ class Repository:
         clauses = [
             "t.posted_date BETWEEN ? AND ?",
             "( (c.kind = 'income'  AND t.amount > 0) "
-            "  OR (c.kind = 'expense' AND t.amount < 0) )",
+            "  OR c.kind = 'expense' )",  # expense: net of refunds (ADR-129)
         ]
         params: list = [date_from, date_to]
         acc = list(account_ids) if account_ids else []
@@ -5397,6 +5413,9 @@ class Repository:
                 pence = int(converted.to_integral_value(rounding=ROUND_HALF_UP))
             bucket = income if r["kind"] == "income" else expense
             bucket[cid] = bucket.get(cid, 0) + pence
+        # Net-refund expense categories clamp to £0 (drop) — ADR-129. Income
+        # stays as-is (strict inflow, always ≥ 0).
+        expense = {cid: p for cid, p in expense.items() if p > 0}
         return {"income": income, "expense": expense, "unconverted": unconverted}
 
     def income_expense_series(
@@ -5414,9 +5433,11 @@ class Repository:
         report (ADR-064 / Arc E, E1).
 
         Income = inflows (``amount > 0``) on ``kind='income'`` categories;
-        expense = outflows (``amount < 0``) on ``kind='expense'`` categories
-        — the same kind-based definition as the Sankey report
-        (``sankey_category_totals``). ``kind='transfer'`` categories are
+        expense = **net** of all signed amounts per ``kind='expense'``
+        category, each floored at £0 (ADR-129: a refund reduces its category;
+        a category netting ≤ 0 contributes nothing) — the same definition as
+        the Sankey and Spending reports, so the expense bar reconciles with
+        Spending Over Time. ``kind='transfer'`` categories are
         never income or expense, so they're excluded by the kind rule.
         Reads the split-unrolled ``txn_category_line`` view (ADR-051) so a
         split lands on each line's own category/kind.
@@ -5470,7 +5491,7 @@ class Repository:
         clauses = [
             "t.posted_date BETWEEN ? AND ?",
             "( (c.kind = 'income'  AND t.amount > 0) "
-            "  OR (c.kind = 'expense' AND t.amount < 0) )",
+            "  OR c.kind = 'expense' )",  # expense: net of refunds (ADR-129)
         ]
         params: list = [date_from, date_to]
         acc = list(account_ids) if account_ids else []
@@ -5490,6 +5511,10 @@ class Repository:
         params.extend(move_params)
 
         cur = self._conn.execute(
+            # Group by category too (ADR-129) so each expense category's net can
+            # be floored at £0 before summing — matching the per-category clamp
+            # in spending_aggregates, so the Income & Expense expense bar equals
+            # the Spending Over Time total for the same scope.
             f"SELECT {bucket_expr} AS bucket, c.kind AS kind, "
             f"  a.currency AS ccy, "
             f"  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
@@ -5498,13 +5523,16 @@ class Repository:
             f"JOIN category c ON c.id = t.category_id "
             f"JOIN account a ON a.id = t.account_id "
             f"WHERE " + " AND ".join(clauses) + " "
-            f"GROUP BY bucket, c.kind, a.currency",
+            f"GROUP BY bucket, c.kind, t.category_id, a.currency",
             params,
         )
         target_ccy = (display_currency or "").strip().upper()
         for r in cur:
             bucket = r["bucket"]
             pence = int(r["pence"])
+            # Net-refund expense category → £0 (ADR-129); income is strict (>0).
+            if r["kind"] == "expense" and pence <= 0:
+                continue
             ccy = (r["ccy"] or "").strip().upper()
             if target_ccy and ccy and ccy != target_ccy:
                 converted, _fb = self.convert_amount(
