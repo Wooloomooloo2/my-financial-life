@@ -24,7 +24,6 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QPainter,
-    QPainterPath,
     QPen,
 )
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
@@ -100,7 +99,6 @@ class IncomeExpenseChart(QWidget):
     _AXIS_LABEL_BAND = 22      # x-axis labels
     _LEGEND_BAND   = 26
     _BAR_SLOT_FILL = 0.60
-    _BAR_RADIUS_MAX = 5.0
 
     # Left-click on an income / expense bar → (kind, bucket_key) for the
     # drill-down (ADR-083). The window resolves the key to a date range.
@@ -291,11 +289,12 @@ class IncomeExpenseChart(QWidget):
             return
         slot_w = chart.width() / n
         bar_w = slot_w * self._BAR_SLOT_FILL
-        radius = min(self._BAR_RADIUS_MAX, bar_w / 3)
+        radius = _ch.bar_corner_radius(bar_w)  # shared, consistent (ADR-128)
         zero_y = axis.zero_y(chart)
 
         income_color = QColor(_COLOR_INCOME)
         expense_color = QColor(_COLOR_EXPENSE)
+        bg = QColor(_ch.chart_surface())
         painter.setPen(Qt.NoPen)
         for i, b in enumerate(self._buckets):
             # Income and expense share one column centred on the slot — the
@@ -303,61 +302,22 @@ class IncomeExpenseChart(QWidget):
             # zero baseline (like BalanceFlowChart), rather than offset
             # side-by-side.
             x_left = chart.left() + (i + 0.5) * slot_w - bar_w / 2
-            # Income bar — grows up from zero, rounded top corners.
+            # Income bar — grows up from zero, rounded top (outer) corners.
             if b.income > 0 and axis.top > 0:
                 y_top = axis.y_to_px(float(b.income), chart)
                 rect = QRectF(x_left, y_top, bar_w, zero_y - y_top)
-                self._draw_rounded_rect(
-                    painter, rect, income_color, radius,
-                    round_top=True, round_bottom=False,
-                )
+                painter.fillRect(rect, income_color)
+                _ch.round_bar_corners(painter, rect, radius, bg, top=True)
                 self._hitmap.append((rect, "income", i))
-            # Expense bar — grows down from zero, same column, rounded bottom.
+            # Expense bar — grows down from zero, rounded bottom (outer) corners.
             if b.expense > 0 and axis.bottom > 0:
                 y_bottom = axis.y_to_px(-float(b.expense), chart)
                 rect = QRectF(x_left, zero_y, bar_w, y_bottom - zero_y)
-                self._draw_rounded_rect(
-                    painter, rect, expense_color, radius,
-                    round_top=False, round_bottom=True,
+                painter.fillRect(rect, expense_color)
+                _ch.round_bar_corners(
+                    painter, rect, radius, bg, top=False, bottom=True,
                 )
                 self._hitmap.append((rect, "expense", i))
-
-    @staticmethod
-    def _draw_rounded_rect(
-        painter: QPainter,
-        rect: QRectF,
-        colour: QColor,
-        radius: float,
-        *,
-        round_top: bool,
-        round_bottom: bool,
-    ) -> None:
-        if rect.height() < radius * 1.4 or not (round_top or round_bottom):
-            painter.fillRect(rect, colour)
-            return
-        path = QPainterPath()
-        if round_top and not round_bottom:
-            path.moveTo(rect.left(), rect.bottom())
-            path.lineTo(rect.left(), rect.top() + radius)
-            path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
-            path.lineTo(rect.right() - radius, rect.top())
-            path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
-            path.lineTo(rect.right(), rect.bottom())
-            path.closeSubpath()
-        elif round_bottom and not round_top:
-            path.moveTo(rect.left(), rect.top())
-            path.lineTo(rect.right(), rect.top())
-            path.lineTo(rect.right(), rect.bottom() - radius)
-            path.quadTo(rect.right(), rect.bottom(),
-                        rect.right() - radius, rect.bottom())
-            path.lineTo(rect.left() + radius, rect.bottom())
-            path.quadTo(rect.left(), rect.bottom(),
-                        rect.left(), rect.bottom() - radius)
-            path.closeSubpath()
-        else:
-            painter.fillRect(rect, colour)
-            return
-        painter.fillPath(path, colour)
 
     def _paint_zero_baseline(
         self, painter: QPainter, chart: QRectF, axis: _AxisRange,

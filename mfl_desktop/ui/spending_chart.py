@@ -27,7 +27,6 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QPainter,
-    QPainterPath,
     QPen,
 )
 from PySide6.QtWidgets import QApplication, QToolTip, QWidget
@@ -264,7 +263,7 @@ class SpendingChart(QWidget):
 
         slot_w = chart.width() / n
         bar_w = slot_w * self._BAR_SLOT_FILL
-        radius = min(6.0, bar_w / 4)
+        radius = _ch.bar_corner_radius(bar_w)  # shared, consistent (ADR-128)
 
         painter.setPen(Qt.NoPen)
         for i, bucket in enumerate(self._buckets):
@@ -282,6 +281,7 @@ class SpendingChart(QWidget):
 
             running = 0.0
             top_segment_index_in_list = len(seg_values) - 1
+            bar_top_y = chart.bottom()
             for seg_pos, (group_index, pounds) in enumerate(seg_values):
                 seg_bottom = chart.bottom() - (running / ymax) * chart.height()
                 seg_top = chart.bottom() - ((running + pounds) / ymax) * chart.height()
@@ -289,10 +289,20 @@ class SpendingChart(QWidget):
 
                 colour = colour_for(group_index)
                 is_top = seg_pos == top_segment_index_in_list
-                self._draw_bar_segment(painter, rect, colour, is_top, radius)
+                self._draw_bar_segment(painter, rect, colour, is_top)
+                if is_top:
+                    bar_top_y = seg_top
 
                 self._segment_hitmap.append((rect, group_index, bucket, pounds))
                 running += pounds
+
+            # Round the whole bar's top corners once — so a thin top segment
+            # rounds exactly like a tall one, consistently across every bar and
+            # report (ADR-128). Carve the full bar rect, not the top segment.
+            bar_rect = QRectF(x_left, bar_top_y, bar_w, chart.bottom() - bar_top_y)
+            _ch.round_bar_corners(
+                painter, bar_rect, radius, QColor(_ch.chart_surface()),
+            )
 
     def _draw_bar_segment(
         self,
@@ -300,21 +310,10 @@ class SpendingChart(QWidget):
         rect: QRectF,
         colour: QColor,
         is_top: bool,
-        radius: float,
     ) -> None:
-        if is_top and rect.height() > radius * 1.4:
-            # Rounded top corners only on the topmost segment.
-            path = QPainterPath()
-            path.moveTo(rect.left(), rect.bottom())
-            path.lineTo(rect.left(), rect.top() + radius)
-            path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
-            path.lineTo(rect.right() - radius, rect.top())
-            path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
-            path.lineTo(rect.right(), rect.bottom())
-            path.closeSubpath()
-            painter.fillPath(path, colour)
-        else:
-            painter.fillRect(rect, colour)
+        # Every segment is a plain rect; the bar's top corners are rounded once
+        # by the caller (ADR-128), so no per-segment rounding is needed.
+        painter.fillRect(rect, colour)
 
         # 1px separator between stacked segments (the plot background colour).
         if not is_top:

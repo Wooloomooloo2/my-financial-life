@@ -66,6 +66,7 @@ class IncomeBarChart(QWidget):
         grid = QColor(chart_helpers.chart_grid())
         ink = QColor(chart_helpers.chart_ink())
         accent = QColor(chart_helpers.chart_accent())
+        bg = QColor(chart_helpers.chart_surface())
         sym = self._symbol or "£"
 
         # ── y gridlines + value labels ──
@@ -91,7 +92,12 @@ class IncomeBarChart(QWidget):
             cx = left + slot * (i + 0.5)
             bh = (val / axis_max) * plot_h if val > 0 else 0.0
             bar_top = top + plot_h - bh
-            p.fillRect(QRectF(cx - bar_w / 2, bar_top, bar_w, bh), accent)
+            bar_rect = QRectF(cx - bar_w / 2, bar_top, bar_w, bh)
+            p.fillRect(bar_rect, accent)
+            # Rounded top corners, consistent with the other report bars (ADR-128).
+            chart_helpers.round_bar_corners(
+                p, bar_rect, chart_helpers.bar_corner_radius(bar_w), bg,
+            )
             # Value label above each non-zero bar — the month's income amount
             # (income is usually quarterly, so only a few months are labelled).
             if val > 0:

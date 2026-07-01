@@ -19,7 +19,8 @@ from mfl_desktop.ui import tokens
 
 import math
 
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 # Stable stack colours — indexed by position in the caller's group list.
@@ -97,6 +98,76 @@ def chart_tooltip_ink() -> str:
 def chart_track() -> str:
     """Faint full-width track behind a bar (e.g. the payee chart)."""
     return tokens.c("surface_alt")
+
+
+# ── consistent rounded bar corners (ADR-128) ─────────────────────────────────
+# One radius + one routine so every report bar curves identically — stacked or
+# single-colour, a tall bar or a thin stacked cap. We *carve* the corners to the
+# plot background rather than drawing a rounded fill, which:
+#   - composes over an already-painted stack of segments without needing each
+#     segment's colour (the top cap may be any colour, or several);
+#   - works at ANY height — a per-segment rounded path can't round a cap thinner
+#     than the radius, which is exactly why the old code fell back to a square
+#     top and looked inconsistent from bar to bar;
+#   - stays crisp under antialiasing (a filled arc, not a 1-bit clip mask).
+
+BAR_CORNER_RADIUS = 6.0  # px — the single rounded-corner radius for report bars
+
+
+def bar_corner_radius(bar_w: float) -> float:
+    """Rounded-corner radius for a vertical report bar of pixel width ``bar_w``:
+    the shared constant, clamped so a narrow bar never over-rounds."""
+    return max(0.0, min(BAR_CORNER_RADIUS, bar_w / 3.0))
+
+
+def round_bar_corners(
+    painter: QPainter,
+    rect: QRectF,
+    radius: float,
+    bg: QColor,
+    *,
+    top: bool = True,
+    bottom: bool = False,
+) -> None:
+    """Give a just-drawn bar ``rect`` rounded corners by filling its corner
+    wedges with the plot background ``bg``.
+
+    ``top`` / ``bottom`` pick which end to round — a vertical bar rounds its
+    outer end (top for an up-bar, bottom for a down-bar). Call it *after*
+    painting the bar (or, for a stack, after all its segments), passing the
+    full bar rect so the radius reads the same on every bar. No-op for a
+    non-positive radius or a degenerate rect."""
+    r = min(radius, rect.width() / 2.0, rect.height())
+    if r <= 0:
+        return
+    painter.setPen(Qt.NoPen)
+    left, right = rect.left(), rect.right()
+    if top:
+        t = rect.top()
+        for corner in (
+            ((left, t), (left, t + r), (left + r, t)),          # top-left
+            ((right, t), (right - r, t), (right, t + r)),       # top-right
+        ):
+            (sx, sy), (lx, ly), (ex, ey) = corner
+            path = QPainterPath()
+            path.moveTo(sx, sy)
+            path.lineTo(lx, ly)
+            path.quadTo(sx, sy, ex, ey)
+            path.closeSubpath()
+            painter.fillPath(path, bg)
+    if bottom:
+        b = rect.bottom()
+        for corner in (
+            ((left, b), (left, b - r), (left + r, b)),          # bottom-left
+            ((right, b), (right - r, b), (right, b - r)),       # bottom-right
+        ):
+            (sx, sy), (lx, ly), (ex, ey) = corner
+            path = QPainterPath()
+            path.moveTo(sx, sy)
+            path.lineTo(lx, ly)
+            path.quadTo(sx, sy, ex, ey)
+            path.closeSubpath()
+            painter.fillPath(path, bg)
 
 
 def nice_ticks(vmax: float, target_count: int = 5) -> tuple[float, float]:
