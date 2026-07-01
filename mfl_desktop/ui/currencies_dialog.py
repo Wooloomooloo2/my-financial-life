@@ -51,6 +51,7 @@ from mfl_desktop.db.repository import Repository
 from mfl_desktop.fx import FxFetchError, refresh_latest_into
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.date_widgets import make_date_edit
+from mfl_desktop.ui.secret_field import LockableSecretField
 
 
 _OXR_SIGNUP_URL = "https://openexchangerates.org/signup/free"
@@ -90,14 +91,16 @@ class CurrenciesDialog(QDialog):
         prov_layout = QVBoxLayout(provider_box)
 
         form = QFormLayout()
-        self._key_edit = QLineEdit()
-        self._key_edit.setPlaceholderText(
-            "Paste your free app_id here (see openexchangerates.org/signup/free)"
+        # Locked once an app_id is stored so it can't be edited by accident;
+        # the Change button unlocks it (ADR-127). ``_key_edit`` stays pointed at
+        # the inner line edit so the refresh/save handlers read it unchanged.
+        self._key_field = LockableSecretField(
+            placeholder="Paste your free app_id here (see openexchangerates.org/signup/free)",
+            value=self._repo.get_setting("oxr_api_key") or "",
+            change_tooltip="Unlock the API-key field to replace your app_id.",
         )
-        self._key_edit.setEchoMode(QLineEdit.Password)
-        existing_key = self._repo.get_setting("oxr_api_key") or ""
-        self._key_edit.setText(existing_key)
-        form.addRow("API key:", self._key_edit)
+        self._key_edit = self._key_field.line_edit
+        form.addRow("API key:", self._key_field)
         prov_layout.addLayout(form)
 
         disclaimer = QLabel(

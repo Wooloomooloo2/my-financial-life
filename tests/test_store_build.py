@@ -44,7 +44,12 @@ def _set_build_info(module_or_none):
     prior_attr = getattr(_pkg, "_build_info", None)
 
     if module_or_none is None:
-        sys.modules.pop(_BUILD_INFO, None)
+        # Setting the sys.modules entry to None (not popping it) makes
+        # ``from mfl_desktop import _build_info`` raise ImportError instead of
+        # re-reading a real, gitignored ``_build_info.py`` off disk — which a
+        # local store build (``build_mas.sh --store``) leaves behind with
+        # STORE_BUILD=True and would otherwise leak back into "no build info".
+        sys.modules[_BUILD_INFO] = None
         if had_attr:
             delattr(_pkg, "_build_info")
     else:

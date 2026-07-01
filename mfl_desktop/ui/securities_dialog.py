@@ -49,6 +49,7 @@ from mfl_desktop.ui.merge_securities_dialog import MergeSecuritiesDialog
 from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.date_widgets import make_date_edit
+from mfl_desktop.ui.secret_field import LockableSecretField
 
 
 def _fmt_refresh_time(iso_ts: Optional[str]) -> str:
@@ -80,13 +81,16 @@ class SecuritiesDialog(QDialog):
         prov_layout = QVBoxLayout(provider_box)
 
         form = QFormLayout()
-        self._key_edit = QLineEdit()
-        self._key_edit.setPlaceholderText(
-            "Paste your free Tiingo API token (see tiingo.com — free signup)"
+        # Locked once a token is stored so it can't be edited by accident;
+        # the Change button unlocks it (ADR-127). ``_key_edit`` stays pointed at
+        # the inner line edit so the refresh/save handlers read it unchanged.
+        self._key_field = LockableSecretField(
+            placeholder="Paste your free Tiingo API token (see tiingo.com — free signup)",
+            value=self._repo.get_setting("tiingo_api_key") or "",
+            change_tooltip="Unlock the API-key field to replace your Tiingo token.",
         )
-        self._key_edit.setEchoMode(QLineEdit.Password)
-        self._key_edit.setText(self._repo.get_setting("tiingo_api_key") or "")
-        form.addRow("API key:", self._key_edit)
+        self._key_edit = self._key_field.line_edit
+        form.addRow("API key:", self._key_field)
         prov_layout.addLayout(form)
 
         disclaimer = QLabel(
