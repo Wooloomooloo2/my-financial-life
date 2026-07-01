@@ -111,6 +111,41 @@ def _seed_starter_db(repo: Repository) -> None:
     repo.commit()
 
 
+def _open_repository_with_fallback(db_path: Path, first_run_default: bool):
+    """Open (creating if needed) the resolved database, falling back to the app
+    container if a sandbox first-run location the user picked can't be written
+    (ADR-125).
+
+    A directory chosen via the powerbox should be writable, but if the grant
+    doesn't extend to creating the file (or SQLite's WAL sidecars), creating the
+    Repository raises ``sqlite3.OperationalError: unable to open database file``.
+    Rather than crash, log the path, warn the user, and use the always-writable
+    container default so the app still launches."""
+    import logging
+    log = logging.getLogger("mfl")
+    log.info(
+        "Opening database at %s (first_run_default=%s sandboxed=%s)",
+        db_path, first_run_default, sandbox.is_sandboxed(),
+    )
+    try:
+        return Repository(db_path)
+    except Exception as e:
+        fallback = launch.first_run_default_path()
+        if Path(db_path) == fallback:
+            raise
+        log.warning("Could not open DB at %s (%s) — falling back to %s",
+                    db_path, e, fallback)
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            None,
+            "Couldn't use that location",
+            "My Financial Life couldn't create your data file in the folder you "
+            "chose, so it's using its private app folder for now. You can move "
+            "it later from Manage Data ▸ Locations.",
+        )
+        return Repository(fallback)
+
+
 def _prompt_first_run_location(default_path: Path) -> Path:
     """Sandbox first run (ADR-125): ask the user which folder to keep their new
     ``.mfl`` in, so it lives somewhere visible and backup-able rather than the
@@ -135,6 +170,8 @@ def _prompt_first_run_location(default_path: Path) -> Path:
         "Choose a folder for your data file",
         str(Path.home() / "Documents"),
     )
+    import logging
+    logging.getLogger("mfl").info("First-run folder picker returned: %r", chosen)
     if not chosen:
         return default_path
     return Path(chosen) / launch.DEFAULT_DB_FILENAME
@@ -149,6 +186,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--account-iri",
                         help="Open this account (default: first in DB)")
     args = parser.parse_args(argv)
+
+    # ADR-126: point OpenSSL at certifi's CA bundle before any HTTPS call.
+    # In the frozen macOS bundle the default trust store does not resolve, so
+    # without this every Tiingo/FX/feed refresh fails cert verification
+    # ("unable to get local issuer certificate"). No-op in dev / on Windows.
+    from mfl_desktop.net_certs import ensure_ca_bundle
+    ensure_ca_bundle()
 
     app = QApplication(sys.argv)
     # Set before any QStandardPaths lookup — it is what makes AppDataLocation
@@ -203,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
     # first-run default, or a file the user picked in recovery), so we always
     # record it as the file to reopen next launch. File ▸ Open / Locations update
     # it at runtime. Repository() bootstraps the schema + mkdirs the parent.
-    repo = Repository(db_path)
+    repo = _open_repository_with_fallback(db_path, res.first_run_default)
+    db_path = repo.db_path  # may differ if a sandbox location fell back
     remember_last_db(db_path)
 
     # ADR-076: apply the persisted light/dark theme now the DB is open (before

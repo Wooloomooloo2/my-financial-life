@@ -31,6 +31,10 @@ datas = [
     (str(ROOT / "assets" / "icons"), "assets/icons"),
 ]
 datas += collect_data_files("ofxtools")
+# certifi's cacert.pem — the TLS trust store the frozen app points OpenSSL at
+# via SSL_CERT_FILE (ADR-126). Collect it explicitly so it is guaranteed to ship
+# (and stays shipped) rather than relying on transitive inclusion.
+datas += collect_data_files("certifi")
 
 # ── per-OS bundle icon ──────────────────────────────────────────────────────
 _icns = str(ROOT / "assets" / "icons" / "mfl.icns")
@@ -49,7 +53,7 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=datas,
-    hiddenimports=["ofxtools"],
+    hiddenimports=["ofxtools", "certifi"],  # certifi: TLS trust store (ADR-126)
     hookspath=[],
     runtime_hooks=[],
     # Trim the unused legacy v0.1 web stack + heavy optional libs that PyInstaller

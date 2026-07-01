@@ -63,10 +63,31 @@ All six sandbox/packaging increments are implemented + tested as of 2026-06-30. 
 - **First-run "choose a folder" UI step — DONE (2026-06-30).** `Resolution` gains a `first_run_default` flag set only on the unattended first-run-default branch (not `--db`, not a recovery pick). `__main__` adds `_prompt_first_run_location()` — shown over the splash, **only when `res.first_run_default and sandbox.is_sandboxed()`** — a brief info box then a folder picker (the macOS powerbox, which grants session read/write to the chosen folder); the new `.mfl` is created there and `remember_last_db` mints its security-scoped bookmark. Cancel falls back to the container default so a hesitant user still gets a working app. The dev / direct build is untouched (the `is_sandboxed()` guard skips the prompt → ADR-109 `~/Documents` default). Tests: `test_launch_resolution` 12/12 (now asserts `first_run_default` True for the default, False for a recovery pick); offscreen smoke of `_prompt_first_run_location` (pick → chosen-folder path; cancel → default).
 - **QA on a signed sandboxed build:** confirm report exports use a save panel (else add `files.downloads`), bookmark reopen across launches, snapshots/library in the container, FX/price/feeds over the network entitlement, and an App Store Connect listing.
 
+## Addendum (2026-06-30) — first real ad-hoc sandbox build: hardening + the iCloud/SQLite finding
+
+Building and running an actual **ad-hoc-signed sandboxed** app on the owner's Mac surfaced two things the plan didn't anticipate. Code changes below are in the working tree **but not yet committed** (the A–F arc was committed in `4761dfc`; these are follow-ups).
+
+**1. Local-build hardening (`packaging/build_mas.sh`).**
+- Added a **`--adhoc`** mode: signs with `codesign --sign -` + the sandbox entitlements (no Apple account), skips the `.pkg`/upload, and drops the result in `~/Applications`. This is how the sandbox is tested locally without enrolment — the OS enforces the sandbox for any signed app carrying `com.apple.security.app-sandbox`.
+- **iCloud xattr blocker:** the repo lives under iCloud-synced `~/Documents`, so PyInstaller's output carries `com.apple.FinderInfo` + `com.apple.fileprovider.fpfs#P` xattrs that the fileprovider **re-applies in place**, and `codesign` rejects them ("resource fork, Finder information, or similar detritus not allowed"). Fix: the script now **stages the `.app` to a local `$TMPDIR` dir**, `xattr -cr`s it there (where the strip sticks), signs inside-out, then places the result. Applies to the real MAS build too.
+
+**2. App robustness (`mfl_desktop/__main__.py`).** `_open_repository_with_fallback()` logs the resolved DB path and, if a sandbox first-run location can't be opened, **falls back to the container** with a user warning instead of crashing; `_prompt_first_run_location` logs the picked folder.
+
+**3. KEY FINDING — a live SQLite database cannot run on iCloud Drive under the sandbox.** Verified twice from the container log: the first-run picker pointed at the owner's iCloud `…/com~apple~CloudDocs/Banktivity Exports/` folder, and a later File ▸ Open targeted the real `mfl_dev_windows5.mfl` there (14 MB, fully downloaded — *not* evicted); both failed with `sqlite3.OperationalError: unable to open database file`, with **no sandbox-denial logged**. A **local** copy of the very same file opens fine (28 accounts). iCloud paths are fileprovider-managed; SQLite's WAL sidecar creation + POSIX file locking aren't permitted there under the sandbox even with the user-selected-file entitlement, and there is **no entitlement that fixes it** (the iCloud entitlement is for the app's *own* container, not a user's CloudDocs file). This is consistent with the general truth that a live SQLite/WAL DB on any cloud-synced folder risks corruption — the sandbox just turns the silent risk into a hard, early failure.
+
+**Consequence — the file-location sub-decision is RE-OPENED.** The "first-run choose a folder" step (built and working for a *local* folder) is, in practice, a trap for this owner: their `~/Documents`/`~/Desktop` are iCloud-synced and their real `.mfl` lives in iCloud, so the picker leads straight to a location SQLite can't use. The live working file must be **local**. Options now in front of the owner (not yet chosen):
+1. **Container by default** (local, WAL-safe, zero friction); iCloud holds only *exported* copies/snapshots; add "Reveal in Finder" + an explicit "import an existing file" flow that copies a chosen file into local storage. *(Recommended.)*
+2. **Keep the folder picker but detect & refuse cloud paths**, steering to a local folder.
+3. **Container default + optional local move** via Manage Data ▸ Locations (cloud paths blocked).
+
+This **supersedes the original "first-run choose a folder" decision** above for the iCloud case; the picker stays only if paired with cloud-path rejection (option 2/3). **Migration note:** to use existing data under the sandboxed app, the user keeps a **local** working copy and uses iCloud for backups — not the live file. For testing now, the owner's real file was copied into the container (`…/Containers/life.myfinancial.app/Data/Documents/mfl_dev_windows5.mfl`) and opened from there.
+
+**Still pending:** the owner's file-location choice (1/2/3), then wiring it + a clean "open/import an existing file" flow; and the account-gated signing/upload.
+
 ## Rejected alternatives (summary)
 
 - **Stay macOS-out-of-scope (ADR-123 as-is):** rejected by the owner's decision to pursue MAS now.
 - **Direct Developer-ID DMG instead of MAS:** the ADR-104/K1 scaffold already exists and needs no sandbox, but the owner chose the Store (handles trust, payment, tax, auto-update). Kept in-tree as a dev convenience only.
 - **MAS + direct DMG in parallel:** rejected — dual channels double the support/trust/update surface.
-- **Container-Documents default file:** rejected — invisible to the user; bad for a finance app.
+- **Container default file:** originally rejected as invisible/bad for a finance app — but **revisited by the 2026-06-30 addendum**: a live SQLite DB can't run on iCloud (where this owner's visible folders point), so a local container default is now the recommended option, paired with "Reveal in Finder" + export-to-iCloud for backups.
 - **Free + StoreKit IAP:** rejected — native integration cost for no benefit at a one-time price.

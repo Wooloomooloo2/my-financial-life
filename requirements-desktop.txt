@@ -13,13 +13,17 @@
 # is per-OS (no cross-compile) — see ADR-078.
 #
 # Versions pinned to what the app is developed and verified against. The
-# whole runtime surface is just three direct third-party packages — the FX
-# and security-price clients use stdlib `urllib` (no `requests`), and
-# everything else (sqlite3, decimal, csv, json, …) is the standard library.
+# runtime surface is four direct third-party packages — the FX and
+# security-price clients use stdlib `urllib` (no `requests`), and everything
+# else (sqlite3, decimal, csv, json, …) is the standard library. certifi is
+# data-only (a CA bundle), not an API dependency.
 
 PySide6==6.11.1        # Qt for Python — the entire UI + QSettings + QtCharts-free paintEvent charts
 cryptography==49.0.0   # Ed25519 offline license verification (ADR-079) + bank-feed credential crypto
 ofxtools==0.9.5        # OFX / QFX statement parsing + OFX Direct Connect (ADR-077); imported lazily at the import sites
+certifi==2025.10.5     # Mozilla CA bundle for TLS verification in the frozen app (ADR-126). The frozen
+                       # macOS bundle's OpenSSL has no working default trust store, so net_certs.py points
+                       # SSL_CERT_FILE at certifi.where() at startup. No-op in dev / on Windows.
 
 # macOS-only: security-scoped bookmarks for the App Sandbox / Mac App Store build
 # (ADR-125). Qt has no bookmark API, so mfl_desktop/sandbox.py drops to PyObjC.
