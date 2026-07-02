@@ -34,7 +34,7 @@ def _tx(repo, *, account_id, category_id, payee_id, amount):
     repo.insert_transaction(
         account_id=account_id, posted_date="2026-01-15",
         amount=Decimal(amount), payee_id=payee_id, category_id=category_id,
-        status="Reconciled", memo="", import_hash=None, import_batch_id=None,
+        status="reconciled", memo="", import_hash=None, import_batch_id=None,
     )
 
 

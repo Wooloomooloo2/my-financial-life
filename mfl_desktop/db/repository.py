@@ -18,6 +18,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
+from mfl_desktop import txn_status
 from mfl_desktop.account_types import AccountTypeSpec, by_key
 from mfl_desktop.db.money import decimal_to_pence, pence_to_decimal
 from mfl_desktop.db.schema import bootstrap
@@ -1478,7 +1479,7 @@ class Repository:
         posted_date: str,
         amount: Optional[Decimal] = None,
         extra: Optional[Decimal] = None,
-        status: str = "Cleared",
+        status: str = "matched",
     ) -> None:
         """Record one loan payment, split into principal + interest per the
         loan's track mode (ADR-095), through the existing transfer/split paths.
@@ -3912,7 +3913,7 @@ class Repository:
             "  AND t.amount = ? "
             "  AND t.posted_date BETWEEN ? AND ? "
             "  AND t.import_hash IS NULL "
-            "  AND t.status != 'Reconciled' "
+            "  AND t.status != 'reconciled' "
             "LIMIT 1",
             (account_id, decimal_to_pence(amount), d_minus, d_plus),
         ).fetchone()
@@ -4196,7 +4197,7 @@ class Repository:
             amount=pence_to_decimal(-line_pence),
             payee_id=partner_payee,
             category_id=category_id,
-            status="Pending",
+            status="pending",
             memo=memo or "",
             posted_date=posted_date,
             transfer_id=transfer_iri,
@@ -5643,7 +5644,7 @@ class Repository:
         return row["name"]
 
     def update_transaction_status(self, txn_id: int, status: str) -> None:
-        if status not in ("Pending", "Uncleared", "Cleared", "Reconciled"):
+        if not txn_status.is_valid(status):
             raise ValueError(f"Invalid status: {status!r}")
         self._conn.execute(
             "UPDATE txn SET status = ? WHERE id = ?", (status, txn_id),
@@ -5834,7 +5835,7 @@ class Repository:
                     (int(category_id), *txn_ids),
                 )
             if status is not self._UNSET:
-                if status not in ("Pending", "Uncleared", "Cleared", "Reconciled"):
+                if not txn_status.is_valid(status):
                     raise ValueError(f"Invalid status: {status!r}")
                 self._conn.execute(
                     f"UPDATE txn SET status = ? WHERE id IN ({placeholders})",
@@ -5968,7 +5969,7 @@ class Repository:
         amount: Decimal,                # positive magnitude in from-account currency
         category_id: int,
         memo: str = "",
-        status: str = "Pending",
+        status: str = "pending",
         to_amount: Optional[Decimal] = None,    # positive magnitude in to-account currency
         rate: Optional[Decimal] = None,         # quote per base (from → to)
         rate_source: Optional[str] = None,      # 'manual' | 'fx_rate' | 'derived'
@@ -6015,7 +6016,7 @@ class Repository:
             raise ValueError("Source and destination accounts must differ.")
         if amount <= 0:
             raise ValueError("Transfer amount must be greater than zero.")
-        if status not in ("Pending", "Uncleared", "Cleared", "Reconciled"):
+        if not txn_status.is_valid(status):
             raise ValueError(f"Invalid status: {status!r}")
         if to_amount is not None and to_amount <= 0:
             raise ValueError("to_amount must be greater than zero.")
@@ -6217,7 +6218,7 @@ class Repository:
                     (payee_id, *txn_ids),
                 )
             if status is not self._UNSET and status is not None:
-                if status not in ("Pending", "Uncleared", "Cleared", "Reconciled"):
+                if not txn_status.is_valid(status):
                     raise ValueError(f"Invalid status: {status!r}")
                 self._conn.execute(
                     f"UPDATE txn SET status = ? WHERE id IN ({placeholders})",
@@ -7727,13 +7728,13 @@ class Repository:
                 source_id = self._insert_transfer_half(
                     account_id=from_id, amount=-known_from_magnitude,
                     payee_id=payee_to, category_id=sched.category_id,
-                    status="Pending", memo=sched.memo,
+                    status="pending", memo=sched.memo,
                     posted_date=posted_date, transfer_id=transfer_iri,
                 )
                 self._insert_transfer_half(
                     account_id=to_id, amount=known_to_magnitude,
                     payee_id=payee_from, category_id=sched.category_id,
-                    status="Pending", memo=sched.memo,
+                    status="pending", memo=sched.memo,
                     posted_date=posted_date, transfer_id=transfer_iri,
                 )
                 self._insert_transfer_parent(
@@ -7751,7 +7752,7 @@ class Repository:
                     amount=amount,
                     payee_id=sched.payee_id,
                     category_id=sched.category_id,
-                    status="Pending",
+                    status="pending",
                     memo=sched.memo,
                     import_hash=None,
                     import_batch_id=None,
@@ -9484,7 +9485,7 @@ class Repository:
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
             "WHERE t.account_id = ? "
-            "  AND (t.status != 'Reconciled' OR t.statement_id = ?) "
+            "  AND (t.status != 'reconciled' OR t.statement_id = ?) "
             "ORDER BY t.posted_date ASC, t.id ASC",
             (account_id, sid),
         )
@@ -9504,11 +9505,11 @@ class Repository:
         ]
 
     def list_cleared_unreconciled_txns(self, account_id: int) -> list[int]:
-        """Txn ids on the account currently in 'Cleared' status — the
+        """Txn ids on the account currently in 'matched' status — the
         pre-tick set for "Automatically select Cleared Transactions"."""
         cur = self._conn.execute(
             "SELECT id FROM txn "
-            "WHERE account_id = ? AND status = 'Cleared' "
+            "WHERE account_id = ? AND status = 'matched' "
             "ORDER BY posted_date ASC, id ASC",
             (account_id,),
         )
@@ -9673,7 +9674,7 @@ class Repository:
     ) -> StatementRow:
         """Close (reconcile) a statement in one atomic step: persist the final
         ticked set (if ``ticked_ids`` is given), stamp every ticked row
-        ``status='Reconciled'`` + ``statement_id``, snapshot the residual into
+        ``status='reconciled'`` + ``statement_id``, snapshot the residual into
         ``closing_variance_pence``, and set ``status='reconciled'`` +
         ``reconciled_at``.
 
@@ -9698,7 +9699,7 @@ class Repository:
                 )
             # Stamp the linked rows Reconciled and point them at this statement.
             self._conn.execute(
-                "UPDATE txn SET status = 'Reconciled', statement_id = ? "
+                "UPDATE txn SET status = 'reconciled', statement_id = ? "
                 "WHERE id IN (SELECT txn_id FROM statement_txn "
                 "             WHERE statement_id = ?)",
                 (statement_id, statement_id),
@@ -9721,13 +9722,13 @@ class Repository:
 
     def reopen_statement(self, statement_id: int) -> StatementRow:
         """Reopen a closed statement for editing. Every linked row reverts to
-        ``'Cleared'`` and its ``statement_id`` is cleared; the tick set
+        ``'matched'`` and its ``statement_id`` is cleared; the tick set
         (``statement_txn``) is kept so rows show pre-ticked on resume. The
         statement goes back to ``status='open'`` with ``closing_variance``
         reset and ``reconciled_at`` cleared.
 
-        Note: rows that were Pending/Uncleared at reconcile time come back as
-        Cleared — accepted per ADR-040."""
+        Note: rows that were pending/cleared at reconcile time come back as
+        matched — accepted per ADR-040 (ADR-130 rename)."""
         stmt = self.get_statement(statement_id)
         if stmt is None:
             raise ValueError(f"No statement with id {statement_id}.")
@@ -9735,7 +9736,7 @@ class Repository:
             raise ValueError("Statement is not closed.")
         try:
             self._conn.execute(
-                "UPDATE txn SET status = 'Cleared', statement_id = NULL "
+                "UPDATE txn SET status = 'matched', statement_id = NULL "
                 "WHERE statement_id = ?",
                 (statement_id,),
             )
@@ -9755,12 +9756,12 @@ class Repository:
 
     def delete_statement(self, statement_id: int) -> None:
         """Delete a statement (history Delete… verb). Any rows currently
-        Reconciled to it revert to ``'Cleared'``; the statement and its tick
+        Reconciled to it revert to ``'matched'``; the statement and its tick
         rows are removed (``statement_txn`` cascades). No-op-safe if already
         gone."""
         try:
             self._conn.execute(
-                "UPDATE txn SET status = 'Cleared', statement_id = NULL "
+                "UPDATE txn SET status = 'matched', statement_id = NULL "
                 "WHERE statement_id = ?",
                 (statement_id,),
             )
@@ -9795,7 +9796,7 @@ class Repository:
         """True if the txn is reconciled **to an actual statement** — the gate
         for the "change anyway?" confirm on inline edits / split open.
 
-        Requires a non-null ``statement_id``, not just ``status='Reconciled'``:
+        Requires a non-null ``statement_id``, not just ``status='reconciled'``:
         the confirm warns that an edit "may put that statement out of balance",
         which is meaningless for a row that carries the Reconciled *status* but
         no statement. Banktivity-migrated data arrives exactly like that
@@ -9803,7 +9804,7 @@ class Repository:
         status-only check spuriously blocked editing those rows and their
         splits (ADR-040 amendment, 2026-06-19)."""
         row = self._conn.execute(
-            "SELECT 1 FROM txn WHERE id = ? AND status = 'Reconciled' "
+            "SELECT 1 FROM txn WHERE id = ? AND status = 'reconciled' "
             "AND statement_id IS NOT NULL",
             (txn_id,),
         ).fetchone()

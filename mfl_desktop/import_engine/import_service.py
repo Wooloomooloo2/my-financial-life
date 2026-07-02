@@ -10,7 +10,7 @@ Key differences from v0.1:
   testing trivial and aligns with how Qt windows will hold the service.
 - Categories are resolved into the hierarchical `category` table via
   Repository.find_or_create_category_path() rather than stuffed into memo.
-- Status enums are plain strings ('Cleared', 'Uncleared', ...) not mflx: IRIs.
+- Status enums are plain strings ('matched', 'cleared', ...) not mflx: IRIs (ADR-130).
 - Currency conversion to pence happens at the Repository boundary; this
   module operates in Decimal throughout.
 """
@@ -74,7 +74,7 @@ class ClassifiedTransaction:
     # drives the review dialog's default tick.
     match_is_manual: bool = True
     match_strength: str = ""
-    status_override: str = ""     # 'Cleared' | 'Reconciled' | 'Pending' | ''
+    status_override: str = ""     # 'matched' | 'reconciled' | 'pending' | '' (ADR-130)
     # Investment fields (ADR-043). `action` is "" for an ordinary cash row and
     # set ('Buy'/'Sell'/'Div'/…) for a QIF investment row; the rest carry the
     # security/quantity/price/commission through to the commit insert.
@@ -104,7 +104,7 @@ class PendingImport:
     duplicate_count: int = 0
     match_count: int = 0
     is_first_import: bool = True
-    suggested_status: str = "Cleared"
+    suggested_status: str = "matched"
     currency: str = "GBP"
     has_status_override: bool = False
     # Investment import (ADR-043). `securities` is the QIF !Type:Security master
@@ -289,7 +289,7 @@ class ImportService:
 
         is_investment = any(raw.get("action") for raw in raw_txns)
         first = not self._repo.account_has_transactions(acct.id)
-        suggested = "Cleared" if first else "Uncleared"
+        suggested = "matched" if first else "cleared"
 
         classified: list[ClassifiedTransaction] = []
         # Cash rows (non-investment, not an exact-hash duplicate) deferred to
@@ -514,7 +514,7 @@ class ImportService:
     def commit_import(
         self,
         token: str,
-        import_status: str,                # 'Cleared' | 'Uncleared'
+        import_status: str,                # 'matched' | 'cleared' (ADR-130)
         accepted_match_fitids: set[str],
         category_decisions: Optional[dict] = None,
     ) -> ImportResult:
@@ -526,7 +526,7 @@ class ImportService:
         pending = self._pending.get(token)
         if pending is None:
             raise ValueError("Import session not found or expired.")
-        if import_status not in ("Cleared", "Uncleared"):
+        if import_status not in ("matched", "cleared"):
             raise ValueError(f"Unknown import status: {import_status!r}")
         decisions = category_decisions or None
 

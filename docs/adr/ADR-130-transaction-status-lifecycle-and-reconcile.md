@@ -1,7 +1,7 @@
 # ADR-130 — Transaction status lifecycle (confidence ladder), status-driven reconciliation, and precise OFX matching
 
 **Date:** 2026-07-02
-**Status:** Proposed (design + phased plan; implementation to follow in increments)
+**Status:** Accepted — **Phase 1 implemented 2026-07-02**; Phases 2–3 to follow
 **Related:** ADR-037 (transfer/reconcile matching). ADR-077 (OFX Direct Connect / import). ADR-036 (inline transfer matching — the ±2-day heuristic reused here). ADR-032 (the SQLite `CHECK`-constraint table-rebuild recipe used by the migration). ADR-051 (`txn_category_line`). ADR-092/109 (file/session). ADR-050 (cross-platform-first — the "some banks offer no download" case this must keep first-class).
 
 ## Context
@@ -76,11 +76,11 @@ Introduce `mfl_desktop/txn_status.py` as the single source: the ordered enum + p
 
 Each phase is independently shippable and testable (Qt-free unit tests where possible + offscreen smokes, per house style).
 
-**Phase 1 — Status model foundation (mechanical, low-risk).**
-- New `mfl_desktop/txn_status.py` (ordered enum + display metadata + helpers); replace the ~8 duplicated `STATUSES` tuples and the `filter_proxy`/`cli` references.
-- Migration **0033**: rebuild `txn` with `CHECK(status IN ('pending','cleared','matched','reconciled'))` (ADR-032 table-rebuild recipe, preserving indexes incl. `idx_txn_status`), and rewrite data (`Pending→pending`, `Uncleared→cleared`, `Cleared→matched`, `Reconciled→reconciled`). Update every literal-status validation in `repository.py` (four sites) + `csv_parser` status map.
-- Register colours/icons + a status legend/tooltips. Behaviour otherwise unchanged.
-- Tests: migration up-through-0033 on a copy; status round-trip; a grep-guard test that no literal old-status strings remain outside `txn_status.py`.
+**Phase 1 — Status model foundation (mechanical, low-risk). — SHIPPED 2026-07-02.**
+- New `mfl_desktop/txn_status.py` (ordered enum + display metadata + helpers: `label`/`key_for_label`/`labels`/`is_valid`/`is_locked`); replaced the ~8 duplicated `STATUSES` tuples and the `filter_proxy`/`cli` references. Combos now show Title-case labels but read/write the stored lowercase key (`StatusDelegate` via item `userData`; dialogs via `key_for_label`); the register model returns the label for `DisplayRole`, the key for `EditRole`.
+- Migration **0033**: rebuilt `txn` with `CHECK(status IN ('pending','cleared','matched','reconciled'))` (ADR-032 recipe + `PRAGMA legacy_alter_table=ON` so the `RENAME` doesn't corrupt the `txn_category_line` view), preserving all indexes, and mapped the data (`Pending→pending`, `Uncleared→cleared`, `Cleared→matched`, `Reconciled→reconciled`). Verified on the demo (72/49/515 rows renamed, FK-clean, view intact). Updated every status literal across `repository.py`, the import/parsers, `account_summary`, and the reconcile wizard; the four repo validations now call `txn_status.is_valid`.
+- Account-summary balance labels relabelled **Cleared/Uncleared → Confirmed/Unconfirmed** to avoid clashing with the new `cleared` status (grouping unchanged: matched+reconciled = confirmed; pending+cleared = in-flight). *Full register colour swatches/legend deferred to a Phase-1 follow-up — the metadata (`token` per status) already lives in `txn_status.py`.*
+- Tests: new `tests/test_txn_status_ladder.py` (6/6 — helpers, DB round-trip, migration-CHECK rejects old values, grep-guard that no old literals remain outside `txn_status.py`); full suite 23/23; offscreen smoke confirms register cells show labels and dialog combos round-trip to keys.
 
 **Phase 2 — Reconcile by confidence (no schema change).**
 - Reconcile candidate set = `matched` (was `cleared`); rename/repoint `list_cleared_unreconciled_txns`. Add the **"include cleared"** per-reconcile toggle. Surface a **cleared-in-range warning list** when cleared are excluded.

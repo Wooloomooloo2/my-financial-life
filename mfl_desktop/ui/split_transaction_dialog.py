@@ -54,11 +54,10 @@ from mfl_desktop.db.repository import (
     Repository,
     TransactionRow,
 )
+from mfl_desktop import txn_status
 from mfl_desktop.ui.category_picker import make_category_picker, selected_category_id
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.date_widgets import make_date_edit
-
-STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
 # Lines table columns.
 _COL_CATEGORY = 0
@@ -123,8 +122,8 @@ class SplitTransactionDialog(QDialog):
         form.addRow("Payee:", self._payee)
 
         self._status = QComboBox()
-        self._status.addItems(STATUSES)
-        self._status.setCurrentText("Pending")
+        self._status.addItems(txn_status.labels())
+        self._status.setCurrentText(txn_status.label(txn_status.PENDING))
         form.addRow("Status:", self._status)
 
         self._memo = QLineEdit()
@@ -188,7 +187,7 @@ class SplitTransactionDialog(QDialog):
         except Exception:
             pass
         self._payee.setText(seed.payee_name or "")
-        self._status.setCurrentText(seed.status or "Pending")
+        self._status.setCurrentText(txn_status.label(seed.status or txn_status.PENDING))
         self._memo.setText(seed.memo or "")
         self._total.setText(f"{seed.amount:.2f}")
         lines = self._repo.split_lines_for_txn(seed.id)
@@ -208,7 +207,8 @@ class SplitTransactionDialog(QDialog):
             except Exception:
                 pass
         self._payee.setText(prefill.get("payee_name", "") or "")
-        self._status.setCurrentText(prefill.get("status", "Pending") or "Pending")
+        self._status.setCurrentText(
+            txn_status.label(prefill.get("status") or txn_status.PENDING))
         self._memo.setText(prefill.get("memo", "") or "")
         total = prefill.get("total_amount")
         if total is not None:
@@ -418,7 +418,7 @@ class SplitTransactionDialog(QDialog):
 
         posted_date = self._date.date().toString("yyyy-MM-dd")
         payee_name = self._payee.text().strip()
-        status = self._status.currentText()
+        status = txn_status.key_for_label(self._status.currentText())
         memo = self._memo.text().strip()
         payee_id = self._repo.get_or_create_payee(payee_name) if payee_name else None
 

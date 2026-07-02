@@ -18,6 +18,7 @@ from typing import Optional
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel
 
+from mfl_desktop import txn_status
 from mfl_desktop.ui.register_model import TransactionTableModel
 
 
@@ -43,8 +44,9 @@ class TransactionFilterProxy(QSortFilterProxyModel):
         self.invalidateRowsFilter()
 
     def set_status(self, status: str) -> None:
-        # "All" = no filter; "Unreconciled" = every status except Reconciled
-        # (Pending / Uncleared / Cleared); anything else = exact status match.
+        # "All" = no filter; "Unreconciled" = every status except reconciled
+        # (pending / cleared / matched); anything else is a status *label*
+        # (ADR-130) matched exactly against the row's stored key.
         self._status = status
         self.invalidateRowsFilter()
 
@@ -72,9 +74,9 @@ class TransactionFilterProxy(QSortFilterProxyModel):
         model: TransactionTableModel = self.sourceModel()
         row = model.row_at(source_row)
         if self._status == "Unreconciled":
-            if row.status == "Reconciled":
+            if row.status == txn_status.RECONCILED:
                 return False
-        elif self._status != "All" and row.status != self._status:
+        elif self._status != "All" and row.status != txn_status.key_for_label(self._status):
             return False
         if self._category_id is not None:
             # A split parent's own category_id is Uncategorised; match it when

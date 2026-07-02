@@ -73,7 +73,7 @@ def test_transfer_ref_not_made_a_category():
     ])
     # A transfer reference is never offered as a new category.
     assert svc.plan_new_categories(token) == []
-    svc.commit_import(token, "Cleared", set())
+    svc.commit_import(token, "matched", set())
     # No category was created; the row is Uncategorised with a transfer note.
     assert repo.connection.execute(
         "SELECT COUNT(*) c FROM category"
@@ -113,7 +113,7 @@ def test_map_decision_routes_and_persists():
     ])
     plan = svc.plan_new_categories(token)
     decisions = {plan[0].normalized: ("map", target)}
-    svc.commit_import(token, "Cleared", set(), decisions)
+    svc.commit_import(token, "matched", set(), decisions)
     # Mapped to the chosen category, nothing new created.
     assert repo.connection.execute(
         "SELECT COUNT(*) c FROM category"
@@ -132,7 +132,7 @@ def test_review_decision_parks_in_needs_review():
         _row("2026-01-03", "20.00", "Shop", "Mystery Spend"),
     ])
     plan = svc.plan_new_categories(token)
-    svc.commit_import(token, "Cleared", set(), {plan[0].normalized: ("review", None)})
+    svc.commit_import(token, "matched", set(), {plan[0].normalized: ("review", None)})
     assert repo.connection.execute(
         "SELECT category_id FROM txn"
     ).fetchone()["category_id"] == repo.needs_review_category_id()
@@ -142,11 +142,11 @@ def test_undo_import_batch_removes_only_its_rows():
     repo = _fresh_repo()
     svc = ImportService(repo)
     t1 = _stage(svc, [_row("2026-01-02", "10.00", "A", "Groceries")])
-    r1 = svc.commit_import(t1, "Cleared", set(),
+    r1 = svc.commit_import(t1, "matched", set(),
                            {k.normalized: ("create", None)
                             for k in svc.plan_new_categories(t1)} or None)
     t2 = _stage(svc, [_row("2026-02-02", "20.00", "B", "Groceries")])
-    r2 = svc.commit_import(t2, "Cleared", set())
+    r2 = svc.commit_import(t2, "matched", set())
     assert repo.connection.execute("SELECT COUNT(*) c FROM txn").fetchone()["c"] == 2
     result = repo.delete_import_batch(r2.batch_id)
     assert result["deleted_txns"] == 1
@@ -166,7 +166,7 @@ def test_undo_reports_and_deletes_now_empty_import_categories():
     # Import creates a brand-new category "Mystery" (the user clicks Create).
     token = _stage(svc, [_row("2026-01-02", "10.00", "A", "Mystery")])
     r = svc.commit_import(
-        token, "Cleared", set(),
+        token, "matched", set(),
         {k.normalized: ("create", None) for k in svc.plan_new_categories(token)},
     )
     mystery = repo.find_category_path(["Mystery"])
@@ -191,13 +191,13 @@ def test_undo_keeps_category_still_used_by_another_batch():
     svc = ImportService(repo)
     t1 = _stage(svc, [_row("2026-01-02", "10.00", "A", "Shared")])
     svc.commit_import(
-        t1, "Cleared", set(),
+        t1, "matched", set(),
         {k.normalized: ("create", None) for k in svc.plan_new_categories(t1)},
     )
     shared = repo.find_category_path(["Shared"])
     # A second import lands more rows on the same (now-existing) category.
     t2 = _stage(svc, [_row("2026-02-02", "20.00", "B", "Shared")])
-    r2 = svc.commit_import(t2, "Cleared", set())
+    r2 = svc.commit_import(t2, "matched", set())
     # Undoing the second batch must NOT offer to delete the still-used category.
     result = repo.delete_import_batch(r2.batch_id)
     assert shared not in [cid for cid, _ in result["empty_categories"]]

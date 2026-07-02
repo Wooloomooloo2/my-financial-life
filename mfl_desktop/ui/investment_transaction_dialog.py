@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mfl_desktop import txn_status
 from mfl_desktop.db.repository import AccountSummary, Repository, SecurityRow, TransactionRow
 from mfl_desktop.import_engine.qif_actions import is_reinvest
 from mfl_desktop.prices import lookup_symbol_name
@@ -90,8 +91,6 @@ _INSTRUMENTS: list[tuple[str, str]] = [
     ("Bond", "bond"),
     ("Option", "option"),
 ]
-
-_STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
 # The system income category an income/reinvest action routes to — mirrors
 # qif_parser._INCOME_CATEGORY ("Income:Investment income").
@@ -298,8 +297,8 @@ class InvestmentTransactionDialog(QDialog):
         self._form.addRow("Split ratio:", self._ratio)
 
         self._status = QComboBox()
-        self._status.addItems(_STATUSES)
-        self._status.setCurrentText("Cleared")
+        self._status.addItems(txn_status.labels())
+        self._status.setCurrentText(txn_status.label(txn_status.MATCHED))
         self._form.addRow("Status:", self._status)
 
         self._memo = QLineEdit()
@@ -399,7 +398,7 @@ class InvestmentTransactionDialog(QDialog):
                 self._commission.setText(f"{seed.commission:.2f}")
         self._amount.setText(f"{seed.amount:.2f}")
         self._memo.setText(seed.memo or "")
-        self._status.setCurrentText(seed.status or "Cleared")
+        self._status.setCurrentText(txn_status.label(seed.status or txn_status.MATCHED))
         # ADR-086: preserve the row's stored category (shown only for the
         # categorisable actions). Signals are blocked, so this doesn't flip the
         # touched flag — the per-action default won't clobber it on edit.
@@ -864,7 +863,7 @@ class InvestmentTransactionDialog(QDialog):
         if kind == "reinvest" and category_id != self._repo.uncategorised_id():
             self._repo.set_reinvest_dividend_category_id(category_id)
         posted_date = self._date.date().toString("yyyy-MM-dd")
-        status = self._status.currentText()
+        status = txn_status.key_for_label(self._status.currentText())
         memo = self._memo.text().strip()
         # Commission is a Buy/Sell-only field; already folded into `amount`, so
         # it's stored purely as metadata (basis uses abs(amount) − accrued).

@@ -66,7 +66,7 @@ def test_ccard_signs_and_fields():
     assert charge["tx_type"] == "debit"            # negative T == cash out
     assert charge["payee_raw"] == "Showers Pass"
     assert charge["category_raw"] == "Personal:Clothing"
-    assert charge["status_override"] == "Cleared"  # C c
+    assert charge["status_override"] == "matched"  # C c
 
 
 def test_positive_amount_is_credit():

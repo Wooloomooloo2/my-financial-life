@@ -88,8 +88,6 @@ from mfl_desktop.ui.register_model import TransactionTableModel
 from mfl_desktop.ui import tokens
 
 
-STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
-
 
 @dataclass(frozen=True)
 class TxnListFilter:

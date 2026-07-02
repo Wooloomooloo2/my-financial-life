@@ -32,6 +32,7 @@ from typing import Iterable, Optional
 
 from mfl_desktop.db.repository import ScheduledTxnRow, SplitLine, TransactionRow
 from mfl_desktop import periods as _periods
+from mfl_desktop import txn_status
 from mfl_desktop.periods import (  # back-compat re-exports (ADR-082)  # noqa: F401
     fmt_date_range,
     months_before,
@@ -196,10 +197,11 @@ class PeriodSummary:
 class StatusBreakdown:
     """Recorded vs. cleared, and what's still in flight.
 
-    ``Pending`` and ``Uncleared`` are grouped as "uncleared" (matches the
-    user-facing language on the screen); ``Cleared`` and ``Reconciled``
-    count as cleared. ``uncleared_amount`` is signed — the net effect on
-    the recorded balance of the in-flight rows."""
+    ``pending`` and ``cleared`` (spent / seen-at-bank but not download-
+    confirmed) are the in-flight group; ``matched`` and ``reconciled``
+    (bank-confirmed) count as the confirmed/cleared balance (ADR-130).
+    ``uncleared_amount`` is signed — the net effect on the recorded balance
+    of the in-flight rows."""
     recorded_balance: Decimal
     cleared_balance: Decimal
     uncleared_count: int
@@ -399,10 +401,10 @@ def compute_status_breakdown(
     uncleared = Decimal("0.00")
     uncleared_count = 0
     for t in txns:
-        if t.status in ("Cleared", "Reconciled"):
+        if t.status in (txn_status.MATCHED, txn_status.RECONCILED):
             cleared += t.amount
         else:
-            # Pending or Uncleared — counts toward the in-flight totals.
+            # pending or cleared — counts toward the in-flight totals.
             uncleared += t.amount
             uncleared_count += 1
     return StatusBreakdown(

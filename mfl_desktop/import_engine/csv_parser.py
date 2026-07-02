@@ -10,7 +10,7 @@
 #
 # Lifted from app/core/import_engine/csv_parser.py with:
 #   * Removed the Oxigraph/MFLX dependency — status_override is now a plain
-#     enum string ("Cleared" / "Reconciled" / "Pending") instead of an IRI.
+#     enum string ("matched" / "reconciled" / "pending") instead of an IRI.
 #   * Fixed a real syntax bug in parse_with_mapping (lines 120–125 of the v0.1
 #     file were unindented and would never have parsed).
 #   * Added category_raw field so the import service can parse hierarchical
@@ -28,12 +28,12 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Banktivity per-transaction status, as enum strings matching the status CHECK
-# constraint on the txn table.
+# Banktivity per-transaction status → the txn.status ladder (ADR-130). Their
+# "cleared" is a bank-confirmed state, so it maps to our "matched".
 _BANKTIVITY_STATUS_MAP = {
-    "cleared":    "Cleared",
-    "reconciled": "Reconciled",
-    "pending":    "Pending",
+    "cleared":    "matched",
+    "reconciled": "reconciled",
+    "pending":    "pending",
 }
 
 

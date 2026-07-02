@@ -640,12 +640,12 @@ class AccountSummaryWindow(QMainWindow):
         layout.addWidget(self._section_header("ADDITIONAL INFO"))
         self._uncleared_lbl = QLabel("£0.00")
         self._cleared_lbl = QLabel("£0.00")
-        self._uncleared_count_lbl = QLabel("Uncleared")
+        self._uncleared_count_lbl = QLabel("Unconfirmed")
         layout.addLayout(self._kv_row_pair(
             self._uncleared_count_lbl, self._uncleared_lbl,
             value_color="negative",
         ))
-        layout.addLayout(self._kv_row("Cleared Balance", self._cleared_lbl))
+        layout.addLayout(self._kv_row("Confirmed Balance", self._cleared_lbl))
 
         layout.addWidget(self._build_separator())
 
@@ -1050,7 +1050,7 @@ class AccountSummaryWindow(QMainWindow):
         value_color: Optional[str] = None,
     ) -> QHBoxLayout:
         """Like ``_kv_row`` but the key is a live QLabel the reload code
-        rewrites (so the count in 'Uncleared (3)' updates)."""
+        rewrites (so the count in 'Unconfirmed (3)' updates)."""
         h = QHBoxLayout()
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
@@ -1215,11 +1215,11 @@ class AccountSummaryWindow(QMainWindow):
             )
         if breakdown.uncleared_count > 0:
             self._uncleared_count_lbl.setText(
-                f"Uncleared ({breakdown.uncleared_count})"
+                f"Unconfirmed ({breakdown.uncleared_count})"
             )
             self._uncleared_lbl.setText(_fmt_money(breakdown.uncleared_amount))
         else:
-            self._uncleared_count_lbl.setText("Uncleared")
+            self._uncleared_count_lbl.setText("Unconfirmed")
             self._uncleared_lbl.setText("£0.00")
         self._cleared_lbl.setText(_fmt_money(breakdown.cleared_balance))
 

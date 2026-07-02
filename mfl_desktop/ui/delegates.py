@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
 )
 
+from mfl_desktop import txn_status
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui.category_picker import (
     make_category_picker,
@@ -266,13 +267,13 @@ class DateEditDelegate(QStyledItemDelegate):
 
 
 class StatusDelegate(QStyledItemDelegate):
-    """Combo over the four status enum values."""
-
-    STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
+    """Combo over the status ladder (ADR-130). Shows Title-case labels but
+    reads/writes the stored lowercase key via the item's userData."""
 
     def createEditor(self, parent, option, index):
         combo = QComboBox(parent)
-        combo.addItems(self.STATUSES)
+        for key in txn_status.STATUSES:
+            combo.addItem(txn_status.label(key), key)
         combo.activated.connect(lambda _: self._commit_and_close(combo))
         return combo
 
@@ -281,13 +282,13 @@ class StatusDelegate(QStyledItemDelegate):
         self.closeEditor.emit(editor)
 
     def setEditorData(self, editor: QComboBox, index):
-        current = index.data(Qt.EditRole) or ""
+        current = str(index.data(Qt.EditRole) or "")
         editor.blockSignals(True)
-        i = editor.findText(current)
+        i = editor.findData(current)
         if i >= 0:
             editor.setCurrentIndex(i)
         editor.blockSignals(False)
         editor.showPopup()
 
     def setModelData(self, editor: QComboBox, model, index):
-        model.setData(index, editor.currentText(), Qt.EditRole)
+        model.setData(index, editor.currentData(), Qt.EditRole)

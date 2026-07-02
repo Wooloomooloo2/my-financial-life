@@ -9,7 +9,7 @@ Usage:
         if no accounts exist yet.
 
     python -m mfl_desktop.cli import <file> [--account-iri IRI] [--db PATH]
-        [--status Cleared|Uncleared] [--accept-matches]
+        [--status matched|cleared] [--accept-matches]
         Import an OFX/QFX/CSV file. Without --account-iri the first account
         in the database is used. --accept-matches merges every potential
         match with the existing manual entry; without it, all matches are
@@ -378,8 +378,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("import", help="Import an OFX/QFX/CSV file")
     p.add_argument("file", help="Path to the file to import")
     p.add_argument("--account-iri", help="Target account IRI (default: first account)")
-    p.add_argument("--status", choices=["Cleared", "Uncleared"],
-                   help="Override the suggested import status")
+    p.add_argument("--status", choices=["matched", "cleared"],
+                   help="Override the suggested import status (ADR-130)")
     p.add_argument("--accept-matches", action="store_true",
                    help="Merge all potential matches with existing manual entries")
     p.set_defaults(func=cmd_import)

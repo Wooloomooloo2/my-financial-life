@@ -33,14 +33,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from mfl_desktop import txn_status
 from mfl_desktop.db.repository import AccountSummary, CategoryChoice
 from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.category_picker import (
     make_category_picker,
     selected_category_id,
 )
-
-STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
 
 @dataclass(frozen=True)
@@ -115,8 +114,8 @@ class NewTransactionDialog(QDialog):
         self._category_combo = make_category_picker(categories, default_id=1)
 
         self._status_combo = QComboBox()
-        self._status_combo.addItems(STATUSES)
-        self._status_combo.setCurrentText("Pending")
+        self._status_combo.addItems(txn_status.labels())
+        self._status_combo.setCurrentText(txn_status.label(txn_status.PENDING))
 
         # Direction: two radio buttons in a button group so exactly one is set.
         self._direction_out = QRadioButton("Money out")
@@ -283,7 +282,7 @@ class NewTransactionDialog(QDialog):
             amount=amount,
             payee_name=self._payee_edit.text().strip(),
             category_id=int(category_id),
-            status=self._status_combo.currentText(),
+            status=txn_status.key_for_label(self._status_combo.currentText()),
             memo=self._memo_edit.text().strip(),
         )
         self.accept()
@@ -325,7 +324,7 @@ class NewTransactionDialog(QDialog):
             amount=amount,
             payee_name=self._payee_edit.text().strip(),
             category_id=1,                 # placeholder — the lines carry categories
-            status=self._status_combo.currentText(),
+            status=txn_status.key_for_label(self._status_combo.currentText()),
             memo=self._memo_edit.text().strip(),
         )
         self._split_requested = True

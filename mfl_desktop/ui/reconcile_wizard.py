@@ -55,6 +55,7 @@ from mfl_desktop.db.repository import (
     Repository,
     StatementRow,
 )
+from mfl_desktop import txn_status
 from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
 
@@ -222,7 +223,7 @@ class ReconcileWizard(QDialog):
         auto_row = QHBoxLayout()
         auto_row.addWidget(QLabel("Automatically select:"))
         self._auto_combo = QComboBox()
-        self._auto_combo.addItem("Cleared Transactions", userData="cleared")
+        self._auto_combo.addItem("Matched Transactions", userData="matched")
         self._auto_combo.addItem("Nothing", userData="none")
         auto_row.addWidget(self._auto_combo)
         auto_row.addStretch(1)
@@ -471,15 +472,15 @@ class ReconcileWizard(QDialog):
 
         if auto_select:
             mode = self._auto_combo.currentData()
-            if mode == "cleared":
-                # Auto-tick only the cleared rows that fall WITHIN the
-                # statement period — rows outside the dates stay visible but
-                # deselected.
+            if mode == "matched":
+                # Auto-tick only the matched (bank-confirmed) rows that fall
+                # WITHIN the statement period — rows outside the dates stay
+                # visible but deselected.
                 start_iso = _qdate_to_iso(self._start_date.date())
                 end_iso = _qdate_to_iso(self._end_date.date())
                 preset = {
                     txn.id for txn in rows
-                    if txn.status == "Cleared"
+                    if txn.status == txn_status.MATCHED
                     and start_iso <= txn.posted_date <= end_iso
                 }
             else:

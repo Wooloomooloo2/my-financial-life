@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import data_library, snapshots
 from mfl_desktop import fx, prices
 from mfl_desktop import license_service
+from mfl_desktop import txn_status
 from mfl_desktop import resources
 from mfl_desktop import version
 from mfl_desktop.app_session import remember_last_db, set_snapshots_root
@@ -122,8 +123,6 @@ from mfl_desktop.ui.transfer_match_dialogs import (
     TransferMatchConfirmDialog,
     TransferMatchPickerDialog,
 )
-
-STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 
 # ADR-041: register date-window presets — (label, key). The chosen window is
 # turned into an inclusive lower bound on posted_date and pushed into the
@@ -321,7 +320,7 @@ class RegisterWindow(QMainWindow):
         status_combo = QComboBox()
         # "Unreconciled" is a meta-status (everything except Reconciled), handy
         # for working down the rows that still need clearing/reconciling.
-        status_combo.addItems(["All", "Unreconciled", *STATUSES])
+        status_combo.addItems(["All", "Unreconciled", *txn_status.labels()])
         status_combo.currentTextChanged.connect(lambda s: self._proxy.set_status(s))
 
         # A2 (2026-06-14): the Category filter combo was removed — the general

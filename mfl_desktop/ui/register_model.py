@@ -14,6 +14,7 @@ from typing import Optional
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
+from mfl_desktop import txn_status
 from mfl_desktop.db.repository import Repository, TransactionRow
 from mfl_desktop.import_engine.qif_actions import is_categorisable
 
@@ -236,6 +237,10 @@ class TransactionTableModel(QAbstractTableModel):
 
         if role in (Qt.DisplayRole, Qt.EditRole):
             value = getattr(row, col_name)
+            # Status is stored lowercase (ADR-130); show the Title-case label
+            # in the cell but keep the stored key for the editor delegate.
+            if col_name == "status":
+                return txn_status.label(value) if role == Qt.DisplayRole else value
             # A split transaction (ADR-051) has no single category — its lines
             # carry the categories. Show the Banktivity-style "—Split—" marker.
             if (

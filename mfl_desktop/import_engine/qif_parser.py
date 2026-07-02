@@ -314,7 +314,7 @@ def _normalise_invst_record(fields: list[tuple[str, str]]) -> Optional[dict]:
     # else is left to Uncategorised (buys/sells are asset moves, not spend).
     category_raw = _INCOME_CATEGORY if action.strip().lower() in _CASH_IN_ACTIONS else ""
 
-    status_override = "Cleared" if cleared in ("c", "x", "r") else ""
+    status_override = "matched" if cleared in ("c", "x", "r") else ""
 
     return {
         "fitid": "",                      # QIF has no FITID; service hashes instead
@@ -405,7 +405,7 @@ def _normalise_cash_record(fields: list[tuple[str, str]]) -> Optional[dict]:
     if not linked_account:
         category_raw = category or (split_categories[0] if split_categories else "")
 
-    status_override = "Cleared" if cleared in ("c", "x", "r") else ""
+    status_override = "matched" if cleared in ("c", "x", "r") else ""
 
     return {
         "fitid": "",                          # QIF has no FITID; service hashes

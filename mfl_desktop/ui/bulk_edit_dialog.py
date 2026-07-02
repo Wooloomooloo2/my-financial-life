@@ -30,13 +30,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from mfl_desktop import txn_status
 from mfl_desktop.db.repository import CategoryChoice
 from mfl_desktop.ui.category_picker import (
     make_category_picker,
     selected_category_id,
 )
 
-STATUSES = ("Pending", "Uncleared", "Cleared", "Reconciled")
 # id of the seeded Uncategorised row — used as the default category so the
 # user has to deliberately pick a meaningful one before applying.
 UNCATEGORISED_ID = 1
@@ -95,10 +95,10 @@ class BulkEditDialog(QDialog):
 
         self._status_check = QCheckBox("Status:")
         self._status_combo = QComboBox()
-        for s in STATUSES:
-            self._status_combo.addItem(s, userData=s)
-        # Most common bulk-status use case is confirming imports as Cleared.
-        self._set_combo_default(self._status_combo, "Cleared")
+        for s in txn_status.STATUSES:
+            self._status_combo.addItem(txn_status.label(s), userData=s)
+        # Most common bulk-status use case is confirming imports as matched.
+        self._set_combo_default(self._status_combo, txn_status.MATCHED)
         self._status_combo.setEnabled(False)
         self._status_check.toggled.connect(self._status_combo.setEnabled)
 
@@ -201,7 +201,7 @@ class BulkEditDialog(QDialog):
                 return
             result["category_id"] = cid
         if self._status_check.isChecked():
-            result["status"] = self._status_combo.currentText()
+            result["status"] = self._status_combo.currentData()
         if self._memo_check.isChecked():
             result["memo"] = self._memo_edit.text()
         if self._symbol_check is not None and self._symbol_check.isChecked():
