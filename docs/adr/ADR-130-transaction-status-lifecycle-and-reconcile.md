@@ -1,7 +1,7 @@
 # ADR-130 — Transaction status lifecycle (confidence ladder), status-driven reconciliation, and precise OFX matching
 
 **Date:** 2026-07-02
-**Status:** Accepted — **Phase 1 implemented 2026-07-02**; Phases 2–3 to follow
+**Status:** Accepted — **Phases 1–2 implemented (2026-07-02 / 2026-07-03)**; Phase 3 to follow
 **Related:** ADR-037 (transfer/reconcile matching). ADR-077 (OFX Direct Connect / import). ADR-036 (inline transfer matching — the ±2-day heuristic reused here). ADR-032 (the SQLite `CHECK`-constraint table-rebuild recipe used by the migration). ADR-051 (`txn_category_line`). ADR-092/109 (file/session). ADR-050 (cross-platform-first — the "some banks offer no download" case this must keep first-class).
 
 ## Context
@@ -82,9 +82,10 @@ Each phase is independently shippable and testable (Qt-free unit tests where pos
 - Account-summary balance labels relabelled **Cleared/Uncleared → Confirmed/Unconfirmed** to avoid clashing with the new `cleared` status (grouping unchanged: matched+reconciled = confirmed; pending+cleared = in-flight). *Full register colour swatches/legend deferred to a Phase-1 follow-up — the metadata (`token` per status) already lives in `txn_status.py`.*
 - Tests: new `tests/test_txn_status_ladder.py` (6/6 — helpers, DB round-trip, migration-CHECK rejects old values, grep-guard that no old literals remain outside `txn_status.py`); full suite 23/23; offscreen smoke confirms register cells show labels and dialog combos round-trip to keys.
 
-**Phase 2 — Reconcile by confidence (no schema change).**
-- Reconcile candidate set = `matched` (was `cleared`); rename/repoint `list_cleared_unreconciled_txns`. Add the **"include cleared"** per-reconcile toggle. Surface a **cleared-in-range warning list** when cleared are excluded.
-- Tests: candidate-set selection by status; toggle behaviour; a regression building the June scenario (pending + duplicate items must not be auto-selected).
+**Phase 2 — Reconcile by confidence (no schema change). — SHIPPED 2026-07-03.**
+- `list_reconcilable_txns` gated by the ladder: **matched** always eligible, **cleared** only with a new `include_cleared` flag, **pending never** — plus rows already ticked into the resumed/viewed statement (via `statement_txn`) so ticks survive. Removed the dead `list_cleared_unreconciled_txns`.
+- Reconcile wizard: an **"Include cleared (seen at the bank, not yet downloaded)"** checkbox on the balances page feeds the gate and the auto-select preset (matched + cleared-in-period when on); a **warning** on the check-off page counts the excluded cleared-in-period rows (`count_cleared_in_period`) with a nudge to include them; the toggle re-gates live and is disabled in read-only view.
+- Tests: `tests/test_reconcile_confidence.py` 4/4 (matched-only default with **pending never a candidate** — the June-mess guard; include-cleared adds cleared not pending; resumed ticks preserved; cleared count) + offscreen wizard smoke (gate → warning → include-cleared auto-select). Full suite 24/24.
 
 **Phase 3 — Precise OFX matching + bank date (the substantive phase).**
 - Migration **0034**: add `txn.bank_posted_date TEXT NULL`.

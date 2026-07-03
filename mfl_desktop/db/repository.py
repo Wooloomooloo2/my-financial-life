@@ -9460,18 +9460,22 @@ class Repository:
 
     def list_reconcilable_txns(
         self, account_id: int, *, include_statement_id: Optional[int] = None,
+        include_cleared: bool = False,
     ) -> list[TransactionRow]:
-        """Transactions eligible to appear on a reconciliation: every row on
-        the account not already Reconciled to a closed statement, regardless
-        of date (so old stragglers can still be caught — ADR-040 amendment).
-        Rows ticked into a still-open statement are included (their status is
-        unchanged until close), so a resumed pass shows them.
+        """Transactions eligible to appear on a reconciliation (ADR-130).
 
-        ``include_statement_id`` additionally pulls in rows already reconciled
-        to *that* statement, so viewing / reopening a closed statement shows
-        its own (Reconciled) rows rather than an empty list. Returned in
-        statement order (date asc); ``running_balance`` is 0 (not meaningful
-        here)."""
+        Eligibility follows the confidence ladder: **matched** rows (a download
+        confirmed them) are always eligible; **cleared** rows (seen at the bank
+        by eye but not download-confirmed) are eligible only when
+        ``include_cleared`` — for institutions that offer no download.
+        **pending** rows are never eligible. This is what stops a not-yet-at-the-
+        bank or duplicate row being ticked onto a statement by accident.
+
+        Rows already ticked into ``include_statement_id`` (an open pass being
+        resumed, or a closed statement being viewed) are **always** included
+        regardless of status, so their ticks aren't lost. Any date is eligible
+        (old stragglers can still be caught — ADR-040). Returned in statement
+        order (date asc); ``running_balance`` is 0 (not meaningful here)."""
         sid = include_statement_id if include_statement_id is not None else -1
         cur = self._conn.execute(
             "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
@@ -9485,9 +9489,12 @@ class Repository:
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
             "WHERE t.account_id = ? "
-            "  AND (t.status != 'reconciled' OR t.statement_id = ?) "
+            "  AND ( t.status = 'matched' "
+            "        OR (t.status = 'cleared' AND ?) "
+            "        OR t.id IN (SELECT txn_id FROM statement_txn "
+            "                    WHERE statement_id = ?) ) "
             "ORDER BY t.posted_date ASC, t.id ASC",
-            (account_id, sid),
+            (account_id, 1 if include_cleared else 0, sid),
         )
         return [
             TransactionRow(
@@ -9504,16 +9511,19 @@ class Repository:
             for r in cur
         ]
 
-    def list_cleared_unreconciled_txns(self, account_id: int) -> list[int]:
-        """Txn ids on the account currently in 'matched' status — the
-        pre-tick set for "Automatically select Cleared Transactions"."""
-        cur = self._conn.execute(
-            "SELECT id FROM txn "
-            "WHERE account_id = ? AND status = 'matched' "
-            "ORDER BY posted_date ASC, id ASC",
-            (account_id,),
-        )
-        return [int(r["id"]) for r in cur]
+    def count_cleared_in_period(
+        self, account_id: int, date_from: str, date_to: str,
+    ) -> int:
+        """How many ``cleared`` rows (seen at the bank, not download-confirmed)
+        fall in the statement period — surfaced as a reconcile warning when
+        cleared rows are excluded from the candidate set (ADR-130)."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM txn "
+            "WHERE account_id = ? AND status = 'cleared' "
+            "  AND posted_date BETWEEN ? AND ?",
+            (account_id, date_from, date_to),
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def get_statement_tick_ids(self, statement_id: int) -> set[int]:
         """The set of txn ids currently ticked into a statement (open or

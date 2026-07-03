@@ -35,6 +35,7 @@ from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
+    QCheckBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -229,6 +230,22 @@ class ReconcileWizard(QDialog):
         auto_row.addStretch(1)
         layout.addLayout(auto_row)
 
+        # Confidence gate (ADR-130): by default only 'matched' (download-
+        # confirmed) rows are eligible. Some banks offer no download, so allow
+        # reconciling off eyeballed 'cleared' rows too when the user opts in.
+        self._include_cleared_check = QCheckBox(
+            "Include cleared transactions (seen at the bank, not yet downloaded)"
+        )
+        self._include_cleared_check.setToolTip(
+            "Off: only matched (download-confirmed) transactions can be ticked.\n"
+            "On: also allow 'cleared' rows you've seen post but not downloaded —\n"
+            "for accounts with no statement download."
+        )
+        self._include_cleared_check.toggled.connect(
+            self._on_include_cleared_toggled
+        )
+        layout.addWidget(self._include_cleared_check)
+
         layout.addStretch(1)
 
         # Buttons.
@@ -421,6 +438,15 @@ class ReconcileWizard(QDialog):
         self._search.textChanged.connect(self._apply_search)
         layout.addWidget(self._search)
 
+        # Confidence warning (ADR-130): cleared-but-not-downloaded rows in the
+        # period that aren't shown because they're not eligible. Hidden unless
+        # there are any and 'include cleared' is off.
+        self._cleared_warning = QLabel("")
+        self._cleared_warning.setWordWrap(True)
+        self._cleared_warning.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        self._cleared_warning.setVisible(False)
+        layout.addWidget(self._cleared_warning)
+
         # Table.
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
@@ -466,21 +492,27 @@ class ReconcileWizard(QDialog):
         # Always show every eligible row (any date), plus this statement's own
         # rows when viewing/resuming a closed one so they aren't hidden.
         sid = self._statement.id if self._statement is not None else None
+        include_cleared = self._include_cleared_check.isChecked()
         rows = self._repo.list_reconcilable_txns(
             self._account.id, include_statement_id=sid,
+            include_cleared=include_cleared,
         )
 
         if auto_select:
             mode = self._auto_combo.currentData()
             if mode == "matched":
-                # Auto-tick only the matched (bank-confirmed) rows that fall
-                # WITHIN the statement period — rows outside the dates stay
+                # Auto-tick the bank-confirmed rows that fall WITHIN the
+                # statement period — matched always, plus cleared when the user
+                # opted to include them (ADR-130). Rows outside the dates stay
                 # visible but deselected.
                 start_iso = _qdate_to_iso(self._start_date.date())
                 end_iso = _qdate_to_iso(self._end_date.date())
+                eligible = {txn_status.MATCHED}
+                if include_cleared:
+                    eligible.add(txn_status.CLEARED)
                 preset = {
                     txn.id for txn in rows
-                    if txn.status == txn_status.MATCHED
+                    if txn.status in eligible
                     and start_iso <= txn.posted_date <= end_iso
                 }
             else:
@@ -513,7 +545,40 @@ class ReconcileWizard(QDialog):
             "Change in balance: "
             + (self._fmt_change_strip())
         )
+        self._update_cleared_warning()
         self._recompute()
+
+    def _update_cleared_warning(self) -> None:
+        """Surface any ``cleared`` (seen-but-not-downloaded) rows in the period
+        that the confidence gate is excluding, with a nudge to include them
+        (ADR-130). Hidden when cleared are already included or there are none."""
+        if self._include_cleared_check.isChecked():
+            self._cleared_warning.setVisible(False)
+            return
+        start_iso = _qdate_to_iso(self._start_date.date())
+        end_iso = _qdate_to_iso(self._end_date.date())
+        n = self._repo.count_cleared_in_period(
+            self._account.id, start_iso, end_iso,
+        )
+        if n <= 0:
+            self._cleared_warning.setVisible(False)
+            return
+        it = "it" if n == 1 else "them"
+        self._cleared_warning.setText(
+            f"⚠ {n} cleared transaction{'' if n == 1 else 's'} in this period "
+            f"{'is' if n == 1 else 'are'} not shown — you saw {it} post but no "
+            f"download has confirmed {it}. Tick “Include cleared…” on the "
+            f"balances page to reconcile against {it}."
+        )
+        self._cleared_warning.setVisible(True)
+
+    def _on_include_cleared_toggled(self, _checked: bool) -> None:
+        """Re-gate the candidate set live when already on the check-off page.
+        Preserves current ticks; newly-eligible cleared rows appear unticked
+        (set the toggle on the balances page *before* Next to auto-select them)."""
+        if self._mode == "view" or not self._auto_selected_once:
+            return  # check-off page not built yet; the next Next reads the box
+        self._enter_checkoff(auto_select=False)
 
     def _fmt_change_strip(self) -> str:
         change = self._statement_change()
@@ -625,6 +690,8 @@ class ReconcileWizard(QDialog):
 
     def _apply_mode_to_checkoff(self) -> None:
         read_only = self._mode == "view"
+        # The confidence gate can't change a closed statement's candidate set.
+        self._include_cleared_check.setEnabled(not read_only)
         self._add_txn_btn.setVisible(not read_only)
         self._edit_btn.setVisible(not read_only)
         self._save_btn.setVisible(not read_only)
