@@ -27,6 +27,28 @@ _SURFACE = "#ffffff"
 
 _W, _H = 440, 280
 
+# The splash created by :func:`make_splash`, tracked module-side so any
+# launch-time code path can dismiss it without threading the object through
+# (ADR-132). See :func:`dismiss_active_splash`.
+_active_splash: QSplashScreen | None = None
+
+
+def dismiss_active_splash() -> None:
+    """Close the launch splash if it's still showing (ADR-132).
+
+    The splash is ``WindowStaysOnTopHint`` so it stays visible through a slow
+    launch — but on Windows that topmost band also sits *above* a no-parent
+    modal dialog, hiding the recovery prompt / crash box / first-run picker
+    behind it so the app looks frozen. Every launch-time dialog calls this
+    first; once a dialog is needed we're in an interactive flow, so losing the
+    branded splash for the rest of launch is the right trade. Idempotent and
+    safe to call when there is no splash (e.g. tests, headless)."""
+    global _active_splash
+    sp = _active_splash
+    _active_splash = None
+    if sp is not None:
+        sp.close()
+
 
 def make_splash() -> QSplashScreen:
     """Compose and return the splash. Call ``.show()`` then
@@ -66,4 +88,6 @@ def make_splash() -> QSplashScreen:
     splash.showMessage(
         "Loading…", Qt.AlignBottom | Qt.AlignHCenter, QColor(_INK_MUTED),
     )
+    global _active_splash
+    _active_splash = splash
     return splash

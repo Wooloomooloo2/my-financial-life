@@ -134,10 +134,21 @@ def install_excepthook() -> None:
 def _show_crash_dialog(exc_type, exc) -> None:
     """Tell the user something broke and where the log is — only if a
     QApplication is already running (no GUI bootstrap from a crash)."""
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QMessageBox
     if QApplication.instance() is None:
         return
+    # ADR-132: a launch-time crash (e.g. the data file failing to open) fires
+    # while the always-on-top splash is still up; on Windows that topmost band
+    # hides this dialog behind it, so the app just appears to hang. Dismiss the
+    # splash and force the box topmost so the error is actually seen.
+    try:
+        from mfl_desktop.ui.splash import dismiss_active_splash
+        dismiss_active_splash()
+    except Exception:
+        pass
     box = QMessageBox()
+    box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
     box.setIcon(QMessageBox.Critical)
     box.setWindowTitle("Unexpected error")
     box.setText(

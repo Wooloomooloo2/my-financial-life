@@ -136,6 +136,8 @@ def _open_repository_with_fallback(db_path: Path, first_run_default: bool):
         log.warning("Could not open DB at %s (%s) — falling back to %s",
                     db_path, e, fallback)
         from PySide6.QtWidgets import QMessageBox
+        from mfl_desktop.ui.splash import dismiss_active_splash
+        dismiss_active_splash()  # ADR-132: don't let the splash hide this warning
         QMessageBox.warning(
             None,
             "Couldn't use that location",
@@ -157,7 +159,9 @@ def _prompt_first_run_location(default_path: Path) -> Path:
     that reopens it next launch. Cancelling falls back to ``default_path`` (the
     container default), so a hesitant user still gets a working app."""
     from PySide6.QtWidgets import QFileDialog, QMessageBox
+    from mfl_desktop.ui.splash import dismiss_active_splash
 
+    dismiss_active_splash()  # ADR-132: the splash would otherwise hide these prompts
     QMessageBox.information(
         None,
         "Choose where to keep your data",
@@ -227,8 +231,17 @@ def main(argv: list[str] | None = None) -> int:
     # file that's temporarily unreadable (cloud-evicted, drive offline) is waited
     # out / re-downloaded, then escalated to an explicit recovery dialog shown
     # over the splash. ``pump`` keeps the splash painting during a cloud download.
+    #
+    # ADR-132: the always-on-top splash hides a no-parent modal dialog behind it
+    # on Windows, so the recovery prompt was invisible and the app looked frozen.
+    # Drop the splash the instant we need to block on that dialog.
+    def _recovery_dialog(path, reason):
+        from mfl_desktop.ui.splash import dismiss_active_splash
+        dismiss_active_splash()
+        return FileRecoveryDialog(path, reason)
+
     res = launch.resolve_database(
-        args, pump=app.processEvents, dialog_factory=FileRecoveryDialog,
+        args, pump=app.processEvents, dialog_factory=_recovery_dialog,
     )
     if res.exit_code is not None:
         return res.exit_code
