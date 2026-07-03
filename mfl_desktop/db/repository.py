@@ -4364,23 +4364,31 @@ class Repository:
         import_hash: str,
         memo: Optional[str],
         bank_posted_date: Optional[str] = None,
+        new_amount: Optional[Decimal] = None,
     ) -> None:
         """Confirm a download against an existing hand-entered transaction.
 
         Stamps its ``import_hash``, advances it up the confidence ladder to
         ``matched`` if it's still ``pending``/``cleared`` (ADR-130 — the
         download is the bank confirmation), and records the bank's posting date
-        (``bank_posted_date``) so reconciliation can range on it. The user's
-        amount, spend date, category, and payee are untouched; a ``reconciled``
-        (locked) row is left alone. Memo is only filled if currently empty.
+        (``bank_posted_date``) so reconciliation can range on it. ``new_amount``
+        (ADR-130 Phase 3b "adopt bank amount") overwrites the signed amount when
+        the user chose to take the download's figure over a mis-entry. The
+        user's spend date, category, and payee are untouched; a ``reconciled``
+        (locked) row is left alone (status, amount). Memo fills only if empty.
         """
+        new_amount_pence = (
+            decimal_to_pence(new_amount) if new_amount is not None else None
+        )
         self._conn.execute(
             "UPDATE txn SET import_hash = ?, "
             "  status = CASE WHEN status IN ('pending', 'cleared') "
             "                THEN 'matched' ELSE status END, "
-            "  bank_posted_date = COALESCE(?, bank_posted_date) "
+            "  bank_posted_date = COALESCE(?, bank_posted_date), "
+            "  amount = CASE WHEN status = 'reconciled' THEN amount "
+            "                ELSE COALESCE(?, amount) END "
             "WHERE id = ?",
-            (import_hash, bank_posted_date, manual_id),
+            (import_hash, bank_posted_date, new_amount_pence, manual_id),
         )
         if memo:
             self._conn.execute(

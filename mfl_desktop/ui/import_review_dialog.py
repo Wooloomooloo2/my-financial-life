@@ -84,10 +84,10 @@ class ImportReviewDialog(QDialog):
         )
         header.setWordWrap(True)
 
-        self._table = QTableWidget(len(self._matches), 6)
+        self._table = QTableWidget(len(self._matches), 7)
         self._table.setHorizontalHeaderLabels([
             "Already\npresent?", "Importing", "Amount",
-            "Matches existing", "Match", "On confirm",
+            "Matches existing", "Match", "On confirm", "Adopt\nbank amt",
         ])
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -99,6 +99,7 @@ class ImportReviewDialog(QDialog):
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
         hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(6, QHeaderView.ResizeToContents)
 
         for i, tx in enumerate(self._matches):
             self._populate_row(i, tx)
@@ -143,6 +144,21 @@ class ImportReviewDialog(QDialog):
                 out.add(str(item.data(Qt.UserRole)))
         return out
 
+    def adopted_amount_fitids(self) -> set[str]:
+        """Fitids of amount-mismatch rows where the user opted to adopt the
+        bank's amount (ADR-130 Phase 3b). Only meaningful for rows also ticked
+        'already present' — commit_import applies it on the merge path."""
+        out: set[str] = set()
+        for i in range(self._table.rowCount()):
+            item = self._table.item(i, 6)
+            if (
+                item is not None
+                and bool(item.flags() & Qt.ItemIsUserCheckable)
+                and item.checkState() == Qt.Checked
+            ):
+                out.add(str(item.data(Qt.UserRole)))
+        return out
+
     # ── internals ──
 
     def _populate_row(self, i: int, tx: "ClassifiedTransaction") -> None:
@@ -161,17 +177,42 @@ class ImportReviewDialog(QDialog):
         amt = QTableWidgetItem(self._fmt_amount(tx))
         amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._table.setItem(i, 2, amt)
-        self._table.setItem(
-            i, 3, QTableWidgetItem(f"{tx.match_txn_date}   {tx.match_txn_payee}"),
-        )
+        # For an amount-mismatch match, show what the user typed beside the
+        # existing row so the discrepancy is obvious (ADR-130 Phase 3b).
+        existing = f"{tx.match_txn_date}   {tx.match_txn_payee}"
+        if tx.match_amount_differs and tx.match_existing_amount is not None:
+            existing += f"   (yours: {self._fmt_signed(tx.match_existing_amount)})"
+        self._table.setItem(i, 3, QTableWidgetItem(existing))
         self._table.setCellWidget(i, 4, self._chip(tx.match_strength))
         action = "Merge" if tx.match_is_manual else "Skip"
         self._table.setItem(i, 5, QTableWidgetItem(action))
+
+        # col 6 — "adopt bank amount" (amount-differs rows only). Default ticked
+        # so accepting the match also fixes the mis-entry; blank + disabled for
+        # every other row.
+        adopt = QTableWidgetItem()
+        if tx.match_amount_differs and tx.match_is_manual:
+            adopt.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            adopt.setCheckState(Qt.Checked)
+            adopt.setData(Qt.UserRole, tx.fitid)
+            adopt.setToolTip(
+                f"Overwrite your {self._fmt_signed(tx.match_existing_amount)} "
+                f"with the bank's {self._fmt_amount(tx)} on import."
+            )
+        else:
+            adopt.setFlags(Qt.NoItemFlags)
+        self._table.setItem(i, 6, adopt)
 
     def _fmt_amount(self, tx: "ClassifiedTransaction") -> str:
         sym = _sym(self._currency)
         sign = "-" if tx.tx_type == "debit" else "+"
         return f"{sign}{sym}{abs(float(tx.amount)):,.2f}"
+
+    def _fmt_signed(self, amount) -> str:
+        """Format a signed Decimal amount (negative = money out)."""
+        sym = _sym(self._currency)
+        val = float(amount or 0)
+        return f"{'-' if val < 0 else '+'}{sym}{abs(val):,.2f}"
 
     def _chip(self, strength: str) -> QWidget:
         label, colour_token = self._CHIP.get(strength, self._CHIP["weak"])

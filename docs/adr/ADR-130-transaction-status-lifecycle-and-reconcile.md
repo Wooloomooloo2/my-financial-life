@@ -1,7 +1,7 @@
 # ADR-130 — Transaction status lifecycle (confidence ladder), status-driven reconciliation, and precise OFX matching
 
 **Date:** 2026-07-02
-**Status:** Accepted — **Phases 1–2 implemented (2026-07-02 / 2026-07-03)**; Phase 3 to follow
+**Status:** Accepted — **Phases 1–3 core implemented (2026-07-02 / 03)**; Phase 3 refinements (unmatched-entries panel, ±5 window) optional follow-ups
 **Related:** ADR-037 (transfer/reconcile matching). ADR-077 (OFX Direct Connect / import). ADR-036 (inline transfer matching — the ±2-day heuristic reused here). ADR-032 (the SQLite `CHECK`-constraint table-rebuild recipe used by the migration). ADR-051 (`txn_category_line`). ADR-092/109 (file/session). ADR-050 (cross-platform-first — the "some banks offer no download" case this must keep first-class).
 
 ## Context
@@ -87,10 +87,9 @@ Each phase is independently shippable and testable (Qt-free unit tests where pos
 - Reconcile wizard: an **"Include cleared (seen at the bank, not yet downloaded)"** checkbox on the balances page feeds the gate and the auto-select preset (matched + cleared-in-period when on); a **warning** on the check-off page counts the excluded cleared-in-period rows (`count_cleared_in_period`) with a nudge to include them; the toggle re-gates live and is disabled in read-only view.
 - Tests: `tests/test_reconcile_confidence.py` 4/4 (matched-only default with **pending never a candidate** — the June-mess guard; include-cleared adds cleared not pending; resumed ticks preserved; cleared count) + offscreen wizard smoke (gate → warning → include-cleared auto-select). Full suite 24/24.
 
-**Phase 3 — Precise OFX matching + bank date (the substantive phase).**
-- Migration **0034**: add `txn.bank_posted_date TEXT NULL`.
-- Upgrade the `import_service` ±2-day heuristic into a **scored matcher** (amount exact + date window ±5 + canonical-payee fuzzy), producing three buckets. New **import review screen**: **auto-matched**, **needs-review** (incl. amount-differs → *adopt bank amount*), **new-from-bank**; plus an **unmatched-entries** panel ("not seen in this download").
-- On accept: `pending`/`cleared → matched`, set `bank_posted_date` from OFX, keep FITID dedup. Reconcile date-ranging prefers `bank_posted_date`.
-- Tests: matcher unit tests (exact/near/amount-diff/duplicate/none); idempotent re-import; status transitions; reconcile date-ranging on `bank_posted_date`.
+**Phase 3 — Precise OFX matching + bank date (the substantive phase). — CORE SHIPPED 2026-07-03.**
+- **3a (backbone):** migration **0034** adds `txn.bank_posted_date`. On a download matching a hand-entered row, `merge_into_manual_transaction` advances it `pending`/`cleared → matched` and records the bank date (reconciled rows untouched); imports stamp `bank_posted_date` on new-from-bank + matched rows (`insert_transaction`/`insert_split_transaction` gained the param). `list_reconcilable_txns` ranges/sorts/displays on `COALESCE(bank_posted_date, posted_date)` so reconcile aligns to the statement dates (the 22/23-June scramble). `tests/test_import_bank_date.py` 4/4.
+- **3b (precision):** `dedupe.match_duplicates` gained a conservative opt-in **amount-mismatch tier** (`fuzzy_amount_pct`, default 20%): after exact pairing, a still-unmatched download row pairs with a same-sign, **payee-overlapping** existing row within tolerance as a **weak `amount_differs`** review item — the £8.99-for-£8.25 class. The review dialog shows the discrepancy ("yours: −£8.99") + an **"Adopt bank amt"** checkbox (default on, amount-differs rows only); on confirm+adopt, `commit_import` overwrites the mis-entry with the bank figure via `merge_into_manual_transaction(new_amount=…)`. `tests/test_import_amount_mismatch.py` 7/7. Full suite 26/26.
+- **Remaining refinements (not blocking):** the **unmatched-entries panel** ("your entries the download didn't confirm" — the phantom/duplicate catcher) and widening the fuzzy window from ±2 to ±5 days. The exact-match FITID dedup (ADR-085) is unchanged and idempotent.
 
 **Sequencing note:** Phases 1–2 already deliver the reconciliation-safety win (the June bugs can't recur) without the import work; Phase 3 delivers the precision the owner asked for. Ship 1 → 2 → 3.

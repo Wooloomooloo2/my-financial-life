@@ -3080,8 +3080,10 @@ class RegisterWindow(QMainWindow):
                 self._service.discard_pending(token)
                 return
             accepted = review.accepted_fitids()
+            adopted = review.adopted_amount_fitids()
         else:
             accepted = set()
+            adopted = set()
 
         # ADR-118: if the import would create categories not in the tree, let the
         # user map/create/park each before commit — so an import never silently
@@ -3099,6 +3101,7 @@ class RegisterWindow(QMainWindow):
         try:
             result = self._service.commit_import(
                 token, pending.suggested_status, accepted, category_decisions,
+                adopt_amount_fitids=adopted,
             )
         except Exception as e:
             QMessageBox.critical(

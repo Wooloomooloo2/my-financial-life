@@ -28,7 +28,7 @@ from decimal import Decimal
 from typing import Optional
 
 from mfl_desktop.db.repository import Repository
-from mfl_desktop.db.money import decimal_to_pence
+from mfl_desktop.db.money import decimal_to_pence, pence_to_decimal
 from mfl_desktop.import_engine import csv_parser, ofx_parser, qif_parser
 from mfl_desktop.import_engine import dedupe
 from mfl_desktop.import_engine.qif_actions import is_reinvest
@@ -74,6 +74,13 @@ class ClassifiedTransaction:
     # drives the review dialog's default tick.
     match_is_manual: bool = True
     match_strength: str = ""
+    # Amount-mismatch match (ADR-130 Phase 3b): the download matched an existing
+    # row by date+payee but the amounts differ (a likely mis-entry). The review
+    # dialog offers "adopt bank amount" → update the existing row to this row's
+    # amount on confirm. ``match_existing_amount`` is the existing row's signed
+    # amount (what the user typed), shown alongside the bank amount.
+    match_amount_differs: bool = False
+    match_existing_amount: Optional[Decimal] = None
     status_override: str = ""     # 'matched' | 'reconciled' | 'pending' | '' (ADR-130)
     # Investment fields (ADR-043). `action` is "" for an ordinary cash row and
     # set ('Buy'/'Sell'/'Div'/…) for a QIF investment row; the rest carry the
@@ -456,7 +463,10 @@ class ImportService:
             )
             for e in existing
         ]
-        matches = dedupe.match_duplicates(import_rows, existing_rows)
+        matches = dedupe.match_duplicates(
+            import_rows, existing_rows,
+            fuzzy_amount_pct=dedupe.DEFAULT_FUZZY_AMOUNT_PCT,
+        )
         for idx, m in matches.items():
             c = classified[idx]
             c.status = "potential_match"
@@ -465,6 +475,9 @@ class ImportService:
             c.match_txn_date = m.existing_date
             c.match_is_manual = m.is_manual
             c.match_strength = m.strength
+            c.match_amount_differs = m.amount_differs
+            if m.amount_differs:
+                c.match_existing_amount = pence_to_decimal(m.existing_amount_pence)
 
     def get_pending(self, token: str) -> Optional[PendingImport]:
         return self._pending.get(token)
@@ -517,6 +530,7 @@ class ImportService:
         import_status: str,                # 'matched' | 'cleared' (ADR-130)
         accepted_match_fitids: set[str],
         category_decisions: Optional[dict] = None,
+        adopt_amount_fitids: Optional[set[str]] = None,
     ) -> ImportResult:
         """Commit a staged import. ``category_decisions`` (ADR-118) maps a
         normalised source-category path → ``(kind, payload)`` chosen in the
@@ -574,11 +588,23 @@ class ImportService:
                         # Confirm against a hand-typed placeholder → fill in its
                         # import_hash/memo (ADR-010) and advance it to 'matched'
                         # with the bank's posting date (ADR-130). The row stays.
+                        # ADR-130 Phase 3b: if this was an amount-mismatch match
+                        # and the user chose to adopt the bank figure, overwrite
+                        # the mis-entered amount with the download's.
+                        adopt = bool(
+                            tx.match_amount_differs
+                            and adopt_amount_fitids
+                            and tx.fitid in adopt_amount_fitids
+                        )
+                        bank_signed = (
+                            -tx.amount if tx.tx_type == "debit" else tx.amount
+                        )
                         self._repo.merge_into_manual_transaction(
                             manual_id=tx.match_txn_id,
                             import_hash=tx.import_hash,
                             memo=tx.memo,
                             bank_posted_date=tx.date_iso,
+                            new_amount=bank_signed if adopt else None,
                         )
                         matched += 1
                     else:

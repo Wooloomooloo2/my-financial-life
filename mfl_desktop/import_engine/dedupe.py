@@ -34,6 +34,14 @@ from mfl_desktop.transfer_reconcile import (
 # export. NOT the window that governs repeats (consumption handles those).
 DEFAULT_WINDOW_DAYS = 2
 
+# Amount-mismatch tier (ADR-130 Phase 3b): after exact-amount pairing, a still-
+# unmatched download row can pair with a same-sign existing row whose amount is
+# within this fraction AND whose payee overlaps — a likely mis-entry (e.g. an
+# £8.99 typed for an £8.25 charge). Conservative + payee-gated + review-only, so
+# it can't silently corrupt data. 0.0 disables the tier (default = off, so the
+# ADR-085 dedupe behaviour is unchanged unless a caller opts in).
+DEFAULT_FUZZY_AMOUNT_PCT = 0.20
+
 
 @dataclass(frozen=True)
 class ImportRow:
@@ -62,6 +70,11 @@ class DedupeMatch:
     strength: str              # 'strong' | 'weak' (drives the default review tick)
     existing_date: str
     existing_payee: str
+    # Amount-mismatch tier (ADR-130 Phase 3b): a near-amount match where the
+    # download's amount differs from the existing row's — a likely mis-entry.
+    # Always a *weak* review item; the UI offers "adopt bank amount".
+    amount_differs: bool = False
+    existing_amount_pence: int = 0    # the existing row's signed amount
 
 
 @dataclass(frozen=True)
@@ -88,6 +101,7 @@ def match_duplicates(
     existing_rows: list[ExistingRow],
     *,
     window_days: int = DEFAULT_WINDOW_DAYS,
+    fuzzy_amount_pct: float = 0.0,
 ) -> dict[int, DedupeMatch]:
     """Pair import rows to existing rows (each existing row claimed once).
 
@@ -96,6 +110,12 @@ def match_duplicates(
     require an **exact signed-amount** match and a date within ``±window_days``;
     they're ordered same-day / same-payee first so the greedy walk claims the
     most plausible pairings before the window stretches.
+
+    ``fuzzy_amount_pct`` > 0 runs a second, conservative **amount-mismatch**
+    pass (ADR-130 Phase 3b) over the rows still unmatched: a same-sign existing
+    row whose amount is within that fraction *and* whose payee overlaps pairs as
+    a **weak** ``amount_differs`` match (the UI offers "adopt bank amount"). Off
+    by default, so the exact behaviour is unchanged unless a caller opts in.
     """
     # Bucket existing rows by exact signed amount — the hard filter — so each
     # import row only considers same-amount candidates.
@@ -138,4 +158,70 @@ def match_duplicates(
             strength="strong" if strong else "weak",
             existing_date=p.existing_date, existing_payee=p.existing_payee,
         )
+
+    if fuzzy_amount_pct > 0:
+        _match_amount_mismatches(
+            import_rows, existing_rows, out, window_days, fuzzy_amount_pct,
+        )
     return out
+
+
+def _match_amount_mismatches(
+    import_rows: list[ImportRow],
+    existing_rows: list[ExistingRow],
+    out: dict[int, DedupeMatch],
+    window_days: int,
+    fuzzy_amount_pct: float,
+) -> None:
+    """Second pass (ADR-130): pair still-unmatched download rows to same-sign,
+    payee-overlapping existing rows whose amount is within ``fuzzy_amount_pct``
+    — a likely mis-entry. Each existing row still claimed at most once. Patches
+    ``out`` in place with weak ``amount_differs`` matches."""
+    claimed = {m.existing_id for m in out.values()}
+    free = [e for e in existing_rows if e.id not in claimed]
+    if not free:
+        return
+
+    pairs: list[_Pair] = []
+    extra: dict[tuple[int, int], int] = {}   # (index, existing_id) -> existing amount
+    for imp in import_rows:
+        if imp.index in out:                 # already exact-matched
+            continue
+        for e in free:
+            if (imp.amount_pence < 0) != (e.amount_pence < 0):
+                continue                     # opposite sign — not the same charge
+            diff = abs(imp.amount_pence - e.amount_pence)
+            larger = max(abs(imp.amount_pence), abs(e.amount_pence))
+            if diff == 0 or larger == 0 or diff / larger > fuzzy_amount_pct:
+                continue
+            d = _days_apart(imp.date_iso, e.date_iso)
+            if d is None or d > window_days:
+                continue
+            if not (_payee_tokens(imp.payee_raw) & _payee_tokens(e.payee_name)):
+                continue                     # payee overlap REQUIRED for fuzzy
+            score = score_candidate(
+                days_apart=d, amount_mismatch_pct=diff / larger * 100.0,
+                currencies_match=True,
+                src_payee=imp.payee_raw, tgt_payee=e.payee_name,
+            )
+            pairs.append(_Pair(
+                index=imp.index, existing_id=e.id, score=score, days_apart=d,
+                payee_overlap=True, is_manual=e.is_manual,
+                existing_date=e.date_iso, existing_payee=e.payee_name,
+            ))
+            extra[(imp.index, e.id)] = e.amount_pence
+
+    kept = greedy_pair(
+        pairs,
+        source_key=lambda p: p.index,
+        target_key=lambda p: p.existing_id,
+        score_key=lambda p: p.score,
+    )
+    for p in kept:
+        out[p.index] = DedupeMatch(
+            existing_id=p.existing_id, is_manual=p.is_manual,
+            strength="weak",           # always review an amount change
+            existing_date=p.existing_date, existing_payee=p.existing_payee,
+            amount_differs=True,
+            existing_amount_pence=extra[(p.index, p.existing_id)],
+        )
