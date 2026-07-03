@@ -254,7 +254,12 @@ class RegisterWindow(QMainWindow):
         folders = repo.list_folders()
         # Sidebar shows each account's worth — market value for investment
         # accounts (cash + holdings), cash for everything else (ADR-044).
-        balances = repo.compute_account_values(include_closed=True)
+        # ADR-131: honour the remembered Today | Projected balance mode.
+        _as_of = (date.today().isoformat()
+                  if Sidebar.saved_balance_mode() == "today" else None)
+        balances = repo.compute_account_values(
+            include_closed=True, as_of_date=_as_of,
+        )
         reports = repo.list_reports()
         report_folders = repo.list_report_folders()
         self._sidebar = Sidebar(
@@ -263,6 +268,10 @@ class RegisterWindow(QMainWindow):
             repo=repo,
         )
         self._sidebar.selection_changed.connect(self._on_sidebar_change)
+        # ADR-131: flipping Today | Projected recomputes balances + reloads.
+        self._sidebar.balance_mode_changed.connect(
+            self._refresh_sidebar_keep_selection
+        )
         self._sidebar.setContextMenuPolicy(Qt.CustomContextMenu)
         self._sidebar.customContextMenuRequested.connect(
             self._on_sidebar_context_menu
@@ -3403,6 +3412,17 @@ class RegisterWindow(QMainWindow):
             return
         self._reload_sidebar(account_iri)
 
+    def _sidebar_balances(self) -> dict:
+        """Per-account values for the sidebar, honouring its Today | Projected
+        balance mode (ADR-131): 'today' sums transactions posted on/before today
+        (excludes future-dated 'forwarded' rows), 'projected' sums the whole
+        ledger."""
+        as_of = (date.today().isoformat()
+                 if self._sidebar.balance_mode() == "today" else None)
+        return self._repo.compute_account_values(
+            include_closed=True, as_of_date=as_of,
+        )
+
     def _refresh_sidebar_balances(self) -> None:
         """Reload the sidebar after a balance-affecting operation (txn
         add/delete, import). Preserves account selection; folder
@@ -3423,7 +3443,7 @@ class RegisterWindow(QMainWindow):
         """
         accounts = self._repo.list_accounts(include_closed=True)
         folders = self._repo.list_folders()
-        balances = self._repo.compute_account_values(include_closed=True)
+        balances = self._sidebar_balances()
         reports = self._repo.list_reports()
         report_folders = self._repo.list_report_folders()
         self._sidebar.reload(
@@ -3446,7 +3466,7 @@ class RegisterWindow(QMainWindow):
         moving the user's focus."""
         accounts = self._repo.list_accounts(include_closed=True)
         folders = self._repo.list_folders()
-        balances = self._repo.compute_account_values(include_closed=True)
+        balances = self._sidebar_balances()
         reports = self._repo.list_reports()
         report_folders = self._repo.list_report_folders()
         self._sidebar.reload(

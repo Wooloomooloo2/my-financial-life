@@ -28,9 +28,12 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
-from PySide6.QtWidgets import QHeaderView, QTreeWidget, QTreeWidgetItem
+from PySide6.QtWidgets import (
+    QButtonGroup, QHBoxLayout, QHeaderView, QPushButton, QTreeWidget,
+    QTreeWidgetItem, QWidget,
+)
 
 from mfl_desktop.ui import tokens
 from mfl_desktop.db.repository import (
@@ -89,6 +92,12 @@ class Sidebar(QTreeWidget):
     """
 
     selection_changed = Signal(str, object)
+    # Emitted when the user flips the Today | Projected balance toggle
+    # (ADR-131). The register window recomputes balances and reloads.
+    balance_mode_changed = Signal(str)          # 'today' | 'projected'
+
+    # QSettings key for the remembered balance mode (app-level, ADR-092).
+    _BALANCE_MODE_KEY = "sidebar/balance_mode"
 
     def __init__(
         self,
@@ -108,6 +117,10 @@ class Sidebar(QTreeWidget):
         # bare sum for mixed folders; single-currency folders never convert.
         self._repo = repo
         self._display_currency = self._resolve_display_currency()
+        # Today's balance (posted on/before today) vs projected (whole ledger,
+        # incl. future-dated rows) — ADR-131. Remembered app-level; defaults to
+        # 'today' so the sidebar shows the actual balance now.
+        self._balance_mode = self.saved_balance_mode()
         # ADR-119: objectName binds the flush, airier "navigation panel" QSS in
         # ui/theme.py (borderless, roomier rows) without affecting other trees.
         self.setObjectName("sidebar")
@@ -139,6 +152,60 @@ class Sidebar(QTreeWidget):
         # (these are set on items as brushes, not via QSS, so the global
         # re-style doesn't reach them).
         tokens.notifier.changed.connect(self._restyle)
+
+    # ── balance mode (Today | Projected, ADR-131) ───────────────────────────
+
+    def balance_mode(self) -> str:
+        """'today' (posted on/before today) or 'projected' (whole ledger)."""
+        return self._balance_mode
+
+    @staticmethod
+    def saved_balance_mode() -> str:
+        """The remembered balance mode from QSettings ('today' default) — usable
+        before a Sidebar instance exists (ADR-131)."""
+        m = str(QSettings().value(Sidebar._BALANCE_MODE_KEY, "today") or "today")
+        return m if m in ("today", "projected") else "today"
+
+    def _make_balance_toggle(self) -> QWidget:
+        """A compact segmented 'Today | Projected' pill (matches the ADR-113
+        toggle style) placed on the Accounts header row. Reflects the current
+        mode and re-emits ``balance_mode_changed`` on a change."""
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addStretch(1)
+        group = QButtonGroup(holder)
+        group.setExclusive(True)
+        for mode, label in (("today", "Today"), ("projected", "Projected")):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setChecked(self._balance_mode == mode)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(
+                "Balance as of today (excludes future-dated transactions)."
+                if mode == "today" else
+                "Projected balance including future-dated transactions."
+            )
+            tokens.themed(
+                b,
+                "QPushButton { padding: 1px 6px; border: 1px solid {border}; "
+                "background-color: {surface}; color: {muted}; font-size: 9px; }"
+                "QPushButton:checked { background-color: {accent}; "
+                "color: {surface}; border-color: {accent}; font-weight: bold; }"
+                "QPushButton:hover:!checked { background-color: {surface_alt}; }",
+            )
+            group.addButton(b)
+            b.clicked.connect(lambda _c, m=mode: self._on_balance_mode_clicked(m))
+            row.addWidget(b)
+        return holder
+
+    def _on_balance_mode_clicked(self, mode: str) -> None:
+        if mode == self._balance_mode:
+            return
+        self._balance_mode = mode
+        QSettings().setValue(self._BALANCE_MODE_KEY, mode)
+        self.balance_mode_changed.emit(mode)
 
     def _restyle(self) -> None:
         """Re-apply the token-derived header/closed-row brushes to the live
@@ -200,9 +267,20 @@ class Sidebar(QTreeWidget):
             "ACCOUNTS", "section_accounts", with_top_rule=False,
         )
         self.addTopLevelItem(accounts_header)
-        # Section headers have no column-1 content; spanning gives the
-        # header text the full width without an awkward right-edge gap.
-        accounts_header.setFirstColumnSpanned(True)
+        # The Today | Projected balance toggle (ADR-131) sits in column 1 of the
+        # Accounts header, so the header is NOT column-spanned here.
+        toggle = self._make_balance_toggle()
+        self.setItemWidget(accounts_header, 1, toggle)
+        # Guarantee column 1 is wide enough for the toggle even when every
+        # balance is short (ResizeToContents ignores cell widgets, so a narrow
+        # ledger would otherwise clip "Projected"). Bounds the min for all
+        # sections — harmless for the stretchy name column.
+        toggle.adjustSize()
+        # +16 covers the tree cell's internal padding, which otherwise squeezes
+        # the widget below its sizeHint and clips "Projected".
+        self.header().setMinimumSectionSize(
+            max(self.header().minimumSectionSize(), toggle.sizeHint().width() + 16)
+        )
 
         # 'All transactions' is always the first child of the Accounts header.
         all_item = QTreeWidgetItem(["All transactions", ""])

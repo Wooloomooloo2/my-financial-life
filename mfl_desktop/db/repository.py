@@ -1232,7 +1232,7 @@ class Repository:
             raise
 
     def compute_account_balances(
-        self, include_closed: bool = False,
+        self, include_closed: bool = False, as_of_date: Optional[str] = None,
     ) -> dict[int, Decimal]:
         """Per-account balance: opening_balance + sum of txn.amount.
 
@@ -1240,18 +1240,27 @@ class Repository:
         use the same opening + txns formula for now — once the valuations
         UX ships (backlog) those families switch to latest-valuation.
 
+        ``as_of_date`` (inclusive ``'YYYY-MM-DD'``), when given, counts only
+        transactions ``posted_date <= as_of_date`` — i.e. **today's** balance,
+        excluding future-dated ("forwarded") rows. ``None`` sums the whole
+        ledger (the **projected** balance) — ADR-131.
+
         Closed accounts are omitted unless ``include_closed=True`` (ADR-069),
         matching :pymeth:`list_accounts`.
         """
         where = "" if include_closed else "WHERE a.archived_at IS NULL"
+        date_clause = " AND t.posted_date <= ?" if as_of_date else ""
+        params = (as_of_date,) if as_of_date else ()
         cur = self._conn.execute(
             "SELECT a.id, "
             "       a.opening_balance + COALESCE((SELECT SUM(t.amount) "
             "                                     FROM txn t "
-            "                                     WHERE t.account_id = a.id), 0) "
+            "                                     WHERE t.account_id = a.id"
+            f"{date_clause}), 0) "
             "       AS balance_pence "
             "FROM account a "
-            f"{where}"
+            f"{where}",
+            params,
         )
         return {int(r["id"]): pence_to_decimal(r["balance_pence"]) for r in cur}
 
@@ -1290,7 +1299,7 @@ class Repository:
         return row["d"] if row and row["d"] else None
 
     def compute_account_values(
-        self, include_closed: bool = False,
+        self, include_closed: bool = False, as_of_date: Optional[str] = None,
     ) -> dict[int, Decimal]:
         """Per-account *market value* (ADR-044) — the figure Net Worth and the
         sidebar should show. For investment accounts this is
@@ -1300,8 +1309,15 @@ class Repository:
         (``compute_account_balances``). The register's running-balance column is
         a transaction ledger and is deliberately NOT affected by this.
 
+        ``as_of_date`` (ADR-131) restricts both the cash sum and the investment
+        holdings to transactions ``posted_date <= as_of_date`` — today's balance
+        vs the projected (whole-ledger) balance. Prices are always the latest on
+        file; only the transaction set is dated.
+
         Closed accounts are omitted unless ``include_closed=True`` (ADR-069)."""
-        balances = self.compute_account_balances(include_closed=include_closed)
+        balances = self.compute_account_balances(
+            include_closed=include_closed, as_of_date=as_of_date,
+        )
         investment = [
             a for a in self.list_accounts(include_closed=include_closed)
             if a.family == "investment"
@@ -1319,6 +1335,8 @@ class Repository:
         values = dict(balances)
         for acct in investment:
             txns = self.list_transactions_for_account(acct.id)
+            if as_of_date:
+                txns = [t for t in txns if t.posted_date <= as_of_date]
             view = compute_holdings_view(
                 txns, acct.opening_balance, price_map, multipliers,
             )
