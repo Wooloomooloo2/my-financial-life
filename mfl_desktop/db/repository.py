@@ -3975,6 +3975,7 @@ class Repository:
         price: Optional[Decimal] = None,
         commission: Optional[Decimal] = None,
         accrued_interest: Optional[Decimal] = None,
+        bank_posted_date: Optional[str] = None,
     ) -> int:
         """Insert a transaction. The investment kwargs (ADR-043) default to
         None so every existing cash caller is unaffected; when supplied,
@@ -3990,8 +3991,8 @@ class Repository:
             "(iri, account_id, posted_date, amount, payee_id, category_id, "
             " status, memo, import_hash, import_batch_id, "
             " action, security_id, quantity, price, commission, "
-            " accrued_interest) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " accrued_interest, bank_posted_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 iri, account_id, posted_date, decimal_to_pence(amount),
                 payee_id, category_id, status, memo or None,
@@ -4002,6 +4003,7 @@ class Repository:
                 decimal_to_pence(commission) if commission is not None else None,
                 decimal_to_pence(accrued_interest)
                 if accrued_interest is not None else None,
+                bank_posted_date,
             ),
         )
         return cur.lastrowid
@@ -4233,6 +4235,7 @@ class Repository:
         lines: list[SplitLineInput],
         import_hash: Optional[str],
         import_batch_id: Optional[int],
+        bank_posted_date: Optional[str] = None,
     ) -> int:
         """Insert a split transaction (ADR-051): a parent `txn` row carrying the
         full signed ``total_amount`` (category_id = Uncategorised) plus one
@@ -4242,6 +4245,7 @@ class Repository:
             account_id=account_id, posted_date=posted_date, amount=total_amount,
             payee_id=payee_id, category_id=UNCATEGORISED_ID, status=status,
             memo=memo, import_hash=import_hash, import_batch_id=import_batch_id,
+            bank_posted_date=bank_posted_date,
         )
         self._replace_split_lines(txn_id, total_amount, lines)
         return txn_id
@@ -4359,16 +4363,24 @@ class Repository:
         manual_id: int,
         import_hash: str,
         memo: Optional[str],
+        bank_posted_date: Optional[str] = None,
     ) -> None:
-        """Add import_hash to an existing manual transaction.
+        """Confirm a download against an existing hand-entered transaction.
 
-        Memo is only filled in if the existing memo is empty; amount, date,
-        category, payee, and status are the user's manually-entered values
-        and are not touched.
+        Stamps its ``import_hash``, advances it up the confidence ladder to
+        ``matched`` if it's still ``pending``/``cleared`` (ADR-130 — the
+        download is the bank confirmation), and records the bank's posting date
+        (``bank_posted_date``) so reconciliation can range on it. The user's
+        amount, spend date, category, and payee are untouched; a ``reconciled``
+        (locked) row is left alone. Memo is only filled if currently empty.
         """
         self._conn.execute(
-            "UPDATE txn SET import_hash = ? WHERE id = ?",
-            (import_hash, manual_id),
+            "UPDATE txn SET import_hash = ?, "
+            "  status = CASE WHEN status IN ('pending', 'cleared') "
+            "                THEN 'matched' ELSE status END, "
+            "  bank_posted_date = COALESCE(?, bank_posted_date) "
+            "WHERE id = ?",
+            (import_hash, bank_posted_date, manual_id),
         )
         if memo:
             self._conn.execute(
@@ -9474,12 +9486,17 @@ class Repository:
         Rows already ticked into ``include_statement_id`` (an open pass being
         resumed, or a closed statement being viewed) are **always** included
         regardless of status, so their ticks aren't lost. Any date is eligible
-        (old stragglers can still be caught — ADR-040). Returned in statement
-        order (date asc); ``running_balance`` is 0 (not meaningful here)."""
+        (old stragglers can still be caught — ADR-040).
+
+        The reported ``posted_date`` is the **bank posting date** where a
+        download recorded one (``COALESCE(bank_posted_date, posted_date)``,
+        ADR-130) so reconciliation ranges and displays against the statement's
+        dates rather than the user's spend date. ``running_balance`` is 0."""
         sid = include_statement_id if include_statement_id is not None else -1
         cur = self._conn.execute(
             "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
-            "       t.posted_date, t.amount, "
+            "       COALESCE(t.bank_posted_date, t.posted_date) AS posted_date, "
+            "       t.amount, "
             "       t.payee_id, COALESCE(p.name, '') AS payee_name, "
             "       t.category_id, COALESCE(c.name, '') AS category_name, "
             "       t.status, COALESCE(t.memo, '') AS memo, "
@@ -9493,7 +9510,7 @@ class Repository:
             "        OR (t.status = 'cleared' AND ?) "
             "        OR t.id IN (SELECT txn_id FROM statement_txn "
             "                    WHERE statement_id = ?) ) "
-            "ORDER BY t.posted_date ASC, t.id ASC",
+            "ORDER BY COALESCE(t.bank_posted_date, t.posted_date) ASC, t.id ASC",
             (account_id, 1 if include_cleared else 0, sid),
         )
         return [

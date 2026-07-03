@@ -572,11 +572,13 @@ class ImportService:
                     assert tx.match_txn_id is not None
                     if tx.match_is_manual:
                         # Confirm against a hand-typed placeholder → fill in its
-                        # import_hash/memo (ADR-010). The row stays; not skipped.
+                        # import_hash/memo (ADR-010) and advance it to 'matched'
+                        # with the bank's posting date (ADR-130). The row stays.
                         self._repo.merge_into_manual_transaction(
                             manual_id=tx.match_txn_id,
                             import_hash=tx.import_hash,
                             memo=tx.memo,
+                            bank_posted_date=tx.date_iso,
                         )
                         matched += 1
                     else:
@@ -669,6 +671,7 @@ class ImportService:
                         lines=lines,
                         import_hash=tx.import_hash,
                         import_batch_id=batch_id,
+                        bank_posted_date=tx.date_iso,
                     )
                     imported += 1
                     continue
@@ -696,6 +699,7 @@ class ImportService:
                     quantity=tx.quantity,
                     price=tx.price,
                     commission=tx.commission,
+                    bank_posted_date=tx.date_iso,
                 )
                 imported += 1
 
