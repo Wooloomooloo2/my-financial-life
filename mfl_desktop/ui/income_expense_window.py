@@ -379,6 +379,11 @@ class IncomeExpenseWindow(QMainWindow):
             self._show_empty("No transactions match the selected categories.")
             return
 
+        # ADR-140: expand any picked transfer categories to their subtree too,
+        # so selecting a parent transfer group pulls in its children.
+        transfer_category_ids = self._expanded_category_ids(
+            filters.transfer_category_ids
+        )
         result = self._repo.income_expense_series(
             date_from=d_from.isoformat(),
             date_to=d_to.isoformat(),
@@ -387,6 +392,7 @@ class IncomeExpenseWindow(QMainWindow):
             category_ids=category_ids,
             display_currency=self._display_ccy,
             include_transfers=filters.include_transfers,
+            transfer_category_ids=transfer_category_ids,
         )
 
         self._last_granularity = sql_granularity
@@ -396,7 +402,11 @@ class IncomeExpenseWindow(QMainWindow):
         )
         self._render(buckets, sql_granularity, d_from, d_to, filters,
                      result.get("unconverted", {}))
-        self._refresh_composition(d_from, d_to, account_ids, category_ids)
+        self._refresh_composition(
+            d_from, d_to, account_ids, category_ids,
+            include_transfers=filters.include_transfers,
+            transfer_category_ids=transfer_category_ids,
+        )
 
     def _render(
         self,
@@ -433,19 +443,25 @@ class IncomeExpenseWindow(QMainWindow):
         d_to: date,
         account_ids: list[int],
         category_ids: Optional[list[int]],
+        *,
+        include_transfers: bool = False,
+        transfer_category_ids: Optional[list[int]] = None,
     ) -> None:
         """Recompute the income / expense top-level breakdowns for the donut.
 
         Uses :meth:`Repository.sankey_category_totals` — the same category-
-        kind cash-flow convention as the headline figures — and rolls each
-        leaf total up to its top-level category. Stored per side so the
-        toggle re-renders without re-querying."""
+        kind cash-flow convention as the headline figures, including the
+        directional-transfer folding (ADR-140) so the donut matches the bars —
+        and rolls each leaf total up to its top-level category. Stored per side
+        so the toggle re-renders without re-querying."""
         totals = self._repo.sankey_category_totals(
             date_from=d_from.isoformat(),
             date_to=d_to.isoformat(),
             account_ids=account_ids,
             category_ids=category_ids,
             display_currency=self._display_ccy,
+            include_transfers=include_transfers,
+            transfer_category_ids=transfer_category_ids,
         )
         parent_of = {c.id: c.parent_id for c in self._all_categories}
         name_of = {c.id: c.name for c in self._all_categories}
@@ -594,7 +610,7 @@ class IncomeExpenseWindow(QMainWindow):
             self._filter_line(
                 "Categories", filters.category_ids, self._category_count(),
             ),
-            "Transfers: " + ("included" if filters.include_transfers else "excluded"),
+            self._transfers_filter_line(filters),
         ]
         self._filters_value.setText("\n".join(filter_bits))
 
@@ -649,6 +665,16 @@ class IncomeExpenseWindow(QMainWindow):
         if not selected:
             return f"{label}: all"
         return f"{label}: {len(selected)} of {total}"
+
+    @staticmethod
+    def _transfers_filter_line(filters) -> str:
+        """Summary line for the transfer inclusion (ADR-140)."""
+        if not filters.include_transfers:
+            return "Transfers: excluded"
+        n = len(filters.transfer_category_ids)
+        if not n:
+            return "Transfers: included (all categories)"
+        return f"Transfers: included ({n} categor{'y' if n == 1 else 'ies'})"
 
     def _expanded_category_ids(
         self, selected: tuple[int, ...],

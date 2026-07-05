@@ -216,6 +216,13 @@ class IncomeExpenseFilters:
     # (a linked transfer pair) regardless of the category it was filed
     # under. Default False = exclude (the cash-flow-correct default).
     include_transfers: bool = False
+    # ADR-140: WHICH transfer-kind categories to fold in as directional cash
+    # flows when ``include_transfers`` is on — an outflow leg counts on the
+    # expense side, an inflow on the income side (grouped in the composition
+    # under its transfer category), so e.g. a mortgage-principal transfer can
+    # feed a rental ROI view. Empty == all transfer categories. Ignored while
+    # ``include_transfers`` is False.
+    transfer_category_ids: tuple[int, ...] = field(default_factory=tuple)
 
     # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
     chart_split: tuple[int, ...] = field(default_factory=tuple)

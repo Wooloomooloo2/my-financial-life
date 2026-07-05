@@ -98,12 +98,36 @@ class IncomeExpenseFilterDialog(ReportFilterDialogBase):
         )
         self._categories_panel.set_checked_ids(current.category_ids or None)
 
+        # ADR-140: which transfer categories to fold in (empty == all). Only
+        # meaningful while "Include transfers" is ticked, so it enables/disables
+        # with that checkbox.
+        self._transfer_categories_panel = CheckListPanel(
+            "Transfer categories (empty = all)",
+            self._transfer_category_rows(),
+            placeholder="Search transfers…",
+        )
+        self._transfer_categories_panel.set_checked_ids(
+            current.transfer_category_ids or None
+        )
+        self._transfer_categories_panel.setEnabled(current.include_transfers)
+        self._transfer_categories_panel.setToolTip(
+            "Transfers filed under the ticked categories are counted as cash "
+            "flows — an outflow on the Expense side, an inflow on the Income "
+            "side. Tick none to include every transfer. Scope to your "
+            "operating account(s) so only your side of each transfer counts."
+        )
+        self._include_transfers_check.toggled.connect(
+            self._transfer_categories_panel.setEnabled
+        )
+
         lists_splitter = QSplitter(Qt.Horizontal)
         lists_splitter.addWidget(accounts_panel)
         lists_splitter.addWidget(self._categories_panel)
+        lists_splitter.addWidget(self._transfer_categories_panel)
         lists_splitter.setStretchFactor(0, 1)
         lists_splitter.setStretchFactor(1, 1)
-        lists_splitter.setSizes([220, 260])
+        lists_splitter.setStretchFactor(2, 1)
+        lists_splitter.setSizes([200, 240, 240])
 
         top_splitter = QSplitter(Qt.Horizontal)
         top_splitter.addWidget(left_column)
@@ -132,6 +156,19 @@ class IncomeExpenseFilterDialog(ReportFilterDialogBase):
         rows.sort(key=lambda pair: pair[1].lower())
         return rows
 
+    def _transfer_category_rows(self) -> list[tuple[int, str]]:
+        """``(id, full_path_label)`` rows for every ``kind='transfer'``
+        category (ADR-140) — the ones foldable into the report as cash flows.
+        Sorted by breadcrumb so siblings cluster."""
+        by_id = {c.id: c for c in self._all_categories}
+        rows = [
+            (c.id, category_path(by_id, c.id))
+            for c in self._all_categories
+            if c.kind == "transfer"
+        ]
+        rows.sort(key=lambda pair: pair[1].lower())
+        return rows
+
     def _on_accept(self) -> None:
         period_key, custom_start, custom_end = self._period_and_custom("1y")
 
@@ -143,5 +180,9 @@ class IncomeExpenseFilterDialog(ReportFilterDialogBase):
             account_ids=tuple(self._checked_or_all(self._accounts_panel)),
             category_ids=tuple(self._checked_or_all(self._categories_panel)),
             include_transfers=self._include_transfers_check.isChecked(),
+            transfer_category_ids=(
+                tuple(self._transfer_categories_panel.checked_ids())
+                if self._include_transfers_check.isChecked() else ()
+            ),
         )
         self.accept()

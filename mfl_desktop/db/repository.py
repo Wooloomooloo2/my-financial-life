@@ -5413,9 +5413,17 @@ class Repository:
         account_ids: Optional[Iterable[int]] = None,
         category_ids: Optional[Iterable[int]] = None,
         display_currency: Optional[str] = None,
+        include_transfers: bool = False,
+        transfer_category_ids: Optional[Iterable[int]] = None,
     ) -> dict:
         """Period-scoped income and expense totals per category for the Sankey
-        report (ADR-056).
+        report (ADR-056) and the Income & Expense composition donut.
+
+        ADR-140: with ``include_transfers`` on, ``kind='transfer'`` legs fold in
+        as directional cash flows (outflow → expense, inflow → income), keyed by
+        their own category so they roll up as their own slice;
+        ``transfer_category_ids`` (empty == all) narrows which. Both default off,
+        so the Sankey report is unchanged.
 
         Income = inflows (``amount > 0``) on ``kind='income'`` categories;
         expense = **net** of all signed amounts on ``kind='expense'``
@@ -5451,19 +5459,31 @@ class Repository:
         income: dict[int, int] = {}
         expense: dict[int, int] = {}
         unconverted: dict[str, int] = {}
-        clauses = [
-            "t.posted_date BETWEEN ? AND ?",
-            "( (c.kind = 'income'  AND t.amount > 0) "
-            "  OR c.kind = 'expense' )",  # expense: net of refunds (ADR-129)
-        ]
+        tcats = list(transfer_category_ids) if transfer_category_ids else []
+        kind_clause = (
+            "(c.kind = 'income' AND t.amount > 0) OR c.kind = 'expense'"
+        )
         params: list = [date_from, date_to]
+        if include_transfers:
+            if tcats:
+                kind_clause += (
+                    f" OR (c.kind = 'transfer' AND t.category_id IN "
+                    f"({','.join('?' * len(tcats))}))"
+                )
+                params.extend(tcats)
+            else:
+                kind_clause += " OR c.kind = 'transfer'"
+        clauses = ["t.posted_date BETWEEN ? AND ?", f"( {kind_clause} )"]
         acc = list(account_ids) if account_ids else []
         if acc:
             clauses.append(f"t.account_id IN ({','.join('?' * len(acc))})")
             params.extend(acc)
         cats = list(category_ids) if category_ids else []
         if cats:
-            clauses.append(f"t.category_id IN ({','.join('?' * len(cats))})")
+            cat_clause = f"t.category_id IN ({','.join('?' * len(cats))})"
+            if include_transfers:
+                cat_clause = f"({cat_clause} OR c.kind = 'transfer')"
+            clauses.append(cat_clause)
             params.extend(cats)
         # ADR-090: portfolio-move trades are neither income nor expense — drop
         # them so a Buy (amount<0 on Uncategorised/expense) doesn't show up as
@@ -5473,13 +5493,20 @@ class Repository:
         params.extend(move_params)
         cur = self._conn.execute(
             "SELECT c.kind AS kind, t.category_id AS cid, a.currency AS ccy, "
-            "  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
-            "           ELSE -t.amount END) AS pence "
+            # ADR-140: transfer legs classified by direction; income/expense
+            # keep their kind.
+            "  CASE WHEN c.kind = 'income'  THEN 'income' "
+            "       WHEN c.kind = 'expense' THEN 'expense' "
+            "       WHEN t.amount >= 0       THEN 'income' "
+            "       ELSE 'expense' END AS flow, "
+            "  SUM(CASE WHEN c.kind = 'income'  THEN t.amount "
+            "           WHEN c.kind = 'expense' THEN -t.amount "
+            "           ELSE ABS(t.amount) END) AS pence "
             "FROM txn_category_line t "
             "JOIN category c ON c.id = t.category_id "
             "JOIN account a ON a.id = t.account_id "
             "WHERE " + " AND ".join(clauses) + " "
-            "GROUP BY t.category_id, c.kind, a.currency",
+            "GROUP BY t.category_id, flow, c.kind, a.currency",
             params,
         )
         target_ccy = (display_currency or "").strip().upper()
@@ -5497,10 +5524,11 @@ class Repository:
                         unconverted[ccy] = unconverted.get(ccy, 0) + abs(pence)
                     continue
                 pence = int(converted.to_integral_value(rounding=ROUND_HALF_UP))
-            bucket = income if r["kind"] == "income" else expense
+            bucket = income if r["flow"] == "income" else expense
             bucket[cid] = bucket.get(cid, 0) + pence
         # Net-refund expense categories clamp to £0 (drop) — ADR-129. Income
-        # stays as-is (strict inflow, always ≥ 0).
+        # stays as-is (strict inflow, always ≥ 0). Transfer legs are single-
+        # sign per direction, so they're always ≥ 0 and survive (ADR-140).
         expense = {cid: p for cid, p in expense.items() if p > 0}
         return {"income": income, "expense": expense, "unconverted": unconverted}
 
@@ -5514,9 +5542,19 @@ class Repository:
         category_ids: Optional[Iterable[int]] = None,
         display_currency: Optional[str] = None,
         include_transfers: bool = False,
+        transfer_category_ids: Optional[Iterable[int]] = None,
     ) -> dict:
         """Per-bucket income and expense totals for the Income & Expense
         report (ADR-064 / Arc E, E1).
+
+        ADR-140: when ``include_transfers`` is on, ``kind='transfer'`` legs are
+        folded in as **directional cash flows** — an outflow (``amount < 0``)
+        counts on the *expense* side, an inflow on the *income* side (unlike
+        an expense category, transfers are not netted; each leg counts by its
+        own sign). ``transfer_category_ids`` narrows this to specific transfer
+        categories (empty == all transfer categories) so, e.g., only a
+        'Mortgage Principal' transfer feeds a rental ROI view. The category
+        narrowing above never drops these transfer legs.
 
         Income = inflows (``amount > 0``) on ``kind='income'`` categories;
         expense = **net** of all signed amounts per ``kind='expense'``
@@ -5574,19 +5612,36 @@ class Repository:
         expense: dict[str, int] = {}
         unconverted: dict[str, int] = {}
 
-        clauses = [
-            "t.posted_date BETWEEN ? AND ?",
-            "( (c.kind = 'income'  AND t.amount > 0) "
-            "  OR c.kind = 'expense' )",  # expense: net of refunds (ADR-129)
-        ]
+        # ADR-140: optional transfer-kind branch, narrowed to specific transfer
+        # categories (empty == all). Only when include_transfers is on.
+        tcats = list(transfer_category_ids) if transfer_category_ids else []
+        kind_clause = (
+            "(c.kind = 'income' AND t.amount > 0) "
+            "OR c.kind = 'expense'"  # expense: net of refunds (ADR-129)
+        )
         params: list = [date_from, date_to]
+        if include_transfers:
+            if tcats:
+                kind_clause += (
+                    f" OR (c.kind = 'transfer' AND t.category_id IN "
+                    f"({','.join('?' * len(tcats))}))"
+                )
+                params.extend(tcats)
+            else:
+                kind_clause += " OR c.kind = 'transfer'"
+        clauses = ["t.posted_date BETWEEN ? AND ?", f"( {kind_clause} )"]
         acc = list(account_ids) if account_ids else []
         if acc:
             clauses.append(f"t.account_id IN ({','.join('?' * len(acc))})")
             params.extend(acc)
         cats = list(category_ids) if category_ids else []
         if cats:
-            clauses.append(f"t.category_id IN ({','.join('?' * len(cats))})")
+            # The income/expense category narrowing must not drop the transfer
+            # legs we deliberately folded in (they have their own categories).
+            cat_clause = f"t.category_id IN ({','.join('?' * len(cats))})"
+            if include_transfers:
+                cat_clause = f"({cat_clause} OR c.kind = 'transfer')"
+            clauses.append(cat_clause)
             params.extend(cats)
         if not include_transfers:
             clauses.append("t.transfer_id IS NULL")
@@ -5603,13 +5658,20 @@ class Repository:
             # the Spending Over Time total for the same scope.
             f"SELECT {bucket_expr} AS bucket, c.kind AS kind, "
             f"  a.currency AS ccy, "
-            f"  SUM(CASE WHEN c.kind = 'income' THEN t.amount "
-            f"           ELSE -t.amount END) AS pence "
+            # ADR-140: a transfer leg's *flow* is its direction (outflow →
+            # expense, inflow → income); income/expense keep their kind.
+            f"  CASE WHEN c.kind = 'income'  THEN 'income' "
+            f"       WHEN c.kind = 'expense' THEN 'expense' "
+            f"       WHEN t.amount >= 0       THEN 'income' "
+            f"       ELSE 'expense' END AS flow, "
+            f"  SUM(CASE WHEN c.kind = 'income'  THEN t.amount "
+            f"           WHEN c.kind = 'expense' THEN -t.amount "
+            f"           ELSE ABS(t.amount) END) AS pence "
             f"FROM txn_category_line t "
             f"JOIN category c ON c.id = t.category_id "
             f"JOIN account a ON a.id = t.account_id "
             f"WHERE " + " AND ".join(clauses) + " "
-            f"GROUP BY bucket, c.kind, t.category_id, a.currency",
+            f"GROUP BY bucket, flow, c.kind, t.category_id, a.currency",
             params,
         )
         target_ccy = (display_currency or "").strip().upper()
@@ -5617,6 +5679,8 @@ class Repository:
             bucket = r["bucket"]
             pence = int(r["pence"])
             # Net-refund expense category → £0 (ADR-129); income is strict (>0).
+            # Transfer legs are grouped by direction (single-sign), so their
+            # magnitude is always ≥ 0 and never floored (ADR-140).
             if r["kind"] == "expense" and pence <= 0:
                 continue
             ccy = (r["ccy"] or "").strip().upper()
@@ -5630,7 +5694,7 @@ class Repository:
                         unconverted[ccy] = unconverted.get(ccy, 0) + abs(pence)
                     continue
                 pence = int(converted.to_integral_value(rounding=ROUND_HALF_UP))
-            dest = income if r["kind"] == "income" else expense
+            dest = income if r["flow"] == "income" else expense
             dest[bucket] = dest.get(bucket, 0) + pence
         return {"income": income, "expense": expense, "unconverted": unconverted}
 
