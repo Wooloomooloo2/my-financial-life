@@ -3541,6 +3541,10 @@ class RegisterWindow(QMainWindow):
             open_act.triggered.connect(
                 lambda: self._open_saved_report(report_id)
             )
+            rename_act = menu.addAction("&Rename Report…")
+            rename_act.triggered.connect(
+                lambda: self._on_rename_report(report_id, report_name)
+            )
             menu.addSeparator()
             move_menu = menu.addMenu("&Move to Folder")
             self._populate_move_report_to_folder_menu(move_menu, report_id)
@@ -3991,6 +3995,27 @@ class RegisterWindow(QMainWindow):
         except ValueError as e:
             QMessageBox.warning(self, "Could not create folder", str(e))
             return
+        self._refresh_sidebar_keep_selection()
+
+    def _on_rename_report(self, report_id: int, current_name: str) -> None:
+        """Rename a saved report from the sidebar context menu. Names are
+        unique per folder (DB constraint) — a clash surfaces as a warning."""
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Report", "New name:", QLineEdit.Normal, current_name,
+        )
+        if not ok or new_name.strip() in ("", current_name):
+            return
+        try:
+            self._repo.update_report(report_id, name=new_name)
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not rename", str(e))
+            return
+        # Update the live window title if this report is open (all report
+        # windows share the _loaded_name / _update_name_label pattern).
+        win = self._saved_report_wins.get(report_id)
+        if win is not None and hasattr(win, "_update_name_label"):
+            win._loaded_name = new_name.strip()
+            win._update_name_label()
         self._refresh_sidebar_keep_selection()
 
     def _on_rename_report_folder(self, folder_id: int, current_name: str) -> None:
