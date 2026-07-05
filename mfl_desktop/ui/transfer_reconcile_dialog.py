@@ -46,6 +46,24 @@ from mfl_desktop.ui.transfer_chips import (
 )
 
 
+def _payee_item(
+    payee: str, split_id: Optional[int], split_memo: Optional[str],
+) -> QTableWidgetItem:
+    """Payee cell for a pair side. A split-line side is flagged inline with a
+    'split' tag + its line memo, so the user sees the match is a line inside a
+    larger split rather than a whole transaction (ADR-139)."""
+    text = payee or "(no payee)"
+    item = QTableWidgetItem(text)
+    if split_id is not None:
+        tag = f"split: {split_memo}" if split_memo else "split line"
+        item.setText(f"{text}  ·  {tag}")
+        item.setToolTip(
+            "This side is one line of a split transaction; only that line "
+            "is linked as the transfer."
+        )
+    return item
+
+
 class TransferReconcileDialog(QDialog):
     """Pick two accounts → see proposed pairs → check / uncheck → apply.
 
@@ -240,8 +258,9 @@ class TransferReconcileDialog(QDialog):
             )
             amt_a.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(i, 3, amt_a)
-            payee_a = p.source_payee or "(no payee)"
-            self._table.setItem(i, 4, QTableWidgetItem(payee_a))
+            self._table.setItem(i, 4, _payee_item(
+                p.source_payee, p.source_split_id, p.source_split_memo,
+            ))
 
             self._table.setItem(i, 5, QTableWidgetItem(p.target_posted_date))
             amt_b = QTableWidgetItem(
@@ -249,8 +268,9 @@ class TransferReconcileDialog(QDialog):
             )
             amt_b.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(i, 6, amt_b)
-            payee_b = p.target_payee or "(no payee)"
-            self._table.setItem(i, 7, QTableWidgetItem(payee_b))
+            self._table.setItem(i, 7, _payee_item(
+                p.target_payee, p.target_split_id, p.target_split_memo,
+            ))
 
             # Cross-currency: tint the payee cell with a rate note tooltip
             # so the user can hover for the spot-vs-implied detail.
@@ -315,6 +335,8 @@ class TransferReconcileDialog(QDialog):
                 source_txn_id=p.source_txn_id,
                 candidate_txn_id=p.target_txn_id,
                 category_id=category_id,
+                source_split_id=p.source_split_id,      # ADR-139
+                candidate_split_id=p.target_split_id,
             )
             for p in checked
         ]

@@ -598,18 +598,31 @@ class TransferPair:
     rate_deviation_pct: Optional[float]
     score: int
     strength: str
+    # ADR-139: when a side is a *split line* rather than a whole txn, its
+    # ``txn_split`` id is here and ``*_txn_id`` is the split's PARENT txn id.
+    # ``*_split_memo`` is the line memo, for display. None = whole txn.
+    source_split_id: Optional[int] = None
+    source_split_memo: Optional[str] = None
+    target_split_id: Optional[int] = None
+    target_split_memo: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class LinkExisting:
     """Bulk-edit / reconcile decision: link source to an existing
     candidate row (ADR-036). The candidate's category is rewritten to
-    ``category_id`` at link time — that's the whole point."""
+    ``category_id`` at link time — that's the whole point.
+
+    ADR-139: a side may be a split *line*; give its ``txn_split`` id in
+    ``source_split_id`` / ``candidate_split_id`` (the ``*_txn_id`` then names
+    the split's parent txn). None = that side is a whole txn."""
     source_txn_id: int
     candidate_txn_id: int
     category_id: int
     rate: Optional[Decimal] = None
     rate_source: Optional[str] = None
+    source_split_id: Optional[int] = None
+    candidate_split_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -7046,6 +7059,38 @@ class Repository:
             self.rollback()
             raise
 
+    def _read_transfer_side(
+        self, txn_id: int, split_id: Optional[int],
+    ) -> dict:
+        """Read one side of a link — a whole ``txn`` or (ADR-139) a ``txn_split``
+        line. Returns ``{table, id, account_id, amount, transfer_id, is_split}``.
+        For a split line ``account_id`` is its parent txn's account."""
+        if split_id is not None:
+            r = self._conn.execute(
+                "SELECT ts.id, ts.amount, ts.transfer_id, t.account_id "
+                "FROM txn_split ts JOIN txn t ON t.id = ts.txn_id "
+                "WHERE ts.id = ?",
+                (split_id,),
+            ).fetchone()
+            if r is None:
+                raise ValueError(f"No split line with id {split_id}")
+            return {
+                "table": "txn_split", "id": int(r["id"]),
+                "account_id": int(r["account_id"]), "amount": int(r["amount"]),
+                "transfer_id": r["transfer_id"], "is_split": True,
+            }
+        r = self._conn.execute(
+            "SELECT id, account_id, amount, transfer_id FROM txn WHERE id = ?",
+            (txn_id,),
+        ).fetchone()
+        if r is None:
+            raise ValueError(f"No transaction with id {txn_id}")
+        return {
+            "table": "txn", "id": int(r["id"]),
+            "account_id": int(r["account_id"]), "amount": int(r["amount"]),
+            "transfer_id": r["transfer_id"], "is_split": False,
+        }
+
     def _link_transfer_unbatched(
         self,
         *,
@@ -7054,38 +7099,28 @@ class Repository:
         category_id: int,
         rate: Optional[Decimal] = None,
         rate_source: Optional[str] = None,
+        source_split_id: Optional[int] = None,
+        candidate_split_id: Optional[int] = None,
     ) -> str:
         """Internal helper. Does NOT commit; caller owns the transaction
-        boundary. Returns the new transfer IRI."""
-        src = self._conn.execute(
-            "SELECT id, account_id, amount, transfer_id "
-            "FROM txn WHERE id = ?",
-            (source_txn_id,),
-        ).fetchone()
-        cand = self._conn.execute(
-            "SELECT id, account_id, amount, transfer_id "
-            "FROM txn WHERE id = ?",
-            (candidate_txn_id,),
-        ).fetchone()
-        if src is None:
-            raise ValueError(f"No source transaction with id {source_txn_id}")
-        if cand is None:
-            raise ValueError(
-                f"No candidate transaction with id {candidate_txn_id}"
-            )
+        boundary. Returns the new transfer IRI.
+
+        ADR-139: either side may be a *split line* (pass its ``txn_split`` id in
+        ``source_split_id`` / ``candidate_split_id``); the transfer_id is then
+        stamped on that ``txn_split`` row instead of a ``txn`` row — the same
+        shape ``_make_split_line_transfer`` produces, so the register + split
+        editor render it identically. Split-line links are same-currency only."""
+        src = self._read_transfer_side(source_txn_id, source_split_id)
+        cand = self._read_transfer_side(candidate_txn_id, candidate_split_id)
         if src["transfer_id"] is not None:
-            raise ValueError(
-                f"Source {source_txn_id} is already part of a transfer."
-            )
+            raise ValueError("Source is already part of a transfer.")
         if cand["transfer_id"] is not None:
-            raise ValueError(
-                f"Candidate {candidate_txn_id} is already part of a transfer."
-            )
+            raise ValueError("Candidate is already part of a transfer.")
         if src["account_id"] == cand["account_id"]:
             raise ValueError(
                 "Source and candidate must be on different accounts."
             )
-        if (int(src["amount"]) < 0) == (int(cand["amount"]) < 0):
+        if (src["amount"] < 0) == (cand["amount"] < 0):
             raise ValueError(
                 "Source and candidate amounts must have opposite signs "
                 "to form a transfer pair."
@@ -7095,44 +7130,40 @@ class Repository:
 
         src_ccy = self.get_account_currency(src["account_id"])
         cand_ccy = self.get_account_currency(cand["account_id"])
-        src_magnitude = abs(pence_to_decimal(int(src["amount"])))
-        cand_magnitude = abs(pence_to_decimal(int(cand["amount"])))
+        if (src["is_split"] or cand["is_split"]) and src_ccy != cand_ccy:
+            # A split-line transfer is modelled same-currency only (rate=1);
+            # cross-currency split transfers aren't supported.
+            raise ValueError(
+                "Split-line transfers must be between same-currency accounts."
+            )
+        src_magnitude = abs(pence_to_decimal(src["amount"]))
+        cand_magnitude = abs(pence_to_decimal(cand["amount"]))
 
         # Determine from/to: outflow (amount<0) is the source side.
-        if int(src["amount"]) < 0:
-            from_id = src["account_id"]
-            to_id = cand["account_id"]
-            from_magnitude = src_magnitude
-            to_magnitude = cand_magnitude
+        if src["amount"] < 0:
+            from_id, to_id = src["account_id"], cand["account_id"]
+            from_magnitude, to_magnitude = src_magnitude, cand_magnitude
         else:
-            from_id = cand["account_id"]
-            to_id = src["account_id"]
-            from_magnitude = cand_magnitude
-            to_magnitude = src_magnitude
+            from_id, to_id = cand["account_id"], src["account_id"]
+            from_magnitude, to_magnitude = cand_magnitude, src_magnitude
 
         if rate is None:
-            if src_ccy == cand_ccy:
+            if src_ccy == cand_ccy or from_magnitude <= 0:
                 resolved_rate = Decimal("1")
-                resolved_source = rate_source or "derived"
-            elif from_magnitude > 0:
-                resolved_rate = to_magnitude / from_magnitude
-                resolved_source = rate_source or "derived"
             else:
-                resolved_rate = Decimal("1")
-                resolved_source = rate_source or "derived"
+                resolved_rate = to_magnitude / from_magnitude
+            resolved_source = rate_source or "derived"
         else:
             resolved_rate = rate
             resolved_source = rate_source or "manual"
 
         transfer_iri = new_transfer_iri()
-        self._conn.execute(
-            "UPDATE txn SET transfer_id = ?, category_id = ? WHERE id = ?",
-            (transfer_iri, category_id, source_txn_id),
-        )
-        self._conn.execute(
-            "UPDATE txn SET transfer_id = ?, category_id = ? WHERE id = ?",
-            (transfer_iri, category_id, candidate_txn_id),
-        )
+        for side in (src, cand):
+            self._conn.execute(
+                f"UPDATE {side['table']} SET transfer_id = ?, category_id = ? "
+                "WHERE id = ?",
+                (transfer_iri, category_id, side["id"]),
+            )
         self._insert_transfer_parent(
             iri=transfer_iri,
             from_account_id=from_id,
@@ -7166,6 +7197,8 @@ class Repository:
                         category_id=decision.category_id,
                         rate=decision.rate,
                         rate_source=decision.rate_source,
+                        source_split_id=decision.source_split_id,
+                        candidate_split_id=decision.candidate_split_id,
                     )
                     linked += 1
                     iris.append(iri)
@@ -7201,6 +7234,50 @@ class Repository:
             self.rollback()
             raise
 
+    def _transfer_candidate_rows(
+        self, account_id: int, *, include_splits: bool,
+    ) -> list[dict]:
+        """Unmatched transfer candidates on an account (ADR-037/139): every
+        whole non-split txn with ``transfer_id IS NULL``, plus — when
+        ``include_splits`` — each unlinked ``txn_split`` line of a split txn.
+
+        A split line carries its own signed ``amount`` (so a £460.26 principal
+        line inside a £700 payment is matchable), the *parent's* posted_date +
+        payee, and its line ``memo``. Split parents themselves are excluded from
+        the whole-txn set — only their lines compete."""
+        rows: list[dict] = []
+        for r in self._conn.execute(
+            "SELECT t.id AS txn_id, t.posted_date, t.amount, "
+            "       COALESCE(p.name, '') AS payee_name "
+            "FROM txn t LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE t.account_id = ? AND t.transfer_id IS NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM txn_split ts WHERE ts.txn_id = t.id) "
+            "ORDER BY t.posted_date",
+            (account_id,),
+        ):
+            rows.append({
+                "txn_id": int(r["txn_id"]), "split_id": None,
+                "posted_date": r["posted_date"], "amount": int(r["amount"]),
+                "payee_name": r["payee_name"], "memo": "",
+            })
+        if include_splits:
+            for r in self._conn.execute(
+                "SELECT ts.id AS split_id, ts.txn_id AS txn_id, t.posted_date, "
+                "       ts.amount, COALESCE(p.name, '') AS payee_name, "
+                "       COALESCE(ts.memo, '') AS memo "
+                "FROM txn_split ts JOIN txn t ON t.id = ts.txn_id "
+                "LEFT JOIN payee p ON p.id = t.payee_id "
+                "WHERE t.account_id = ? AND ts.transfer_id IS NULL "
+                "ORDER BY t.posted_date",
+                (account_id,),
+            ):
+                rows.append({
+                    "txn_id": int(r["txn_id"]), "split_id": int(r["split_id"]),
+                    "posted_date": r["posted_date"], "amount": int(r["amount"]),
+                    "payee_name": r["payee_name"], "memo": r["memo"] or "",
+                })
+        return rows
+
     def find_transfer_pairs(
         self,
         *,
@@ -7234,24 +7311,15 @@ class Repository:
         if a_acct is None or b_acct is None:
             raise ValueError("Unknown account id.")
 
-        a_rows = self._conn.execute(
-            "SELECT t.id, t.posted_date, t.amount, "
-            "       COALESCE(p.name, '') AS payee_name "
-            "FROM txn t LEFT JOIN payee p ON p.id = t.payee_id "
-            "WHERE t.account_id = ? AND t.transfer_id IS NULL "
-            "ORDER BY t.posted_date",
-            (account_a_id,),
-        ).fetchall()
-        b_rows = self._conn.execute(
-            "SELECT t.id, t.posted_date, t.amount, "
-            "       COALESCE(p.name, '') AS payee_name "
-            "FROM txn t LEFT JOIN payee p ON p.id = t.payee_id "
-            "WHERE t.account_id = ? AND t.transfer_id IS NULL "
-            "ORDER BY t.posted_date",
-            (account_b_id,),
-        ).fetchall()
-
         currencies_match = a_acct.currency == b_acct.currency
+        # ADR-139: split lines join the pool only for same-currency account
+        # pairs (a split-line transfer is modelled same-currency, rate=1).
+        a_rows = self._transfer_candidate_rows(
+            account_a_id, include_splits=currencies_match,
+        )
+        b_rows = self._transfer_candidate_rows(
+            account_b_id, include_splits=currencies_match,
+        )
         candidates: list[TransferPair] = []
 
         for ar in a_rows:
@@ -7326,13 +7394,13 @@ class Repository:
                     tgt_payee=tgt_row["payee_name"],
                 )
                 candidates.append(TransferPair(
-                    source_txn_id=int(src_row["id"]),
+                    source_txn_id=int(src_row["txn_id"]),
                     source_account_id=src_acct.id,
                     source_amount=pence_to_decimal(int(src_row["amount"])),
                     source_currency=src_acct.currency,
                     source_posted_date=src_row["posted_date"],
                     source_payee=src_row["payee_name"],
-                    target_txn_id=int(tgt_row["id"]),
+                    target_txn_id=int(tgt_row["txn_id"]),
                     target_account_id=tgt_acct.id,
                     target_amount=pence_to_decimal(int(tgt_row["amount"])),
                     target_currency=tgt_acct.currency,
@@ -7344,12 +7412,21 @@ class Repository:
                     rate_deviation_pct=rate_deviation,
                     score=score,
                     strength=strength_for_score(score),
+                    source_split_id=src_row["split_id"],
+                    source_split_memo=(src_row["memo"] or None
+                                       if src_row["split_id"] else None),
+                    target_split_id=tgt_row["split_id"],
+                    target_split_memo=(tgt_row["memo"] or None
+                                       if tgt_row["split_id"] else None),
                 ))
 
+        # Keys are unique per candidate row — a split line is keyed by its own
+        # split id so two lines of one parent (and the parent's other whole
+        # candidates) never collide (ADR-139).
         return greedy_pair(
             candidates,
-            source_key=lambda p: p.source_txn_id,
-            target_key=lambda p: p.target_txn_id,
+            source_key=lambda p: (p.source_txn_id, p.source_split_id or 0),
+            target_key=lambda p: (p.target_txn_id, p.target_split_id or 0),
         )
 
     # ── Scheduled transactions (ADR-023) ──
