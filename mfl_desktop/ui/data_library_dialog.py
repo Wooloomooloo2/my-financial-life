@@ -104,6 +104,15 @@ class DataLibraryDialog(QDialog):
         root.addWidget(self._tabs, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        compact_btn = buttons.addButton(
+            "Compact file…", QDialogButtonBox.ActionRole
+        )
+        compact_btn.setToolTip(
+            "Reclaim unused space. Deleting data and app updates leave gaps that\n"
+            "SQLite doesn't return automatically, so the file only ever grows —\n"
+            "compacting rewrites it tightly, keeping all your data."
+        )
+        compact_btn.clicked.connect(self._on_compact)
         locations_btn = buttons.addButton(
             "Locations…", QDialogButtonBox.ActionRole
         )
@@ -234,6 +243,45 @@ class DataLibraryDialog(QDialog):
         # no-op (you can't load the file you're already in onto itself).
         if chosen is not None and chosen.kind != "current":
             self._load(chosen)
+
+    def _on_compact(self) -> None:
+        """Reclaim free pages in the live file via ``Repository.compact`` (VACUUM).
+        Shows the before/after size so the reclaim is visible."""
+        try:
+            size = self._repo.db_path.stat().st_size
+        except OSError:
+            size = 0
+        confirm = QMessageBox.question(
+            self, "Compact file",
+            "Reclaim unused space in this file?\n\n"
+            "Deleting data (merged payees, removed accounts) and app updates "
+            "leave gaps that SQLite doesn't return to disk on its own, so the "
+            "file only ever grows. Compacting rewrites it tightly and keeps "
+            "every bit of your data.\n\n"
+            f"Current size: {_fmt_size(size)}.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            before, after = self._repo.compact()
+        except Exception as e:  # noqa: BLE001 — surface any VACUUM failure
+            QMessageBox.critical(
+                self, "Compact failed",
+                f"Could not compact the file:\n\n{e}",
+            )
+            return
+        saved = before - after
+        if saved > 0:
+            msg = (
+                f"Reclaimed {_fmt_size(saved)}.\n\n"
+                f"{_fmt_size(before)}  →  {_fmt_size(after)}"
+            )
+        else:
+            msg = "The file was already compact — nothing to reclaim."
+        QMessageBox.information(self, "Compacted", msg)
+        self._refresh()
 
     def _on_locations(self) -> None:
         dialog = LocationsDialog(self._repo, parent=self)

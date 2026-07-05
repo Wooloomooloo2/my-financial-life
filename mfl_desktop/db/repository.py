@@ -875,6 +875,36 @@ class Repository:
         except sqlite3.Error:
             pass
 
+    def compact(self) -> tuple[int, int]:
+        """Reclaim unused space by rewriting the database file (SQLite ``VACUUM``).
+
+        Deletes and whole-table rebuilds — merging payees, removing accounts,
+        the schema migrations that copy a table to change a CHECK constraint
+        (the ADR-032 recipe) — leave **free pages** in the file. With
+        ``auto_vacuum`` off (the default) those pages are never returned to the
+        OS, so the ``.mfl`` only ever grows even when the row count falls.
+        ``VACUUM`` copies the live data into a fresh, tightly-packed file and
+        frees the slack back to disk. It keeps every row — only dead space goes.
+
+        Commits any pending work and folds the WAL in first (and again after) so
+        nothing is lost. Returns ``(size_before, size_after)`` in bytes."""
+        before = self._db_path.stat().st_size if self._db_path.exists() else 0
+        # VACUUM cannot run inside a transaction — clear any pending one, then
+        # fold the WAL back so the size we measure is the real on-disk file.
+        self._conn.commit()
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
+        self._conn.execute("VACUUM")
+        self._conn.commit()
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
+        after = self._db_path.stat().st_size if self._db_path.exists() else 0
+        return before, after
+
     def is_open(self) -> bool:
         """True if the underlying connection is still usable. Cheap probe used
         by long-lived UI (e.g. the budget window's activate-refresh) to avoid
