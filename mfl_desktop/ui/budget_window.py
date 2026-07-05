@@ -820,9 +820,9 @@ class BudgetWindow(QMainWindow):
             f"Unallocated: <b style='color:{colour}'>{_fmt(unalloc)}</b>"
         )
         if excluded:
-            # Exclusions now carry their own reason (no FX rate, or an
-            # available-credit account with no limit set) — see
-            # Repository.compute_perimeter_pool (ADR-058 R4a).
+            # Exclusions carry their reason (a currency with no FX rate to the
+            # display currency) — see Repository.compute_perimeter_pool
+            # (ADR-058 R4a / ADR-138).
             info += (
                 f" &nbsp;—&nbsp; <span style='color:#b45309'>"
                 f"{len(excluded)} account(s) excluded from the pool: "

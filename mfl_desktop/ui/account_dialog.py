@@ -133,8 +133,8 @@ class AccountDialog(QDialog):
         cl_validator.setNotation(QDoubleValidator.StandardNotation)
         self._credit_limit_edit.setValidator(cl_validator)
         self._credit_limit_edit.setToolTip(
-            "The card's credit limit. A budget can count this card's available "
-            "credit (limit − what you owe) towards its pool."
+            "The card's credit limit (used for the account's utilisation view). "
+            "It is not treated as budget funds (ADR-138)."
         )
 
         # Prefill in edit mode.

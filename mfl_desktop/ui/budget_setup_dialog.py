@@ -35,7 +35,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QButtonGroup,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -112,12 +114,37 @@ class BudgetSetupDialog(QDialog):
     def _build_accounts_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
+
+        # Funding model (ADR-138): where the available pool comes from.
+        fund_box = QHBoxLayout()
+        fund_box.setContentsMargins(0, 0, 0, 0)
+        fund_box.addWidget(QLabel("Fund this budget from:"))
+        self._fund_balances = QRadioButton("Account balances to start")
+        self._fund_income = QRadioButton("Income only (new money in)")
+        self._fund_balances.setToolTip(
+            "The pool starts from the perimeter accounts' current balances."
+        )
+        self._fund_income.setToolTip(
+            "The pool is only income into these accounts over the budget "
+            "period — ignoring starting balances."
+        )
+        grp = QButtonGroup(w)
+        grp.setExclusive(True)
+        grp.addButton(self._fund_balances)
+        grp.addButton(self._fund_income)
+        (self._fund_income if self._budget.funding_mode == "income"
+         else self._fund_balances).setChecked(True)
+        fund_box.addWidget(self._fund_balances)
+        fund_box.addWidget(self._fund_income)
+        fund_box.addStretch(1)
+        lay.addLayout(fund_box)
+
         lay.addWidget(QLabel(
             "Pick the accounts in this budget. Only their transactions count "
-            "as actuals (transfers between two in-budget accounts cancel out), "
-            "and each one feeds the available pool by its chosen contribution:"
-            "\n  • Balance — the account's balance (the usual choice);"
-            "\n  • Available credit — a card's limit minus what you owe;"
+            "as actuals (transfers between two in-budget accounts cancel out). "
+            "In 'account balances' mode each account feeds the pool by:"
+            "\n  • Balance — the account's balance (a credit card's balance is "
+            "its debt, which reduces the pool);"
             "\n  • Excluded — counted for actuals, but not in the pool."
         ))
         contributions = self._repo.list_budget_account_contributions(
@@ -143,8 +170,6 @@ class BudgetSetupDialog(QDialog):
             table.setItem(row, 0, chk)
             combo = QComboBox()
             combo.addItem("Balance", "balance")
-            if acc.family == "credit":
-                combo.addItem("Available credit", "available_credit")
             combo.addItem("Excluded", "excluded")
             mode = contributions.get(acc.id, "balance")
             mi = combo.findData(mode)
@@ -165,6 +190,9 @@ class BudgetSetupDialog(QDialog):
             if chk is item:
                 combo.setEnabled(item.checkState() == Qt.Checked)
                 break
+
+    def _funding_mode(self) -> str:
+        return "income" if self._fund_income.isChecked() else "balances"
 
     def _checked_accounts(self) -> list[tuple[int, str]]:
         out: list[tuple[int, str]] = []
@@ -348,6 +376,10 @@ class BudgetSetupDialog(QDialog):
 
     def _on_save(self) -> None:
         try:
+            # ADR-138: funding model (balances vs income only).
+            self._repo.set_budget_funding_mode(
+                self._budget.id, self._funding_mode(),
+            )
             # 1. Perimeter first — the history seed reads over these accounts.
             self._repo.set_budget_accounts(
                 self._budget.id, self._checked_accounts(),

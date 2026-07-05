@@ -334,14 +334,18 @@ def budget_months(start_month: str, length: int) -> list[str]:
 @dataclass(frozen=True)
 class Budget:
     """A budget plan (ADR-058). Multiple per file; each carries a period
-    (``start_month`` 'YYYY-MM' + ``length_months``, default 12 = Jan–Dec) and
-    an optional display ``currency`` (None = the file's base currency)."""
+    (``start_month`` 'YYYY-MM' + ``length_months``, default 12 = Jan–Dec), an
+    optional display ``currency`` (None = the file's base currency), and a
+    ``funding_mode`` (ADR-138): ``'balances'`` seeds the pool from the perimeter
+    accounts' balances (default); ``'income'`` seeds it from income into those
+    accounts over the budget period."""
     id: int
     iri: str
     name: str
     start_month: str
     length_months: int
     currency: Optional[str]
+    funding_mode: str = "balances"
 
     def months(self) -> list[str]:
         return budget_months(self.start_month, self.length_months)
@@ -7909,7 +7913,9 @@ class Repository:
 
     # ── Budgets (ADR-058) ──
 
-    _BUDGET_COLS = "id, iri, name, start_month, length_months, currency"
+    _BUDGET_COLS = (
+        "id, iri, name, start_month, length_months, currency, funding_mode"
+    )
 
     def _row_to_budget(self, row) -> Budget:
         return Budget(
@@ -7917,6 +7923,7 @@ class Repository:
             start_month=row["start_month"],
             length_months=int(row["length_months"]),
             currency=row["currency"],
+            funding_mode=row["funding_mode"] or "balances",
         )
 
     def list_budgets(self) -> list[Budget]:
@@ -7940,16 +7947,20 @@ class Repository:
         start_month: str,
         length_months: int = 12,
         currency: Optional[str] = None,
+        funding_mode: str = "balances",
     ) -> Budget:
         """Create a new, empty budget (no perimeter, no lines). ``start_month``
-        is 'YYYY-MM'."""
+        is 'YYYY-MM'. ``funding_mode`` (ADR-138) is ``'balances'`` or
+        ``'income'``."""
         clean = (name or "").strip() or "Budget"
+        if funding_mode not in ("balances", "income"):
+            raise ValueError(f"Unknown funding_mode: {funding_mode!r}")
         iri = new_budget_iri()
         try:
             cur = self._conn.execute(
                 "INSERT INTO budget (iri, name, start_month, length_months, "
-                "currency) VALUES (?, ?, ?, ?, ?)",
-                (iri, clean, start_month, length_months, currency),
+                "currency, funding_mode) VALUES (?, ?, ?, ?, ?, ?)",
+                (iri, clean, start_month, length_months, currency, funding_mode),
             )
             self.commit()
         except Exception:
@@ -7983,8 +7994,9 @@ class Repository:
         try:
             cur = self._conn.execute(
                 "INSERT INTO budget (iri, name, start_month, length_months, "
-                "currency) VALUES (?, ?, ?, ?, ?)",
-                (iri, clean, src.start_month, src.length_months, src.currency),
+                "currency, funding_mode) VALUES (?, ?, ?, ?, ?, ?)",
+                (iri, clean, src.start_month, src.length_months, src.currency,
+                 src.funding_mode),
             )
             new_id = int(cur.lastrowid)
             self._conn.execute(
@@ -8318,6 +8330,22 @@ class Repository:
             self.rollback()
             raise
 
+    def set_budget_funding_mode(self, budget_id: int, mode: str) -> None:
+        """Set how a budget seeds its available pool (ADR-138): ``'balances'``
+        (the perimeter accounts' balances) or ``'income'`` (income into those
+        accounts over the budget period)."""
+        if mode not in ("balances", "income"):
+            raise ValueError(f"Unknown funding_mode: {mode!r}")
+        try:
+            self._conn.execute(
+                "UPDATE budget SET funding_mode = ? WHERE id = ?",
+                (mode, budget_id),
+            )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
     def set_budget_currency(
         self, budget_id: int, currency: Optional[str],
     ) -> None:
@@ -8350,8 +8378,9 @@ class Repository:
         self, budget_id: int,
     ) -> dict[int, str]:
         """``{account_id: contribution}`` for the budget's perimeter (ADR-058
-        R4a). Contribution is one of ``balance`` / ``available_credit`` /
-        ``excluded``."""
+        R4a). Contribution is ``balance`` (counts toward the pool) or
+        ``excluded`` (in the perimeter for actuals only). ``available_credit``
+        was dropped in ADR-138 — a card contributes its signed balance."""
         cur = self._conn.execute(
             "SELECT account_id, contribution FROM budget_account "
             "WHERE budget_id = ?",
@@ -8369,7 +8398,7 @@ class Repository:
         seen: dict[int, str] = {}
         for aid, mode in accounts:               # preserve order, dedupe
             if aid not in seen:
-                if mode not in ("balance", "available_credit", "excluded"):
+                if mode not in ("balance", "excluded"):   # ADR-138: no available_credit
                     raise ValueError(f"Invalid contribution {mode!r}.")
                 seen[aid] = mode
         try:
@@ -8762,47 +8791,63 @@ class Repository:
         display_ccy: str,
         on_date: str,
     ) -> tuple[Decimal, list[str]]:
-        """The budget's available pool (ADR-058 D2 / R4a) = the sum of each
-        perimeter account's **contribution**, converted to ``display_ccy`` via
-        the FX layer (ADR-055 — no naive par-add). Each account's
-        ``budget_account.contribution`` decides what it contributes:
+        """The budget's available pool (ADR-058 D2 / R4a / ADR-138), converted
+        to ``display_ccy`` via the FX layer (ADR-055 — no naive par-add).
 
-        - ``'balance'``          — its balance (default; the pre-R4a behaviour);
-        - ``'available_credit'`` — ``credit_limit + balance`` (a card's headroom;
-          balance is signed, so a £5,000 card you owe £1,800 on contributes
-          £3,200);
-        - ``'excluded'``         — nothing (still in the perimeter for actuals).
+        The budget's **funding mode** (ADR-138) sets the basis:
 
-        Returns ``(pool, excluded_names)`` where ``excluded_names`` lists, with
-        a reason, accounts that *couldn't* be counted — a missing FX rate, or an
-        ``available_credit`` account with no limit set — for a banner. A
-        deliberately ``'excluded'`` account is silent (it's an intentional
-        choice, not a problem)."""
-        cur = self._conn.execute(
-            "SELECT a.id, a.name, a.currency, a.credit_limit, ba.contribution, "
-            "  a.opening_balance + COALESCE("
-            "    (SELECT SUM(t.amount) FROM txn t WHERE t.account_id = a.id), 0"
-            "  ) AS bal_pence "
-            "FROM account a "
-            "JOIN budget_account ba ON ba.account_id = a.id "
-            "WHERE ba.budget_id = ? AND a.archived_at IS NULL "
-            "ORDER BY a.family, a.name",
-            (budget_id,),
-        )
+        - ``'balances'`` (default) — the sum of each perimeter account's
+          ``contribution``: ``'balance'`` counts its **signed** balance (so a
+          credit card's debt *reduces* the pool — the former
+          ``'available_credit'``/limit basis was dropped as bad practice),
+          ``'excluded'`` counts nothing (still in the perimeter for actuals).
+        - ``'income'`` — only income (``kind='income'`` transactions) into the
+          non-excluded perimeter accounts over the **budget period** (its
+          start_month through its last month, incl. future-dated income), i.e.
+          the new money to assign, ignoring any starting balances.
+
+        Returns ``(pool, excluded_names)`` where ``excluded_names`` lists
+        accounts whose currency has no FX rate to ``display_ccy`` (a banner); a
+        deliberately ``'excluded'`` account is silent."""
+        budget = self.get_budget(budget_id)
         pool = Decimal("0.00")
         excluded: list[str] = []
+
+        if budget is not None and budget.funding_mode == "income":
+            months = budget.months()
+            start, end = f"{months[0]}-01", f"{months[-1]}-31"
+            cur = self._conn.execute(
+                "SELECT a.id, a.name, a.currency, "
+                "  COALESCE(SUM(t.amount), 0) AS in_pence "
+                "FROM txn t "
+                "JOIN account a  ON a.id = t.account_id "
+                "JOIN budget_account ba ON ba.account_id = a.id "
+                "     AND ba.budget_id = ? "
+                "JOIN category c ON c.id = t.category_id "
+                "WHERE a.archived_at IS NULL AND ba.contribution != 'excluded' "
+                "  AND c.kind = 'income' "
+                "  AND t.posted_date BETWEEN ? AND ? "
+                "GROUP BY a.id, a.name, a.currency",
+                (budget_id, start, end),
+            )
+        else:  # 'balances' (default)
+            cur = self._conn.execute(
+                "SELECT a.id, a.name, a.currency, "
+                "  a.opening_balance + COALESCE("
+                "    (SELECT SUM(t.amount) FROM txn t WHERE t.account_id = a.id), 0"
+                "  ) AS in_pence "
+                "FROM account a "
+                "JOIN budget_account ba ON ba.account_id = a.id "
+                "WHERE ba.budget_id = ? AND a.archived_at IS NULL "
+                "  AND ba.contribution != 'excluded' "
+                "ORDER BY a.family, a.name",
+                (budget_id,),
+            )
+
         for r in cur:
-            contribution = r["contribution"] or "balance"
-            if contribution == "excluded":
+            native = pence_to_decimal(int(r["in_pence"] or 0))
+            if native == 0:
                 continue
-            bal_pence = int(r["bal_pence"])
-            if contribution == "available_credit":
-                if r["credit_limit"] is None:
-                    excluded.append(f"{r['name']} (no credit limit set)")
-                    continue
-                native = pence_to_decimal(int(r["credit_limit"]) + bal_pence)
-            else:  # 'balance'
-                native = pence_to_decimal(bal_pence)
             converted, _fallback = self.convert_amount(
                 native, from_ccy=r["currency"], to_ccy=display_ccy,
                 on_date=on_date,
