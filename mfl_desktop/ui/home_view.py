@@ -289,15 +289,26 @@ class HomeView(QWidget):
             return None
         card = _Card(f"BUDGET · {b.month_label.upper()}", action="Open budget →")
         card._weight = 4
-        line = QLabel(
-            f"{_fmt(b.spent, b.currency)} of {_fmt(b.planned, b.currency)} spent"
-        )
+        planned = float(b.planned)
+        spent = float(b.spent)
+        rollover = float(getattr(b, "rollover", 0) or 0)
+        # `planned` is THIS month's budget (allocation), not the rollover-inflated
+        # `available` — so the headline reads as a monthly figure (ADR-136).
+        if planned > 0:
+            line = QLabel(
+                f"{_fmt(b.spent, b.currency)} of "
+                f"{_fmt(b.planned, b.currency)} budgeted this month"
+            )
+        else:
+            line = QLabel(f"{_fmt(b.spent, b.currency)} spent this month")
         tokens.themed(line, "font-size: 15px; color: {text};")
         card.body().addWidget(line)
         bar = QProgressBar()
-        planned = float(b.planned)
-        spent = float(b.spent)
-        pct = int(min(100, round(spent / planned * 100))) if planned > 0 else 0
+        # Bar tracks spend against this month's plan; when the plan is £0 (an
+        # envelope funded purely by rollover) fall back to the rollover cushion
+        # so the bar is still meaningful.
+        denom = planned if planned > 0 else rollover
+        pct = int(min(100, round(spent / denom * 100))) if denom > 0 else 0
         bar.setRange(0, 100)
         bar.setValue(pct)
         bar.setTextVisible(False)
@@ -311,9 +322,16 @@ class HomeView(QWidget):
         )
         card.body().addWidget(bar)
         if over:
-            note = QLabel(f"Over by {_fmt(b.spent - b.planned, b.currency)}")
+            note = QLabel(
+                f"Over this month's plan by "
+                f"{_fmt(b.spent - b.planned, b.currency)}"
+            )
             tokens.themed(note, "color: {negative}; font-size: 11px;")
             card.body().addWidget(note)
+        if rollover > 0:
+            roll = QLabel(f"+{_fmt(b.rollover, b.currency)} rolled over available")
+            tokens.themed(roll, "color: {muted_strong}; font-size: 11px;")
+            card.body().addWidget(roll)
         card.make_clickable()
         card.clicked.connect(self.budget_requested)
         return card

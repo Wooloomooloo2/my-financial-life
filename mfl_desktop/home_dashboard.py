@@ -60,8 +60,13 @@ class BudgetCard:
     name: str
     currency: str
     month_label: str           # e.g. "June 2026"
-    planned: Decimal           # envelope `available` (allocation + rollover), ADR-087
+    # `planned` = THIS month's expense allocation (the monthly plan), so it
+    # matches what the Budget page calls "assigned" rather than the envelope
+    # `available` — which balloons with accumulated rollover and read as a huge
+    # monthly budget (ADR-136, superseding ADR-087's use of `available` here).
+    planned: Decimal
     spent: Decimal
+    rollover: Decimal          # carried-over budget available on top this month
 
 
 @dataclass(frozen=True)
@@ -259,13 +264,15 @@ def _budget_card(repo, today, display_ccy) -> Optional[BudgetCard]:
     if expenses is None or idx >= len(expenses.subtotal):
         return None
     cell = expenses.subtotal[idx]
+    # `planned` = this month's expense allocation (the monthly plan); the
+    # accumulated rollover (`available − allocation`) is surfaced separately as
+    # `rollover` so the card reads "spent of this month's budget (+ £N carried
+    # over)" instead of "spent of a giant available" (ADR-136).
+    rollover = cell.available - cell.allocation
     return BudgetCard(
         name=budget.name, currency=ccy, month_label=_month_label(today),
-        # `available` = this-month allocation + carried-over envelope balance
-        # (the envelope/zero-sum model, ADR-058). The Budget window measures
-        # spend against `available`, so the home card must too — using bare
-        # `allocation` ignored rollover and falsely flagged "over". (ADR-087)
-        planned=cell.available, spent=cell.actual,
+        planned=cell.allocation, spent=cell.actual,
+        rollover=rollover if rollover > 0 else Decimal("0.00"),
     )
 
 
