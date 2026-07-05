@@ -65,6 +65,64 @@ def month_end_samples(start: date, end: date) -> list[date]:
     return out
 
 
+def _interior_month_ends(start: date, end: date) -> list[date]:
+    """Every month-end strictly between ``start`` and ``end`` (exclusive of
+    both endpoints), ascending."""
+    out: list[date] = []
+    y, m = start.year, start.month
+    while True:
+        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+        eom = date(ny, nm, 1) - timedelta(days=1)
+        if eom >= end:
+            break
+        if eom > start:
+            out.append(eom)
+        y, m = ny, nm
+    return out
+
+
+def period_end_samples(start: date, end: date, granularity: str) -> list[date]:
+    """``[start]`` + every period-end strictly between + ``[end]``, for the
+    given ``granularity`` (ADR-135). ``weekly`` steps 7 days from the start;
+    ``monthly`` / ``quarterly`` / ``annually`` keep the calendar month-ends
+    (all of them / Mar-Jun-Sep-Dec / Dec). The start and end are always
+    sampled so the series spans the exact requested range; a degenerate range
+    collapses to its endpoints (mirrors :func:`month_end_samples`)."""
+    if end <= start:
+        return [start] if end == start else [start, end]
+    if granularity == "weekly":
+        out = [start]
+        d = start + timedelta(days=7)
+        while d < end:
+            out.append(d)
+            d += timedelta(days=7)
+        out.append(end)
+        return out
+    interior = _interior_month_ends(start, end)
+    if granularity == "quarterly":
+        interior = [d for d in interior if d.month in (3, 6, 9, 12)]
+    elif granularity == "annually":
+        interior = [d for d in interior if d.month == 12]
+    # "monthly" (and any unknown value) keep every month-end.
+    return [start] + interior + [end]
+
+
+def resolve_history_granularity(start: date, end: date, granularity: str) -> str:
+    """Resolve ``"auto"`` to a concrete bucket from the span (ADR-135), so a
+    short range samples finely and a decade doesn't produce hundreds of bars.
+    A non-auto value passes through unchanged."""
+    if granularity != "auto":
+        return granularity
+    days = (end - start).days
+    if days <= 120:            # up to ~4 months
+        return "weekly"
+    if days <= 1100:           # up to ~3 years
+        return "monthly"
+    if days <= 2600:           # up to ~7 years
+        return "quarterly"
+    return "annually"
+
+
 def cash_balance_at_dates(
     txns, opening_balance: Decimal, samples_iso: list[str],
 ) -> list[Decimal]:

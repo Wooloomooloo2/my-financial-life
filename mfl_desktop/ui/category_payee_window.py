@@ -24,6 +24,7 @@ from datetime import date
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -44,11 +45,12 @@ from PySide6.QtWidgets import (
 from mfl_desktop.account_summary import period_bounds
 from mfl_desktop import periods
 from mfl_desktop.db.repository import Repository, ReportRow
-from mfl_desktop.reports import category_group_map
+from mfl_desktop.reports import category_group_map, category_root_map
 from mfl_desktop.reports.filters import CategoryPayeeFilters, TYPE_CATEGORY_PAYEE
 from mfl_desktop.reports.payee_report import NO_PAYEE_LABEL, build_report
 from mfl_desktop.ui.category_payee_filter_dialog import CategoryPayeeFilterDialog
-from mfl_desktop.ui.chart_helpers import fmt_currency
+from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency
+from mfl_desktop.ui.donut_chart import DonutChart, DonutChild, DonutSegment
 from mfl_desktop.ui.payee_chart import PayeeChart
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
@@ -72,6 +74,28 @@ def _other(dimension: str) -> str:
 
 def _dim_label(dimension: str) -> str:
     return "Category" if dimension == "category" else "Payee"
+
+
+# Category rollup options (ADR-134) — label → stored ``rollup_level`` value,
+# mirroring the Spending Over Time report's Top / Group / Leaf (ADR-030). Only
+# offered while the primary dimension is Category.
+_ROLLUP_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Top level", "top"),
+    ("Group",     "group"),
+    ("Leaf",      "leaf"),
+)
+
+# "Show top" quick-pick options (ADR-134) — label → stored ``top_n`` cap.
+# 0 == show every row (no hidden tail); a discoverable top-bar control in
+# place of the old buried filter-dialog spinner.
+_TOP_N_OPTIONS: tuple[tuple[str, int], ...] = (
+    ("Top 10",  10),
+    ("Top 15",  15),
+    ("Top 25",  25),
+    ("Top 50",  50),
+    ("Top 100", 100),
+    ("Show all", 0),
+)
 
 
 class _NumericItem(QTableWidgetItem):
@@ -121,6 +145,15 @@ class CategoryPayeeWindow(QMainWindow):
         self._all_categories = repo.list_category_tree()
         self._categories_by_id = {c.id: c for c in self._all_categories}
         self._group_map = category_group_map(self._all_categories)
+        # Rollup maps (ADR-134) — leaf category id → bucket id at each level.
+        # ``group`` (budget-line) is the historical behaviour; ``top`` rolls to
+        # the root, ``leaf`` keeps the raw category. Swapped live by the top-bar
+        # Roll up combo when the primary dimension is Category.
+        self._rollup_maps: dict[str, dict[int, int]] = {
+            "top":   category_root_map(self._all_categories),
+            "group": self._group_map,
+            "leaf":  {c.id: c.id for c in self._all_categories},
+        }
         self._payee_names = dict(repo.list_canonical_payees())
 
         self._current_filters: CategoryPayeeFilters = (
@@ -150,6 +183,22 @@ class CategoryPayeeWindow(QMainWindow):
         self._set_combo(self._group_combo, self._dimension)
         self._group_combo.currentIndexChanged.connect(self._on_group_by_changed)
 
+        # Roll up combo (ADR-134) — only meaningful for the Category dimension,
+        # so it (and its label) hide while grouping by Payee.
+        self._rollup_label = QLabel("Roll up:")
+        self._rollup_combo = QComboBox()
+        for label, value in _ROLLUP_OPTIONS:
+            self._rollup_combo.addItem(label, value)
+        self._set_combo(self._rollup_combo, self._current_filters.rollup_level)
+        self._rollup_combo.currentIndexChanged.connect(self._on_rollup_changed)
+
+        # Show-top combo (ADR-134) — a discoverable "Show all" / Top-N picker.
+        self._top_combo = QComboBox()
+        for label, value in _TOP_N_OPTIONS:
+            self._top_combo.addItem(label, value)
+        self._select_top_combo(self._current_filters.top_n)
+        self._top_combo.currentIndexChanged.connect(self._on_top_changed)
+
         self._ccy_combo = QComboBox()
         self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
 
@@ -167,11 +216,16 @@ class CategoryPayeeWindow(QMainWindow):
         self._page_header.add_leading(self._back_button)
         self._page_header.add_action(QLabel("Group by:"))
         self._page_header.add_action(self._group_combo)
+        self._page_header.add_action(self._rollup_label)
+        self._page_header.add_action(self._rollup_combo)
+        self._page_header.add_action(QLabel("Show:"))
+        self._page_header.add_action(self._top_combo)
         self._page_header.add_action(QLabel("Display in:"))
         self._page_header.add_action(self._ccy_combo)
         self._page_header.add_action(self._filter_button)
         self._page_header.add_action(self._save_button)
         self._page_header.add_action(self._save_as_button)
+        self._update_rollup_visibility()
 
         self._breadcrumb = QLabel()
         tokens.themed(self._breadcrumb, "color: {muted_strong}; padding: 6px 12px; background: {canvas};")
@@ -343,7 +397,17 @@ class CategoryPayeeWindow(QMainWindow):
         layout.addWidget(self._rows_value)
         layout.addSpacing(6)
         layout.addWidget(self._note_value)
-        layout.addStretch(1)
+
+        # Category distribution sunburst (ADR-134) — the same two-ring donut as
+        # the Net Worth report (inner = budget-line group, outer = the leaf
+        # categories within). Always shows where spending went **by category**,
+        # independent of the primary dimension / drill, so it's a stable "where
+        # it goes" panel in the bottom-right.
+        layout.addSpacing(10)
+        layout.addWidget(self._mini_section_title("Where it goes"))
+        self._donut = DonutChart()
+        self._donut.setMinimumHeight(200)
+        layout.addWidget(self._donut, stretch=1)
         return panel
 
     @staticmethod
@@ -384,14 +448,22 @@ class CategoryPayeeWindow(QMainWindow):
             return NO_PAYEE_LABEL
         return self._payee_names.get(payee_id, f"id={payee_id}")
 
+    def _active_cat_map(self) -> dict[int, int]:
+        """The leaf→bucket map for the current category rollup level (ADR-134);
+        falls back to the budget-line group map for an unknown level."""
+        return self._rollup_maps.get(
+            self._current_filters.rollup_level, self._group_map,
+        )
+
     def _aggregate(self, group_dim: str, cells: list[dict]) -> list[dict]:
-        """Roll the given cells up by ``group_dim`` ('category' → budget-line
-        group, 'payee' → canonical payee) into build_report raw rows. The
-        ``payee_id`` key carries the item id whatever the dimension is."""
+        """Roll the given cells up by ``group_dim`` ('category' → the chosen
+        rollup bucket, 'payee' → canonical payee) into build_report raw rows.
+        The ``payee_id`` key carries the item id whatever the dimension is."""
+        cat_map = self._active_cat_map()
         acc: dict = {}
         for cell in cells:
             if group_dim == "category":
-                item_id = self._group_map.get(cell["category_id"], cell["category_id"])
+                item_id = cat_map.get(cell["category_id"], cell["category_id"])
                 name = self._category_label(item_id)
             else:
                 item_id = cell["payee_id"]
@@ -421,9 +493,10 @@ class CategoryPayeeWindow(QMainWindow):
             row_dim = _other(self._dimension)
             drill_id = self._drill[0]
             if self._dimension == "category":
+                cat_map = self._active_cat_map()
                 subset = [
                     c for c in self._cells
-                    if self._group_map.get(c["category_id"], c["category_id"]) == drill_id
+                    if cat_map.get(c["category_id"], c["category_id"]) == drill_id
                 ]
             else:
                 subset = [c for c in self._cells if c["payee_id"] == drill_id]
@@ -436,6 +509,7 @@ class CategoryPayeeWindow(QMainWindow):
         self._update_breadcrumb(row_dim)
         self._back_button.setVisible(self._drill is not None)
         self._update_summary_panel(report.summary, row_dim)
+        self._render_donut()
 
     def _show_empty(self, message: str) -> None:
         self._chart.show_empty(message)
@@ -444,6 +518,69 @@ class CategoryPayeeWindow(QMainWindow):
         self._update_breadcrumb(self._dimension)
         self._back_button.setVisible(self._drill is not None)
         self._update_summary_panel(None, self._dimension, note=message)
+        self._donut.show_empty("No spending")
+
+    # ── category distribution donut (ADR-134) ──
+
+    def _render_donut(self) -> None:
+        """Draw the two-ring category sunburst from the full cached matrix —
+        inner ring = budget-line group, outer ring = the leaf categories within
+        each. Values are in the display currency (the matrix already converted
+        them). Independent of the primary dimension and drill."""
+        groups: dict[int, dict[int, int]] = {}
+        group_totals: dict[int, int] = {}
+        for cell in self._cells:
+            pence = int(cell["spending_pence"])
+            if pence <= 0:
+                continue
+            leaf = cell["category_id"]
+            gid = self._group_map.get(leaf, leaf)
+            groups.setdefault(gid, {})
+            groups[gid][leaf] = groups[gid].get(leaf, 0) + pence
+            group_totals[gid] = group_totals.get(gid, 0) + pence
+
+        if not group_totals:
+            self._donut.show_empty("No spending")
+            return
+
+        symbol = _symbol_for(self._display_ccy) or "£"
+        ordered = sorted(group_totals, key=lambda g: -group_totals[g])
+        segments: list[DonutSegment] = []
+        for i, gid in enumerate(ordered):
+            base = colour_for(i)
+            leaves = sorted(groups[gid].items(), key=lambda kv: -kv[1])
+            n = len(leaves)
+            children = tuple(
+                DonutChild(
+                    label=self._category_label(leaf),
+                    value=pence / 100.0,
+                    color=self._shade(base, j, n),
+                )
+                for j, (leaf, pence) in enumerate(leaves)
+            )
+            segments.append(DonutSegment(
+                label=self._category_label(gid),
+                value=group_totals[gid] / 100.0,
+                color=base,
+                children=children,
+            ))
+        total = sum(group_totals.values()) / 100.0
+        self._donut.set_data(
+            segments=segments,
+            center_label="Spending",
+            center_sub=self._fmt(total),
+            symbol=symbol,
+        )
+
+    @staticmethod
+    def _shade(base: QColor, index: int, count: int) -> QColor:
+        """Progressively lighter tints of a group's colour so the leaf slices
+        in the outer ring are distinguishable while clearly belonging to the
+        same group (mirrors the Net Worth donut's shading)."""
+        if count <= 1:
+            return base.lighter(118)
+        factor = 112 + int(48 * index / (count - 1))
+        return base.lighter(factor)
 
     def _update_breadcrumb(self, row_dim: str) -> None:
         if self._drill is None:
@@ -476,6 +613,13 @@ class CategoryPayeeWindow(QMainWindow):
             self._filter_line("Accounts", filters.account_ids,
                               len(self._all_accounts)),
             f"Group by: {_dim_label(self._dimension)}",
+        ]
+        if self._dimension == "category":
+            rollup_labels = {"top": "Top level", "group": "Group", "leaf": "Leaf"}
+            filter_bits.append(
+                f"Roll up: {rollup_labels.get(filters.rollup_level, filters.rollup_level)}"
+            )
+        filter_bits += [
             top_n_bit,
             "Transfers: " + ("included" if filters.include_transfers else "excluded"),
         ]
@@ -536,8 +680,48 @@ class CategoryPayeeWindow(QMainWindow):
         self._dimension = new_dim
         self._drill = None  # changing the primary axis resets the drill
         self._current_filters = replace(self._current_filters, group_by=new_dim)
+        self._update_rollup_visibility()
         self._mark_dirty()
         self._rebuild_view()
+
+    def _on_rollup_changed(self, *_a) -> None:
+        new_level = self._rollup_combo.currentData() or "group"
+        if new_level == self._current_filters.rollup_level:
+            return
+        self._current_filters = replace(
+            self._current_filters, rollup_level=new_level,
+        )
+        self._drill = None  # the bucket set changed — a level-1 fresh start
+        self._mark_dirty()
+        self._rebuild_view()
+
+    def _on_top_changed(self, *_a) -> None:
+        new_top = self._top_combo.currentData()
+        if new_top is None or new_top == self._current_filters.top_n:
+            return
+        self._current_filters = replace(self._current_filters, top_n=new_top)
+        self._mark_dirty()
+        self._rebuild_view()
+
+    def _update_rollup_visibility(self) -> None:
+        """The Roll up combo only applies to the Category dimension — hide it
+        (and its label) while grouping by Payee."""
+        show = self._dimension == "category"
+        self._rollup_label.setVisible(show)
+        self._rollup_combo.setVisible(show)
+
+    def _select_top_combo(self, top_n: int) -> None:
+        """Select the Show-top item for ``top_n`` (0 = 'Show all'); if a saved
+        report carries a non-preset cap, add it as a one-off item so the value
+        round-trips rather than silently snapping to a preset."""
+        idx = self._top_combo.findData(top_n)
+        if idx < 0:
+            label = "Show all" if top_n <= 0 else f"Top {top_n}"
+            self._top_combo.addItem(label, top_n)
+            idx = self._top_combo.count() - 1
+        self._top_combo.blockSignals(True)
+        self._top_combo.setCurrentIndex(idx)
+        self._top_combo.blockSignals(False)
 
     def _on_item_clicked(self, item_id, name: str) -> None:
         if self._drill is None:

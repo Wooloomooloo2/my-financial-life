@@ -52,6 +52,12 @@ PERIOD_LABELS: dict[str, str] = {
 # The keys are persisted in saved-report filters_json — DO NOT change them.
 REGISTER_PRESETS:   tuple[str, ...] = ("30d", "90d", "6m", "12m", "ytd", "all")
 REPORT_PRESETS:     tuple[str, ...] = ("quarter", "6m", "ytd", "1y", "3y", "custom")
+# Category & Payee (ADR-134) offers a finance-native month-to-date preset on
+# top of the standard report set — a "so far this month" snapshot the plain
+# REPORT_PRESETS lacked. Keys are persisted in filters_json — do not rename.
+CATEGORY_PAYEE_PRESETS: tuple[str, ...] = (
+    "mtd", "quarter", "6m", "ytd", "1y", "3y", "custom",
+)
 INVESTMENT_PRESETS: tuple[str, ...] = ("ytd", "1y", "3y", "5y", "max", "custom")
 SANKEY_PRESETS:     tuple[str, ...] = ("ytd", "mtd", "last_month", "6m", "1y", "custom")
 

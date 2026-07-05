@@ -28,7 +28,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -59,8 +59,10 @@ from mfl_desktop.ui.net_worth_history_chart import NetWorthHistoryChart
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui import tokens
 from mfl_desktop.net_worth_history import (
-    gather_net_worth_history, month_end_samples,
+    gather_net_worth_history, period_end_samples, resolve_history_granularity,
 )
+from mfl_desktop.ui.date_widgets import make_date_edit
+from mfl_desktop.ui.report_filter_dialog_base import GRANULARITY_OPTIONS
 
 
 # Family → (display label, color, kind) where kind ∈ {"asset","debt"}.
@@ -150,6 +152,9 @@ class NetWorthWindow(QMainWindow):
         # period / currency / closed-toggle change while it's showing.
         self._view: str = "now"
         self._history_period: str = "1y"
+        # Granularity + custom range (ADR-135), in line with the other
+        # over-time reports. "auto" picks a bucket from the span.
+        self._history_granularity: str = "auto"
         self._history_dirty: bool = True
 
         # ── page header (ADR-119): title + the display-currency selector and
@@ -610,18 +615,61 @@ class NetWorthWindow(QMainWindow):
             ("Last 3 years", "3y"),
             ("Last 5 years", "5y"),
             ("All time", "all"),
+            ("Custom…", "custom"),
         ]:
             self._history_period_combo.addItem(label, key)
         self._history_period_combo.currentIndexChanged.connect(
             self._on_history_period_changed
         )
         controls.addWidget(self._history_period_combo)
+
+        # Custom range pickers (ADR-135) — shown only for the Custom preset.
+        today = date.today()
+        self._history_from_label = QLabel("From:")
+        self._history_from = make_date_edit(
+            QDate(max(1, today.year - 1), today.month, today.day)
+        )
+        self._history_to_label = QLabel("To:")
+        self._history_to = make_date_edit(QDate(today.year, today.month, today.day))
+        for w in (self._history_from, self._history_to):
+            w.dateChanged.connect(self._on_history_custom_changed)
+        controls.addWidget(self._history_from_label)
+        controls.addWidget(self._history_from)
+        controls.addWidget(self._history_to_label)
+        controls.addWidget(self._history_to)
+
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Granularity:"))
+        self._history_gran_combo = QComboBox()
+        for label, value in GRANULARITY_OPTIONS:
+            self._history_gran_combo.addItem(label, value)
+        self._set_combo_data(self._history_gran_combo, self._history_granularity)
+        self._history_gran_combo.currentIndexChanged.connect(
+            self._on_history_granularity_changed
+        )
+        controls.addWidget(self._history_gran_combo)
         controls.addStretch(1)
 
         self._history_chart = NetWorthHistoryChart()
         v.addLayout(controls)
         v.addWidget(self._history_chart, stretch=1)
+        self._sync_history_custom_visibility()
         return page
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: str) -> None:
+        for i in range(combo.count()):
+            if combo.itemData(i) == value:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(i)
+                combo.blockSignals(False)
+                return
+
+    def _sync_history_custom_visibility(self) -> None:
+        show = self._history_period == "custom"
+        for w in (self._history_from_label, self._history_from,
+                  self._history_to_label, self._history_to):
+            w.setVisible(show)
 
     def _set_view(self, view: str) -> None:
         if view == self._view:
@@ -637,23 +685,50 @@ class NetWorthWindow(QMainWindow):
         key = self._history_period_combo.currentData()
         if key:
             self._history_period = key
+            self._sync_history_custom_visibility()
             self._refresh_history()
 
-    def _history_sample_dates(self) -> list:
-        """Sample dates for the chosen period — month-ends from the period start
-        to today. 'all' starts at the earliest transaction (ADR-121)."""
+    def _on_history_granularity_changed(self, _idx: int) -> None:
+        value = self._history_gran_combo.currentData()
+        if value:
+            self._history_granularity = value
+            self._refresh_history()
+
+    def _on_history_custom_changed(self, *_a) -> None:
+        # Only a real edit while the Custom preset is active recomputes; the
+        # dateChanged that fires during setup / while hidden is ignored.
+        if self._history_period == "custom":
+            self._refresh_history()
+
+    def _history_bounds(self) -> tuple[date, date]:
+        """(start, end) for the chosen preset. 'all' starts at the earliest
+        transaction (ADR-121); 'custom' reads the pickers (swapped if
+        from > to); the rolling presets are a whole-year day-delta back."""
         today = date.today()
-        if self._history_period == "all":
+        key = self._history_period
+        if key == "custom":
+            start = self._history_from.date().toPython()
+            end = self._history_to.date().toPython()
+            if start > end:
+                start, end = end, start
+            return start, end
+        if key == "all":
             earliest = self._repo.earliest_posted_date()
             start = date.fromisoformat(earliest) if earliest else today.replace(
                 year=max(1, today.year - 5)
             )
-        else:
-            years = {"1y": 1, "3y": 3, "5y": 5}.get(self._history_period, 1)
-            start = today - timedelta(days=365 * years)
-        if start > today:
-            start = today
-        return month_end_samples(start, today)
+            return start, today
+        years = {"1y": 1, "3y": 3, "5y": 5}.get(key, 1)
+        return today - timedelta(days=365 * years), today
+
+    def _history_sample_dates(self) -> list:
+        """Sample dates for the chosen period + granularity (ADR-135) — the
+        period-ends across the range, with 'auto' resolved from the span."""
+        start, end = self._history_bounds()
+        if start > end:
+            start = end
+        gran = resolve_history_granularity(start, end, self._history_granularity)
+        return period_end_samples(start, end, gran)
 
     def _refresh_history(self) -> None:
         """Recompute + render the net-worth-over-time series for the current

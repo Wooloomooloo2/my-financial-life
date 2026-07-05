@@ -1,13 +1,15 @@
-"""Net-worth-over-time chart (ADR-121, paintEvent per ADR-026).
+"""Net-worth-over-time chart (ADR-121, bars per ADR-135; paintEvent per ADR-026).
 
-A stacked-area composition over time: asset families stacked **above** the zero
-line, debt families stacked **below** it, and a bold **net-worth** polyline on
-top — so both the composition and the bottom line read at a glance. Family
+A **stacked-bar** composition over time: one bar per sample, asset families
+stacked **above** the zero line, debt families stacked **below** it, with a
+**net-worth marker** (a dot) on each bar — so both the composition and the
+bottom line read at a glance without the continuous area/line the owner found
+harder to read (ADR-135, replacing the ADR-121 stacked-area + polyline). Family
 colours are passed in from the Net Worth screen's ``_FAMILY_VIEW`` so they match
 the point-in-time donut. Consumes ``net_worth_history.NetWorthPoint``s; the
 values are already FX-converted to the display currency (ADR-055).
 
-Honours the no-pies rule (ADR-018) — it's an area chart, not a pie.
+Honours the no-pies rule (ADR-018) — it's a bar chart, not a pie.
 """
 from __future__ import annotations
 
@@ -22,7 +24,6 @@ from PySide6.QtGui import (
     QFontMetrics,
     QPainter,
     QPen,
-    QPolygonF,
 )
 from PySide6.QtWidgets import QToolTip, QWidget
 
@@ -148,9 +149,9 @@ class NetWorthHistoryChart(QWidget):
         self._paint_gridlines(painter, chart, ymin, ymax, ystep)
         self._paint_y_labels(painter, chart, ymin, ymax, ystep)
         self._paint_x_labels(painter, chart)
-        self._paint_bands(painter, chart, ymin, ymax)
+        self._paint_bars(painter, chart, ymin, ymax)
         self._paint_zero_baseline(painter, chart, ymin, ymax)
-        self._paint_net_line(painter, chart, ymin, ymax)
+        self._paint_net_markers(painter, chart, ymin, ymax)
         self._paint_legend(painter, legend)
         painter.end()
 
@@ -169,10 +170,23 @@ class NetWorthHistoryChart(QWidget):
         return chart, legend
 
     def _x_for(self, i: int, chart: QRectF) -> float:
+        """Bar-slot centre (ADR-135): each sample owns an equal slot and the bar
+        is centred in it, so the first/last bars keep a margin off the axes and
+        the x-labels sit under their bars."""
         n = len(self._points)
-        if n <= 1:
+        if n <= 0:
             return chart.left()
-        return chart.left() + (i / (n - 1)) * chart.width()
+        slot = chart.width() / n
+        return chart.left() + (i + 0.5) * slot
+
+    def _bar_width(self, chart: QRectF) -> float:
+        """Bar pixel width — a fraction of the slot, clamped so a handful of
+        samples don't render absurdly fat bars and hundreds stay ≥ 2 px."""
+        n = len(self._points)
+        if n <= 0:
+            return 1.0
+        slot = chart.width() / n
+        return max(2.0, min(slot * 0.7, 46.0))
 
     def _y_for(self, v: float, ymin: float, ymax: float, chart: QRectF) -> float:
         span = ymax - ymin
@@ -252,31 +266,35 @@ class NetWorthHistoryChart(QWidget):
         for x, text, hw in self._x_label_layout(chart, fm):
             painter.drawText(int(x - hw), y, text)
 
-    def _paint_bands(self, painter, chart, ymin, ymax) -> None:
-        """Draw each family band as per-segment quads between consecutive
-        samples — assets above zero, debts below."""
+    def _paint_bars(self, painter, chart, ymin, ymax) -> None:
+        """Draw one stacked bar per sample — asset families up from zero, debt
+        families down — as flat filled rects (ADR-135)."""
         self._x_positions = [(self._x_for(i, chart), i) for i in range(len(self._points))]
         painter.setPen(Qt.NoPen)
-        n = len(self._points)
+        bw = self._bar_width(chart)
 
-        def draw_stack(families, bounds_fn):
-            for band_idx, (_key, _label, color) in enumerate(families):
+        for i, p in enumerate(self._points):
+            left = self._x_for(i, chart) - bw / 2.0
+
+            # Assets stack upward: bounds ascend 0 → f1 → f1+f2 …
+            ab = self._asset_bounds(p)
+            for band_idx, (_key, _label, color) in enumerate(self._asset_families):
+                y_bottom = self._y_for(ab[band_idx], ymin, ymax, chart)
+                y_top = self._y_for(ab[band_idx + 1], ymin, ymax, chart)
+                if y_bottom - y_top <= 0:
+                    continue
                 painter.setBrush(QBrush(color))
-                for i in range(n - 1):
-                    b0 = bounds_fn(self._points[i])
-                    b1 = bounds_fn(self._points[i + 1])
-                    x0 = self._x_for(i, chart)
-                    x1 = self._x_for(i + 1, chart)
-                    poly = QPolygonF([
-                        QPointF(x0, self._y_for(b0[band_idx + 1], ymin, ymax, chart)),
-                        QPointF(x1, self._y_for(b1[band_idx + 1], ymin, ymax, chart)),
-                        QPointF(x1, self._y_for(b1[band_idx], ymin, ymax, chart)),
-                        QPointF(x0, self._y_for(b0[band_idx], ymin, ymax, chart)),
-                    ])
-                    painter.drawPolygon(poly)
+                painter.drawRect(QRectF(left, y_top, bw, y_bottom - y_top))
 
-        draw_stack(self._asset_families, self._asset_bounds)
-        draw_stack(self._debt_families, self._debt_bounds)
+            # Debts stack downward: bounds descend 0 → -d1 → -(d1+d2) …
+            db = self._debt_bounds(p)
+            for band_idx, (_key, _label, color) in enumerate(self._debt_families):
+                y_upper = self._y_for(db[band_idx], ymin, ymax, chart)
+                y_lower = self._y_for(db[band_idx + 1], ymin, ymax, chart)
+                if y_lower - y_upper <= 0:
+                    continue
+                painter.setBrush(QBrush(color))
+                painter.drawRect(QRectF(left, y_upper, bw, y_lower - y_upper))
 
     def _paint_zero_baseline(self, painter, chart, ymin, ymax) -> None:
         pen = QPen(QColor(_ch.chart_axis_ink()))
@@ -285,26 +303,18 @@ class NetWorthHistoryChart(QWidget):
         y = self._y_for(0.0, ymin, ymax, chart)
         painter.drawLine(int(chart.left()), int(y), int(chart.right()), int(y))
 
-    def _paint_net_line(self, painter, chart, ymin, ymax) -> None:
-        pts = [
-            QPointF(self._x_for(i, chart),
-                    self._y_for(float(p.net), ymin, ymax, chart))
-            for i, p in enumerate(self._points)
-        ]
-        # White casing under a dark line so it stays legible over any band.
-        casing = QPen(QColor(_ch.chart_surface()))
-        casing.setWidth(5)
-        casing.setJoinStyle(Qt.RoundJoin)
-        casing.setCapStyle(Qt.RoundCap)
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(casing)
-        painter.drawPolyline(QPolygonF(pts))
-        line = QPen(QColor(_ch.chart_ink()))
-        line.setWidth(3)
-        line.setJoinStyle(Qt.RoundJoin)
-        line.setCapStyle(Qt.RoundCap)
-        painter.setPen(line)
-        painter.drawPolyline(QPolygonF(pts))
+    def _paint_net_markers(self, painter, chart, ymin, ymax) -> None:
+        """A net-worth dot on each bar (ADR-135) — a white casing so it stays
+        legible over any family colour, then a dark ink fill."""
+        r = 4.0
+        painter.setPen(Qt.NoPen)
+        for i, p in enumerate(self._points):
+            x = self._x_for(i, chart)
+            y = self._y_for(float(p.net), ymin, ymax, chart)
+            painter.setBrush(QBrush(QColor(_ch.chart_surface())))
+            painter.drawEllipse(QPointF(x, y), r + 1.5, r + 1.5)
+            painter.setBrush(QBrush(QColor(_ch.chart_ink())))
+            painter.drawEllipse(QPointF(x, y), r, r)
 
     def _paint_legend(self, painter, legend) -> None:
         font = QFont(painter.font())
@@ -321,11 +331,12 @@ class NetWorthHistoryChart(QWidget):
         x = legend.left()
         y_text = legend.top() + (legend.height() - fm.height()) / 2 + fm.ascent()
         y_chip = legend.top() + legend.height() / 2
-        for name, colour, is_line in items:
+        for name, colour, is_marker in items:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(colour))
-            if is_line:
-                painter.drawRect(int(x), int(y_chip - 1), 14, 3)
+            if is_marker:
+                # Net-worth marker — a dot, matching the per-bar markers.
+                painter.drawEllipse(QPointF(x + 6, y_chip), 5, 5)
             else:
                 painter.drawRect(int(x), int(y_chip - 6), 12, 12)
             painter.setPen(QPen(QColor(_ch.chart_ink())))

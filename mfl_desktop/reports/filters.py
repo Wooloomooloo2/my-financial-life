@@ -26,6 +26,7 @@ from typing import Optional
 # dialogs/windows that import them keep working unchanged.
 from mfl_desktop.periods import (  # noqa: F401
     REPORT_PRESETS as SPENDING_PERIOD_KEYS,
+    CATEGORY_PAYEE_PRESETS as CATEGORY_PAYEE_PERIOD_KEYS,
     INVESTMENT_PRESETS as INVESTMENT_RETURNS_PERIOD_KEYS,
     SANKEY_PRESETS as SANKEY_PERIOD_KEYS,
 )
@@ -409,6 +410,12 @@ class PayeeReportFilters:
 # spending period vocabulary + the payee top-N default.
 CATEGORY_PAYEE_GROUP_BY: tuple[str, ...] = ("category", "payee")
 
+# Category rollup levels when the primary dimension is Category (ADR-134),
+# reusing the Spending Over Time vocabulary (ADR-030): "top" = top-level root
+# (Expense…), "group" = budget-line group (Groceries…), "leaf" = the raw leaf
+# category. Only meaningful for the category dimension.
+CATEGORY_PAYEE_ROLLUP_LEVELS: tuple[str, ...] = SPENDING_ROLLUP_LEVELS
+
 
 @dataclass(frozen=True)
 class CategoryPayeeFilters:
@@ -417,9 +424,12 @@ class CategoryPayeeFilters:
     The report ranks **spending** (strict outflow — same definition as
     Spending Over Time / Payee) cross-cut by category and payee. ``group_by``
     is the *primary* dimension shown at level 1 (the other is the level-2
-    drill); it's a saved preference but a toggle flips it live. The category
-    dimension is the **budget-line level** (``category_group_map`` — Groceries,
-    Transport…), and payees roll up to their canonical (ADR-028/029).
+    drill); it's a saved preference but a toggle flips it live.
+
+    ``rollup_level`` (ADR-134) sets how deep the **category** dimension rolls
+    up — ``top`` (root) / ``group`` (budget-line, the historical behaviour and
+    default) / ``leaf`` (raw category); it's inert while grouping by payee.
+    Payees always roll up to their canonical (ADR-028/029).
 
     Empty ``account_ids`` means all accounts. ``top_n`` caps rows per level
     (0 = all; tail omitted with a hidden-count note, like the Payee report).
@@ -432,6 +442,7 @@ class CategoryPayeeFilters:
     custom_end:   Optional[str] = None
     account_ids: tuple[int, ...] = field(default_factory=tuple)
     group_by: str = "category"             # primary dimension at level 1
+    rollup_level: str = "group"            # category rollup (ADR-134)
     top_n: int = 15
     include_transfers: bool = False
 

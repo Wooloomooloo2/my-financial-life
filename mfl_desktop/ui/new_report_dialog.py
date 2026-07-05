@@ -30,22 +30,22 @@ from mfl_desktop.reports.filters import (
     TYPE_INCOME_OVER_TIME,
     TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
-    TYPE_PAYEE,
     TYPE_SANKEY,
     TYPE_SPENDING_OVER_TIME,
 )
 
 # Types shipped with persistence today. The rest render but are disabled
-# until their per-type ADR lands (ADR-039 §rounds).
+# until their per-type ADR lands (ADR-039 §rounds). The standalone Payee
+# report was retired in ADR-133 — Category & Payee subsumes it (its Payee
+# toggle ranks spending by payee), so it's no longer offered here.
 _AVAILABLE_TYPES: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME, TYPE_INCOME_OVER_TIME, TYPE_INCOME_EXPENSE,
-    TYPE_INVESTMENT_RETURNS, TYPE_SANKEY, TYPE_PAYEE, TYPE_CATEGORY_PAYEE,
+    TYPE_INVESTMENT_RETURNS, TYPE_SANKEY, TYPE_CATEGORY_PAYEE,
 )
 _TYPE_ORDER: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
     TYPE_INCOME_OVER_TIME,
     TYPE_INCOME_EXPENSE,
-    TYPE_PAYEE,
     TYPE_CATEGORY_PAYEE,
     TYPE_INVESTMENT_RETURNS,
     TYPE_SANKEY,

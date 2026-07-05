@@ -98,7 +98,6 @@ from mfl_desktop.ui.income_expense_window import IncomeExpenseWindow
 from mfl_desktop.ui.investment_returns_window import InvestmentReturnsWindow
 from mfl_desktop.ui.investment_income_window import InvestmentIncomeWindow
 from mfl_desktop.ui.sankey_report_window import SankeyReportWindow
-from mfl_desktop.ui.payee_report_window import PayeeReportWindow
 from mfl_desktop.ui.category_payee_window import CategoryPayeeWindow
 from mfl_desktop.reports.filters import (
     TYPE_CATEGORY_PAYEE,
@@ -106,7 +105,6 @@ from mfl_desktop.reports.filters import (
     TYPE_INCOME_OVER_TIME,
     TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
-    TYPE_PAYEE,
     TYPE_SANKEY,
     TYPE_SPENDING_OVER_TIME,
 )
@@ -433,7 +431,9 @@ class RegisterWindow(QMainWindow):
         self._home_view.net_worth_requested.connect(self._on_net_worth)
         self._home_view.budget_requested.connect(self._on_open_budget)
         self._home_view.schedules_requested.connect(self._on_manage_schedules)
-        self._home_view.payee_report_requested.connect(self._on_payee_report)
+        self._home_view.payee_report_requested.connect(
+            self._on_category_payee_report
+        )
         self._home_view.spending_report_requested.connect(self._on_spending_report)
         self._home_view.account_requested.connect(self._select_account_in_sidebar)
 
@@ -1451,10 +1451,6 @@ class RegisterWindow(QMainWindow):
             self._on_income_expense_report
         )
         reports_menu.addAction(self._income_expense_action)
-
-        self._payee_report_action = QAction("&Payee…", self)
-        self._payee_report_action.triggered.connect(self._on_payee_report)
-        reports_menu.addAction(self._payee_report_action)
 
         self._category_payee_action = QAction("&Category && Payee…", self)
         self._category_payee_action.triggered.connect(self._on_category_payee_report)
@@ -3838,10 +3834,6 @@ class RegisterWindow(QMainWindow):
         (ADR-064)."""
         self._open_bare_report(TYPE_INCOME_EXPENSE)
 
-    def _on_payee_report(self) -> None:
-        """Reports menu → Payee. Opens the *bare* window (ADR-066)."""
-        self._open_bare_report(TYPE_PAYEE)
-
     def _on_category_payee_report(self) -> None:
         """Reports menu → Category & Payee. Opens the *bare* window (ADR-068)."""
         self._open_bare_report(TYPE_CATEGORY_PAYEE)
@@ -3890,8 +3882,6 @@ class RegisterWindow(QMainWindow):
             win = InvestmentReturnsWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_SANKEY:
             win = SankeyReportWindow.open_bare(self._repo, parent=self)
-        elif type_key == TYPE_PAYEE:
-            win = PayeeReportWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_CATEGORY_PAYEE:
             win = CategoryPayeeWindow.open_bare(self._repo, parent=self)
         else:
@@ -3944,10 +3934,6 @@ class RegisterWindow(QMainWindow):
             )
         elif report.type == TYPE_SANKEY:
             win = SankeyReportWindow.load_from_id(
-                self._repo, report_id, parent=self,
-            )
-        elif report.type == TYPE_PAYEE:
-            win = PayeeReportWindow.load_from_id(
                 self._repo, report_id, parent=self,
             )
         elif report.type == TYPE_CATEGORY_PAYEE:
