@@ -55,7 +55,7 @@ from mfl_desktop.ui.payee_chart import PayeeChart
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
-    TransactionsListWindow, TxnListFilter,
+    TransactionsListWindow, TxnListFilter, drilldown_account_scope,
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
@@ -759,14 +759,12 @@ class CategoryPayeeWindow(QMainWindow):
             cat_group_id, cat_name = leaf_id, leaf_name
 
         d_from, d_to = self._resolve_date_bounds(self._current_filters)
-        acc_ids = list(self._current_filters.account_ids)
-        if len(acc_ids) == 1:
-            account_id = acc_ids[0]
-            account_name = next(
-                (a.name for a in self._all_accounts if a.id == account_id), "",
-            )
-        else:
-            account_id, account_name = None, ""
+        # A single selected account drills per-account; a subset narrows to
+        # exactly those accounts (ADR-147); 0 (all) opens the cross-account view.
+        names = {a.id: a.name for a in self._all_accounts}
+        account_id, account_name, subset, subset_label = drilldown_account_scope(
+            self._current_filters.account_ids, lambda i: names.get(i, ""),
+        )
 
         if payee_id is None:
             payee_ids: tuple[int, ...] = ()
@@ -784,6 +782,7 @@ class CategoryPayeeWindow(QMainWindow):
             title_label=f"{cat_name} · {payee_name}",
             custom_start=d_from, custom_end=d_to,
             payee_ids=payee_ids, payee_is_null=payee_is_null,
+            account_ids=subset, account_ids_label=subset_label,
         )
         win = TransactionsListWindow(self._repo, flt, parent=self)
         win.setAttribute(Qt.WA_DeleteOnClose)

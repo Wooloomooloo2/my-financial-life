@@ -48,7 +48,7 @@ from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
-    TransactionsListWindow, TxnListFilter,
+    TransactionsListWindow, TxnListFilter, drilldown_account_scope,
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
@@ -418,23 +418,27 @@ class SankeyReportWindow(QMainWindow):
     def _on_node_clicked(self, category_id: int, label: str) -> None:
         """Drill a Sankey category node to its transactions (ADR-083) — that
         category and its descendants over the report's period and account
-        scope. A single selected account drills per-account; 0 / a subset
-        opens the cross-account view (mirrors the Payee report)."""
+        scope. A single selected account drills per-account; a subset of
+        accounts narrows to exactly those accounts (ADR-147) so the list
+        reconciles with the report's account-filtered totals; 0 selected
+        opens the cross-account view."""
         d_from, d_to = self._resolve_bounds()
-        acc_ids = list(self._current_filters.account_ids)
-        if len(acc_ids) == 1:
-            account_id: Optional[int] = acc_ids[0]
-            account_name = next(
-                (a.name for a in self._repo.list_accounts(include_closed=True)
-                 if a.id == account_id),
-                "",
-            )
-        else:
-            account_id, account_name = None, ""
+        # ADR-147: honour the report's account scope in the drill-down — a
+        # subset narrows to exactly those accounts rather than leaking every
+        # account's rows (e.g. a rental scope must not surface a card's
+        # interest).
+        accts = {
+            a.id: a.name
+            for a in self._repo.list_accounts(include_closed=True)
+        }
+        account_id, account_name, subset, subset_label = drilldown_account_scope(
+            self._current_filters.account_ids, lambda i: accts.get(i, ""),
+        )
         flt = TxnListFilter.for_category(
             account_id=account_id, account_name=account_name,
             category_id=category_id, category_label=label,
             period_key="custom", custom_start=d_from, custom_end=d_to,
+            account_ids=subset, account_ids_label=subset_label,
         )
         win = TransactionsListWindow(self._repo, flt, parent=self)
         win.setAttribute(Qt.WA_DeleteOnClose)

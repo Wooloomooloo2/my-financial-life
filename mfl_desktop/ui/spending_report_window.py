@@ -63,7 +63,7 @@ from mfl_desktop.ui.spending_filter_dialog import (
     SpendingFilterDialog, UNCATEGORISED_ID,
 )
 from mfl_desktop.ui.transactions_list_window import (
-    TransactionsListWindow, TxnListFilter,
+    TransactionsListWindow, TxnListFilter, drilldown_account_scope,
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
@@ -772,21 +772,18 @@ class SpendingReportWindow(QMainWindow):
             d_from, d_to = max(b_from, r_from), min(b_to, r_to)
         except (ValueError, KeyError):
             d_from, d_to = r_from, r_to
-        # A single selected account drills per-account; 0 (all) or a subset
-        # opens the cross-account view (mirrors the Income & Expense drill).
-        acc_ids = list(filters.account_ids)
-        if len(acc_ids) == 1:
-            account_id: Optional[int] = acc_ids[0]
-            account_name = next(
-                (a.name for a in self._all_accounts if a.id == account_id), "",
-            )
-        else:
-            account_id, account_name = None, ""
+        # A single selected account drills per-account; a subset narrows to
+        # exactly those accounts (ADR-147); 0 (all) opens the cross-account view.
+        names = {a.id: a.name for a in self._all_accounts}
+        account_id, account_name, subset, subset_label = drilldown_account_scope(
+            filters.account_ids, lambda i: names.get(i, ""),
+        )
         flt = TxnListFilter.for_category(
             account_id=account_id, account_name=account_name,
             category_id=category_id,
             category_label=self._categories_by_id[category_id].name,
             period_key="custom", custom_start=d_from, custom_end=d_to,
+            account_ids=subset, account_ids_label=subset_label,
         )
         win = TransactionsListWindow(self._repo, flt, parent=self)
         win.setAttribute(Qt.WA_DeleteOnClose)

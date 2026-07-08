@@ -56,7 +56,7 @@ from mfl_desktop.ui.income_expense_filter_dialog import (
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
-    TransactionsListWindow, TxnListFilter,
+    TransactionsListWindow, TxnListFilter, drilldown_account_scope,
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
@@ -556,21 +556,19 @@ class IncomeExpenseWindow(QMainWindow):
             d_from, d_to = bucket_bounds(bucket_key, self._last_granularity)
         except ValueError:
             return
-        # Account scope: a single selected account drills per-account; 0 (all)
-        # or a subset opens the cross-account view (mirrors the Payee report).
-        acc_ids = list(self._current_filters.account_ids)
-        if len(acc_ids) == 1:
-            account_id: Optional[int] = acc_ids[0]
-            account_name = next(
-                (a.name for a in self._all_accounts if a.id == account_id), "",
-            )
-        else:
-            account_id, account_name = None, ""
+        # Account scope: a single selected account drills per-account; a subset
+        # narrows to exactly those accounts (ADR-147); 0 (all) opens the
+        # cross-account view.
+        names = {a.id: a.name for a in self._all_accounts}
+        account_id, account_name, subset, subset_label = drilldown_account_scope(
+            self._current_filters.account_ids, lambda i: names.get(i, ""),
+        )
         kind_label = "Income" if kind == "income" else "Expense"
         flt = TxnListFilter.for_kind(
             account_id=account_id, account_name=account_name,
             kind=kind, kind_label=kind_label,
             period_key="custom", custom_start=d_from, custom_end=d_to,
+            account_ids=subset, account_ids_label=subset_label,
         )
         win = TransactionsListWindow(self._repo, flt, parent=self)
         win.setAttribute(Qt.WA_DeleteOnClose)

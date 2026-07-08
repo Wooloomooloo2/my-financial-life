@@ -60,7 +60,7 @@ from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
-    TransactionsListWindow, TxnListFilter,
+    TransactionsListWindow, TxnListFilter, drilldown_account_scope,
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
@@ -590,17 +590,19 @@ class InvestmentReturnsWindow(QMainWindow):
         d_to = getattr(self, "_last_d_to", None)
         if d_from is None or d_to is None:
             return
-        acc_ids = list(self._current_filters.account_ids)
-        if len(acc_ids) == 1:
-            account_id: Optional[int] = acc_ids[0]
-            acct = self._accounts_by_id.get(account_id)
-            account_name = acct.name if acct is not None else ""
-        else:
-            account_id, account_name = None, ""
+        # A single selected account drills per-account; a subset narrows to
+        # exactly those accounts (ADR-147); 0 (whole portfolio) is cross-account.
+        def _name(i):
+            acct = self._accounts_by_id.get(i)
+            return acct.name if acct is not None else ""
+        account_id, account_name, subset, subset_label = drilldown_account_scope(
+            self._current_filters.account_ids, _name,
+        )
         flt = TxnListFilter.for_security(
             account_id=account_id, account_name=account_name,
             security_id=int(sid), security_label=label,
             period_key="custom", custom_start=d_from, custom_end=d_to,
+            account_ids=subset, account_ids_label=subset_label,
         )
         win = TransactionsListWindow(self._repo, flt, parent=self)
         win.setAttribute(Qt.WA_DeleteOnClose)

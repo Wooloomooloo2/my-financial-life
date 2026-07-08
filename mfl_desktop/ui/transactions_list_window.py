@@ -56,6 +56,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -85,6 +86,11 @@ from mfl_desktop.ui.delegates import (
 from mfl_desktop.ui.bulk_edit_dialog import BulkEditDialog
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
 from mfl_desktop.ui.register_model import TransactionTableModel
+from mfl_desktop.ui.split_transaction_dialog import SplitTransactionDialog
+from mfl_desktop.ui.investment_transaction_dialog import (
+    InvestmentTransactionDialog,
+)
+from mfl_desktop.import_engine.qif_actions import is_categorisable
 from mfl_desktop.ui import tokens
 
 
@@ -125,6 +131,15 @@ class TxnListFilter:
     # only transactions on that security (its buys / sells / dividends).
     security_id: Optional[int] = None
     security_label: str = ""
+    # Multi-account subset scope (ADR-147): when a report is scoped to a *set*
+    # of accounts (e.g. a rental-property group that excludes a credit card),
+    # the drill-down narrows to exactly those accounts instead of opening the
+    # whole file. Empty == no subset (use ``account_id`` / cross-account). The
+    # window loads all transactions and the proxy filters to this set, so the
+    # cross-account Account column is shown. ``account_ids_label`` is the chip
+    # caption (e.g. "3 accounts").
+    account_ids: tuple[int, ...] = ()
+    account_ids_label: str = ""
 
     @classmethod
     def for_category(
@@ -132,6 +147,8 @@ class TxnListFilter:
         category_id: int, category_label: str, period_key: str,
         custom_start: Optional[date] = None,
         custom_end: Optional[date] = None,
+        account_ids: tuple[int, ...] = (),
+        account_ids_label: str = "",
     ) -> "TxnListFilter":
         return cls(
             account_id=account_id, account_name=account_name,
@@ -139,6 +156,7 @@ class TxnListFilter:
             payee_id=None, payee_label="",
             period_key=period_key, title_label=category_label,
             custom_start=custom_start, custom_end=custom_end,
+            account_ids=account_ids, account_ids_label=account_ids_label,
         )
 
     @classmethod
@@ -147,6 +165,8 @@ class TxnListFilter:
         payee_id: int, payee_label: str, period_key: str,
         custom_start: Optional[date] = None,
         custom_end: Optional[date] = None,
+        account_ids: tuple[int, ...] = (),
+        account_ids_label: str = "",
     ) -> "TxnListFilter":
         return cls(
             account_id=account_id, account_name=account_name,
@@ -154,6 +174,7 @@ class TxnListFilter:
             payee_id=payee_id, payee_label=payee_label,
             period_key=period_key, title_label=payee_label,
             custom_start=custom_start, custom_end=custom_end,
+            account_ids=account_ids, account_ids_label=account_ids_label,
         )
 
     @classmethod
@@ -163,6 +184,8 @@ class TxnListFilter:
         payee_is_null: bool = False,
         custom_start: Optional[date] = None,
         custom_end: Optional[date] = None,
+        account_ids: tuple[int, ...] = (),
+        account_ids_label: str = "",
     ) -> "TxnListFilter":
         """Drill-down for a rolled-up payee (ADR-066): match any id in
         ``payee_ids`` (canonical + aliases), or — when ``payee_is_null`` —
@@ -175,6 +198,7 @@ class TxnListFilter:
             period_key=period_key, title_label=payee_label,
             custom_start=custom_start, custom_end=custom_end,
             payee_ids=payee_ids, payee_is_null=payee_is_null,
+            account_ids=account_ids, account_ids_label=account_ids_label,
         )
 
     @classmethod
@@ -183,6 +207,8 @@ class TxnListFilter:
         kind: str, kind_label: str, period_key: str,
         custom_start: Optional[date] = None,
         custom_end: Optional[date] = None,
+        account_ids: tuple[int, ...] = (),
+        account_ids_label: str = "",
     ) -> "TxnListFilter":
         """Drill-down for an Income & Expense bar (ADR-083): every
         ``kind``-category flow (income inflows / expense outflows, transfers
@@ -194,6 +220,7 @@ class TxnListFilter:
             period_key=period_key, title_label=kind_label,
             custom_start=custom_start, custom_end=custom_end,
             kind=kind, kind_label=kind_label,
+            account_ids=account_ids, account_ids_label=account_ids_label,
         )
 
     @classmethod
@@ -202,6 +229,8 @@ class TxnListFilter:
         security_id: int, security_label: str, period_key: str,
         custom_start: Optional[date] = None,
         custom_end: Optional[date] = None,
+        account_ids: tuple[int, ...] = (),
+        account_ids_label: str = "",
     ) -> "TxnListFilter":
         """Drill-down for an Investment Returns security row (ADR-083): that
         security's buys / sells / dividends over the period."""
@@ -212,6 +241,7 @@ class TxnListFilter:
             period_key=period_key, title_label=security_label,
             custom_start=custom_start, custom_end=custom_end,
             security_id=security_id, security_label=security_label,
+            account_ids=account_ids, account_ids_label=account_ids_label,
         )
 
     def signature(self) -> tuple:
@@ -221,6 +251,7 @@ class TxnListFilter:
         as two distinct windows."""
         return (
             self.account_id,
+            self.account_ids,
             self.period_key,
             self.category_id,
             self.payee_id,
@@ -231,6 +262,29 @@ class TxnListFilter:
             self.custom_start.isoformat() if self.custom_start else None,
             self.custom_end.isoformat() if self.custom_end else None,
         )
+
+
+def drilldown_account_scope(
+    account_ids, name_for,
+) -> tuple[Optional[int], str, tuple[int, ...], str]:
+    """Resolve a report's account selection into drill-down scope args
+    (ADR-147). Returns ``(account_id, account_name, account_ids,
+    account_ids_label)`` to spread into a ``TxnListFilter`` factory:
+
+    - **one** account → per-account drill (its id + name; no subset);
+    - **several** → a subset (no single id; the id tuple + an "N accounts"
+      label) so the drill-down narrows to exactly those accounts instead of
+      leaking every account's rows;
+    - **none** → cross-account (all empty), the whole file.
+
+    ``name_for`` maps an account id to its display name (each caller wires its
+    own account lookup)."""
+    ids = list(account_ids)
+    if len(ids) == 1:
+        return ids[0], name_for(ids[0]), (), ""
+    if len(ids) > 1:
+        return None, "", tuple(ids), f"{len(ids)} accounts"
+    return None, "", (), ""
 
 
 class DrillDownFilterProxy(TransactionFilterProxy):
@@ -261,6 +315,7 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         self._kind: Optional[str] = None
         self._kind_cat_ids: Optional[frozenset[int]] = None
         self._security_id: Optional[int] = None
+        self._account_ids: Optional[frozenset[int]] = None
 
     def set_payee_id(self, payee_id: Optional[int]) -> None:
         self._payee_id = payee_id
@@ -305,6 +360,16 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         self._security_id = security_id
         self.invalidateRowsFilter()
 
+    def set_account_ids(self, account_ids: Optional[set[int]]) -> None:
+        """Multi-account subset scope (ADR-147): accept a row only when its
+        account is in the set. The model is loaded cross-account
+        (``account_id=None``) so every scoped account's rows are present;
+        this narrows them to exactly the report's account selection so the
+        drill-down reconciles with the report's account-filtered totals.
+        ``None`` / empty clears the subset (cross-account)."""
+        self._account_ids = frozenset(account_ids) if account_ids else None
+        self.invalidateRowsFilter()
+
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
         if not super().filterAcceptsRow(source_row, parent):
             return False
@@ -339,6 +404,8 @@ class DrillDownFilterProxy(TransactionFilterProxy):
             if self._kind == "expense" and row.amount >= 0:
                 return False
         if self._security_id is not None and row.security_id != self._security_id:
+            return False
+        if self._account_ids is not None and row.account_id not in self._account_ids:
             return False
         if self._date_from and row.posted_date < self._date_from:
             return False
@@ -399,6 +466,12 @@ class TransactionsListWindow(QMainWindow):
         # these in place rather than replacing the dataclass each turn.
         self._account_id: Optional[int] = txn_filter.account_id
         self._account_name: str = txn_filter.account_name
+        # Multi-account subset scope (ADR-147). A subset loads the model
+        # cross-account (account_id stays None) and narrows via the proxy.
+        self._account_ids: Optional[set[int]] = (
+            set(txn_filter.account_ids) if txn_filter.account_ids else None
+        )
+        self._account_ids_label: str = txn_filter.account_ids_label
         self._category_id: Optional[int] = txn_filter.category_id
         self._category_label: str = txn_filter.category_label
         self._payee_id: Optional[int] = txn_filter.payee_id
@@ -448,6 +521,12 @@ class TransactionsListWindow(QMainWindow):
         )
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_table_context_menu)
+        # ADR-147: dialog-edited rows (splits, investment transactions) can't be
+        # edited inline, so route a double-click to their detail dialog — the
+        # same affordance the register gives — so a drill-down (e.g. the Cash
+        # Flow "Interest Exp" node, whose rows are splits) is editable, not just
+        # viewable.
+        self._table.doubleClicked.connect(self._on_table_double_clicked)
         self._bulk_edit_action = QAction("Bulk Edit Selected…", self)
         self._bulk_edit_action.setShortcut(QKeySequence("Ctrl+E"))
         self._bulk_edit_action.triggered.connect(self._on_bulk_edit)
@@ -670,6 +749,8 @@ class TransactionsListWindow(QMainWindow):
             self._proxy.set_kind_filter(None, None)
         # Security — Investment Returns drill (ADR-083).
         self._proxy.set_security_id(self._security_id)
+        # Account subset — multi-account report scope (ADR-147).
+        self._proxy.set_account_ids(self._account_ids)
         # Date range — from period preset.
         start, end = self._resolve_period()
         self._proxy.set_date_range(start.isoformat(), end.isoformat())
@@ -694,12 +775,23 @@ class TransactionsListWindow(QMainWindow):
         parts.append(self._period_chip_label())
         if self._account_name:
             parts.append(self._account_name)
+        elif self._account_ids is not None:
+            parts.append(self._account_subset_label())
         self.setWindowTitle(" — ".join(parts) if parts else "Transactions")
 
         # Account chip — only when an account is the focus.
         if self._account_id is not None and self._account_name:
             self._chips_layout.addWidget(
                 self._make_chip(self._account_name, self._on_remove_account)
+            )
+        # Account-subset chip (ADR-147) — the report's multi-account scope.
+        # Removing it widens to cross-account, mirroring the single-account
+        # chip's ×.
+        elif self._account_ids is not None:
+            self._chips_layout.addWidget(
+                self._make_chip(
+                    self._account_subset_label(), self._on_remove_account_subset,
+                )
             )
         # Period chip — always shown, non-removable (user changes the
         # period via the button row, not by removing the chip).
@@ -781,12 +873,27 @@ class TransactionsListWindow(QMainWindow):
         self._refresh_chips_and_title()
         self._refresh_footer()
 
+    def _account_subset_label(self) -> str:
+        """Chip / title caption for a multi-account subset scope (ADR-147).
+        Prefers the caller-supplied label, else '{n} accounts'."""
+        n = len(self._account_ids or ())
+        return self._account_ids_label or f"{n} account{'s' if n != 1 else ''}"
+
     def _on_remove_account(self) -> None:
         """Widen to cross-account — rebuilds the model from
         ``list_all_transactions`` (different column layout, Account
         column appears, Balance disappears)."""
         self._account_name = ""
         self._set_model(None)
+        self._apply_filter()
+        self._refresh_chips_and_title()
+        self._refresh_footer()
+
+    def _on_remove_account_subset(self) -> None:
+        """Drop the multi-account subset scope (ADR-147) — widen to every
+        account. The model is already cross-account, so just clear the proxy
+        filter and rebuild the chips."""
+        self._account_ids = None
         self._apply_filter()
         self._refresh_chips_and_title()
         self._refresh_footer()
@@ -897,6 +1004,74 @@ class TransactionsListWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         return resp == QMessageBox.Yes
+
+    # ── double-click → detail dialog (ADR-147) ──
+
+    def _on_table_double_clicked(self, proxy_index) -> None:
+        """Route a double-click on a dialog-edited row to its detail dialog —
+        the same affordance the register offers. Split rows (ADR-051) open the
+        split dialog; investment rows (ADR-048) open the investment dialog.
+        Plain cash rows stay inline-editable (Qt's own double-click edit
+        trigger handles them; this is a no-op for them). The account is
+        resolved from the row itself, so this works in the single-account,
+        cross-account, and multi-account-subset views alike."""
+        assert self._proxy is not None and self._model is not None
+        if not proxy_index.isValid():
+            return
+        source_index = self._proxy.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return
+        row = self._model.row_at(source_index.row())
+        if row.action is not None:
+            # ADR-086: the Category cell is inline-editable for cash income /
+            # expense actions — don't hijack its double-click to open the dialog.
+            col_name = self._model.COLUMNS[source_index.column()][1]
+            if col_name == "category_name" and is_categorisable(row.action):
+                return
+            self._open_investment_txn_dialog(row)
+        elif row.split_count:
+            self._open_split_txn_dialog(row)
+
+    def _open_split_txn_dialog(self, seed) -> None:
+        """Edit a split parent (ADR-051) in the split dialog, resolving the
+        account from the row, then reload + re-filter on save."""
+        account = self._repo.get_account_by_id(seed.account_id)
+        if account is None or account.family == "investment":
+            return  # splits aren't supported on investment accounts
+        if (
+            self._repo.is_reconciled(seed.id)
+            and not self._confirm_reconciled_edit(seed.id)
+        ):
+            return
+        dialog = SplitTransactionDialog(
+            self._repo, account, self._repo.list_categories_flat(),
+            seed=seed, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._model.reload()
+        self._apply_filter()
+        self._refresh_footer()
+
+    def _open_investment_txn_dialog(self, seed) -> None:
+        """Edit an investment transaction (ADR-048) in its dialog, resolving
+        the account from the row, then reload + re-filter on save."""
+        account = self._repo.get_account_by_id(seed.account_id)
+        if account is None:
+            return
+        if (
+            self._repo.is_reconciled(seed.id)
+            and not self._confirm_reconciled_edit(seed.id)
+        ):
+            return
+        dialog = InvestmentTransactionDialog(
+            self._repo, account, seed=seed, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._model.reload()
+        self._apply_filter()
+        self._refresh_footer()
 
     # ── refresh on activate (matches BudgetWindow / AccountSummaryWindow) ──
 
