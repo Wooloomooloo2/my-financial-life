@@ -641,6 +641,27 @@ class ReturnsResult:
     irr_fully_priced: bool = True
 
 
+def _transfer_books_irr_flow(t: "TransactionRow") -> bool:
+    """Whether an in-kind share transfer (ShrsIn / ShrsOut) counts as a
+    market-value cash flow for the money-weighted return (ADR-046 amendment 3).
+
+    Only a **linked** transfer does — one that shares a ``transfer_id`` with its
+    counterpart leg, i.e. a genuine custodian move whose value entered or left
+    the measured accounts. A **bare** ShrsIn/ShrsOut (no ``transfer_id``, no
+    counterpart) is an import artifact — an opening-balance seed, a correction,
+    or a corporate action such as a stock split recorded as a share deposit
+    (the ~2,000 Banktivity bare pseudo-transfers). Booking one at market value
+    injects a phantom contribution/withdrawal that can swing an IRR wildly
+    (e.g. a split-as-ShrsIn dragging a +41 %% total-return holding to a negative
+    IRR), so bare transfers move shares but contribute **no** IRR flow. Matched
+    bare pairs already netted to zero (equal +mv / −mv on the same date), so
+    suppressing both legs leaves that net unchanged; the only behaviour change
+    is a single-sided bare transfer, which is far likelier an artifact than a
+    real external flow."""
+    tid = getattr(t, "transfer_id", None)
+    return tid is not None and str(tid).strip() != ""
+
+
 def compute_returns(
     txns: list[TransactionRow],
     sample_dates: list,
@@ -771,10 +792,13 @@ def compute_returns(
                         # Transfer in: carry FIFO cost basis from a matching
                         # ShrsOut so the round-trip preserves basis and books no
                         # phantom gain/loss (ADR-053). For the money-weighted
-                        # return it's a contribution of value AT MARKET on the
-                        # transfer date — a negative flow for the whole leg (the
-                        # matched basis source is irrelevant to the IRR).
-                        if in_window:
+                        # return a LINKED transfer is a contribution of value AT
+                        # MARKET on the transfer date — a negative flow for the
+                        # whole leg (the matched basis source is irrelevant to
+                        # the IRR). A bare/unlinked ShrsIn is an artifact, not a
+                        # real contribution, so it books no IRR flow (ADR-046
+                        # amendment 3 — see _transfer_books_irr_flow).
+                        if in_window and _transfer_books_irr_flow(t):
                             price = nearest_price(sid, t.posted_date)
                             if price is not None:
                                 mv = _to_money(qty * price * mults.get(sid, 1.0))
@@ -817,10 +841,12 @@ def compute_returns(
                     if is_share_transfer(t.action):
                         # Transfer out: remove shares, NO realized gain/loss —
                         # park the lots for the matching ShrsIn (ADR-053). For
-                        # the IRR it's a withdrawal of value at market (a matching
-                        # in-portfolio ShrsIn cancels it for a whole-portfolio
-                        # view; for a single account it correctly leaves).
-                        if in_window:
+                        # the IRR a LINKED transfer is a withdrawal of value at
+                        # market (a matching in-portfolio ShrsIn cancels it for a
+                        # whole-portfolio view; for a single account it correctly
+                        # leaves). A bare/unlinked ShrsOut is an artifact and
+                        # books no IRR flow (ADR-046 amendment 3).
+                        if in_window and _transfer_books_irr_flow(t):
                             price = nearest_price(sid, t.posted_date)
                             if price is not None:
                                 mv = _to_money(qty * price * mults.get(sid, 1.0))
