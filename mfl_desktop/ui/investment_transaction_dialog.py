@@ -283,6 +283,11 @@ class InvestmentTransactionDialog(QDialog):
         self._reinvest_cat_id = (
             self._repo.get_reinvest_dividend_category_id() or self._income_cat_id
         )
+        # ADR-142: a cash dividend remembers its own category (e.g. *Dividend
+        # Income*) rather than always seeding the generic *Investment income*.
+        self._dividend_cat_id = (
+            self._repo.get_dividend_category_id() or self._income_cat_id
+        )
         self._category = make_category_picker(self._repo.list_categories_flat())
         self._category_touched = False
         self._category.currentIndexChanged.connect(self._on_category_touched)
@@ -298,7 +303,10 @@ class InvestmentTransactionDialog(QDialog):
 
         self._status = QComboBox()
         self._status.addItems(txn_status.labels())
-        self._status.setCurrentText(txn_status.label(txn_status.MATCHED))
+        # ADR-142: a manual entry must never default to *matched* (that's the
+        # OFX-download state, ADR-130) — default to *pending*, like the register
+        # dialog.
+        self._status.setCurrentText(txn_status.label(txn_status.PENDING))
         self._form.addRow("Status:", self._status)
 
         self._memo = QLineEdit()
@@ -398,7 +406,7 @@ class InvestmentTransactionDialog(QDialog):
                 self._commission.setText(f"{seed.commission:.2f}")
         self._amount.setText(f"{seed.amount:.2f}")
         self._memo.setText(seed.memo or "")
-        self._status.setCurrentText(txn_status.label(seed.status or txn_status.MATCHED))
+        self._status.setCurrentText(txn_status.label(seed.status or txn_status.PENDING))
         # ADR-086: preserve the row's stored category (shown only for the
         # categorisable actions). Signals are blocked, so this doesn't flip the
         # touched flag — the per-action default won't clobber it on edit.
@@ -509,13 +517,17 @@ class InvestmentTransactionDialog(QDialog):
 
         # On create, default income actions to *Investment income* and the
         # manual Cash action to Uncategorised — until the user picks otherwise.
-        # Edit mode keeps the row's stored category (seeded in _populate_from_seed).
+        # ADR-142: a cash Dividend defaults to its own remembered category
+        # (self._dividend_cat_id, e.g. *Dividend Income*), which self-seeds when
+        # the user files one (see _save). Edit mode keeps the row's stored
+        # category (seeded in _populate_from_seed).
         if (
             show_category and self._seed is None
             and not self._loading and not self._category_touched
         ):
             self._set_category(
                 self._reinvest_cat_id if kind == "reinvest"
+                else self._dividend_cat_id if self._current_action() == "Div"
                 else self._income_cat_id if kind == "income"
                 else self._repo.uncategorised_id()
             )
@@ -852,6 +864,7 @@ class InvestmentTransactionDialog(QDialog):
             if category_id is None:
                 category_id = (
                     self._reinvest_cat_id if kind == "reinvest"
+                    else self._dividend_cat_id if action == "Div"
                     else self._income_cat_id if kind == "income"
                     else self._repo.uncategorised_id()
                 )
@@ -859,9 +872,11 @@ class InvestmentTransactionDialog(QDialog):
             category_id = self._repo.uncategorised_id()
 
         # ADR-089: filing a reinvest under a category makes it the default for
-        # future reinvests (import + dialog).
+        # future reinvests (import + dialog). ADR-142: same for a cash dividend.
         if kind == "reinvest" and category_id != self._repo.uncategorised_id():
             self._repo.set_reinvest_dividend_category_id(category_id)
+        if action == "Div" and category_id != self._repo.uncategorised_id():
+            self._repo.set_dividend_category_id(category_id)
         posted_date = self._date.date().toString("yyyy-MM-dd")
         status = txn_status.key_for_label(self._status.currentText())
         memo = self._memo.text().strip()

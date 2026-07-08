@@ -1754,6 +1754,39 @@ class Repository:
             str(category_id) if category_id is not None else "",
         )
 
+    _DIVIDEND_CATEGORY_SETTING = "dividend_category_id"
+
+    def get_dividend_category_id(self) -> Optional[int]:
+        """The category a **cash dividend** defaults to in the investment dialog
+        (ADR-142) — the owner's remembered choice (e.g. *Dividend Income*)
+        instead of the generic seeded *Investment income*. Seeded by filing a
+        cash dividend under a category (via :meth:`set_dividend_category_id`).
+
+        Returns ``None`` when unset or when the stored id no longer points at a
+        live ``kind='income'`` category (a deleted / re-kinded category falls
+        back to no-default rather than mis-filing income)."""
+        raw = self.get_setting(self._DIVIDEND_CATEGORY_SETTING)
+        if not raw:
+            return None
+        try:
+            cid = int(raw)
+        except (TypeError, ValueError):
+            return None
+        row = self._conn.execute(
+            "SELECT 1 FROM category "
+            "WHERE id = ? AND kind = 'income' AND archived_at IS NULL",
+            (cid,),
+        ).fetchone()
+        return cid if row is not None else None
+
+    def set_dividend_category_id(self, category_id: Optional[int]) -> None:
+        """Persist the default cash-dividend category (ADR-142). Pass ``None``
+        to clear it."""
+        self.set_setting(
+            self._DIVIDEND_CATEGORY_SETTING,
+            str(category_id) if category_id is not None else "",
+        )
+
     def find_or_create_category_path(
         self, segments: list[str], source: str = "import",
         default_root_kind: str = "expense",
