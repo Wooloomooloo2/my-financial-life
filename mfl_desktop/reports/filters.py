@@ -317,6 +317,15 @@ class SankeyFilters:
     filters) — no narrowing, and the saved blob stays terse. ``category_ids``
     holds the leaf/own categories whose transactions count; the report's roll-up
     naturally excludes any descendant left out of the set.
+
+    ``include_transfers`` (ADR-146) folds ``kind='transfer'`` legs into the
+    diagram as directional cash flows — an outflow leg (``amount < 0``) on the
+    expense side, an inflow on the income side — mirroring the Income & Expense
+    report (ADR-140), since both read ``sankey_category_totals``.
+    ``transfer_category_ids`` (empty == all) narrows *which* transfer categories
+    fold in. Both default off, so the diagram is unchanged unless asked. A
+    transfer's two legs are both counted only when both accounts are in scope;
+    scoping to one account leaves just that side's leg (no phantom counterpart).
     """
 
     period_key: str = "ytd"
@@ -327,6 +336,8 @@ class SankeyFilters:
     value_mode: str = "amount"
     account_ids: tuple[int, ...] = field(default_factory=tuple)
     category_ids: tuple[int, ...] = field(default_factory=tuple)
+    include_transfers: bool = False                              # ADR-146
+    transfer_category_ids: tuple[int, ...] = field(default_factory=tuple)
 
     # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
     chart_split: tuple[int, ...] = field(default_factory=tuple)

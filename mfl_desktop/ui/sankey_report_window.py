@@ -2,8 +2,12 @@
 
 A cash-flow flow diagram: income categories on the left merge into a central
 Total, which fans out to expense categories (nested by hierarchy) plus a
-Savings node. Income vs expense is read from ``category.kind`` (transfers
-excluded), period-scoped by the timeframe control.
+Savings node. Income vs expense is read from ``category.kind``, period-scoped
+by the timeframe control. Transfers are excluded by default, but the filter's
+"Include transfers" option (ADR-146) folds ``kind='transfer'`` legs in as
+directional cash flows — an outflow on the expense side, an inflow on the
+income side — with a picker for which transfer categories to fold. Scope the
+report to one side's account(s) to see just that leg of each transfer.
 
 Inline controls (no modal — the owner wants to toggle quickly): timeframe,
 how many category levels to expand, a threshold that folds small slices into
@@ -327,6 +331,10 @@ class SankeyReportWindow(QMainWindow):
             value_mode=changes.get("value_mode", f.value_mode),
             account_ids=changes.get("account_ids", f.account_ids),
             category_ids=changes.get("category_ids", f.category_ids),
+            include_transfers=changes.get(
+                "include_transfers", f.include_transfers),
+            transfer_category_ids=changes.get(
+                "transfer_category_ids", f.transfer_category_ids),
         )
 
     def _on_control_changed(self, *_a) -> None:
@@ -366,6 +374,8 @@ class SankeyReportWindow(QMainWindow):
             categories=self._cat_nodes,
             current_account_ids=f.account_ids,
             current_category_ids=f.category_ids,
+            current_include_transfers=f.include_transfers,
+            current_transfer_category_ids=f.transfer_category_ids,
             parent=self,
         )
         accepted = dlg.exec() == QDialog.Accepted
@@ -377,9 +387,11 @@ class SankeyReportWindow(QMainWindow):
         chosen = dlg.values()
         if chosen is None:
             return
-        account_ids, category_ids = chosen
+        account_ids, category_ids, include_transfers, transfer_category_ids = chosen
         self._current_filters = self._with(
             account_ids=account_ids, category_ids=category_ids,
+            include_transfers=include_transfers,
+            transfer_category_ids=transfer_category_ids,
         )
         self._mark_dirty()
         self._refresh()
@@ -488,18 +500,50 @@ class SankeyReportWindow(QMainWindow):
             date_from=d_from.isoformat(), date_to=d_to.isoformat(),
             account_ids=f.account_ids, category_ids=f.category_ids,
             display_currency=self._display_ccy,
+            include_transfers=f.include_transfers,
+            transfer_category_ids=f.transfer_category_ids,
         )
         income_agg, expense_agg = totals["income"], totals["expense"]
         self._unconverted = totals.get("unconverted", {})
         income_pence = sum(income_agg.values())
         expense_pence = sum(expense_agg.values())
 
+        # Split each side's aggregate into its own kind vs folded-in transfer
+        # legs (ADR-146). Transfer categories form their own subtree, so
+        # `_build_side` (which roots + rolls up by a single kind) would neither
+        # find them as income/expense roots nor sum them into one — leaving them
+        # in the side total but unrendered. Partitioning lets us build the
+        # transfer categories as their own roots on whichever side their
+        # direction landed, with no double-count. When transfers are off the
+        # totals carry no transfer legs, so `_same` == the full aggregate and
+        # the diagram is byte-for-byte unchanged.
+        def _partition(agg: dict[int, int]) -> tuple[dict[int, int], dict[int, int]]:
+            same: dict[int, int] = {}
+            trans: dict[int, int] = {}
+            for cid, v in agg.items():
+                node = self._cat.get(cid)
+                if node is not None and node.kind == "transfer":
+                    trans[cid] = v
+                else:
+                    same[cid] = v
+            return same, trans
+
+        income_same, income_trans = _partition(income_agg)
+        expense_same, expense_trans = _partition(expense_agg)
+
         income_nodes = self._build_side(
-            "income", income_agg, income_pence, f.depth, f.threshold_pct,
+            "income", income_same, income_pence, f.depth, f.threshold_pct,
         )
         expense_nodes = self._build_side(
-            "expense", expense_agg, expense_pence, f.depth, f.threshold_pct,
+            "expense", expense_same, expense_pence, f.depth, f.threshold_pct,
         )
+        if f.include_transfers:
+            income_nodes += self._build_side(
+                "transfer", income_trans, income_pence, f.depth, f.threshold_pct,
+            )
+            expense_nodes += self._build_side(
+                "transfer", expense_trans, expense_pence, f.depth, f.threshold_pct,
+            )
 
         # Balance the shorter side so both fill the spine: a Savings node when
         # income > expense, a Deficit node when expense > income.
@@ -580,6 +624,12 @@ class SankeyReportWindow(QMainWindow):
         if f.category_ids:
             n = len(f.category_ids)
             parts.append(f"{n} categor{'ies' if n != 1 else 'y'}")
+        if f.include_transfers:
+            n = len(f.transfer_category_ids)
+            parts.append(
+                f"transfers ({n} categor{'ies' if n != 1 else 'y'})"
+                if n else "transfers"
+            )
         self._filter_note.setText("Filtered: " + ", ".join(parts) if parts else "")
 
     # ── save / dirty ──
