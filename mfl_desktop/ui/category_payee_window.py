@@ -142,7 +142,11 @@ class CategoryPayeeWindow(QMainWindow):
         # Reports include closed accounts by default (ADR-115) — their history
         # matters for long-term trends; the filter dialog can uncheck them.
         self._all_accounts = repo.list_accounts(include_closed=True)
-        self._all_categories = repo.list_category_tree()
+        # ADR-143: include archived categories so a transaction filed under a
+        # since-archived category resolves to its name + rolls up correctly,
+        # rather than showing as a bare "id=N" row. (These maps are display-only
+        # here — the filter dialog builds its own non-archived picker.)
+        self._all_categories = repo.list_category_tree(include_archived=True)
         self._categories_by_id = {c.id: c for c in self._all_categories}
         self._group_map = category_group_map(self._all_categories)
         # Rollup maps (ADR-134) — leaf category id → bucket id at each level.

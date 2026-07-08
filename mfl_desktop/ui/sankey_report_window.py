@@ -89,12 +89,16 @@ class SankeyReportWindow(QMainWindow):
             if report is not None else SankeyFilters.default()
         )
 
-        # Category tree (id → node) + parent→children, loaded once.
-        nodes = self._repo.list_category_tree()
-        self._cat_nodes = nodes
-        self._cat = {n.id: n for n in nodes}
+        # Category tree (id → node) + parent→children, loaded once. ADR-143:
+        # the id→node + parent→children maps include archived categories so a
+        # flow under a since-archived category resolves to its name/parent
+        # rather than a bare "id=N"; the filter picker (``_cat_nodes``) stays on
+        # the live-only tree.
+        self._cat_nodes = self._repo.list_category_tree()
+        display_nodes = self._repo.list_category_tree(include_archived=True)
+        self._cat = {n.id: n for n in display_nodes}
         self._children: dict[int, list[int]] = {}
-        for n in nodes:
+        for n in display_nodes:
             if n.parent_id is not None:
                 self._children.setdefault(n.parent_id, []).append(n.id)
 

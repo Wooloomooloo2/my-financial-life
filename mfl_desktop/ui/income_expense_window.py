@@ -126,6 +126,11 @@ class IncomeExpenseWindow(QMainWindow):
         # matters for long-term trends; the filter dialog can uncheck them.
         self._all_accounts = repo.list_accounts(include_closed=True)
         self._all_categories = repo.list_category_tree()
+        # ADR-143: archived-inclusive tree for the composition donut's name /
+        # parent rollup, so a slice for a since-archived category resolves to
+        # its name instead of a bare "id=N". The filter picker stays on the
+        # live-only ``_all_categories``.
+        self._display_categories = repo.list_category_tree(include_archived=True)
 
         self._current_filters: IncomeExpenseFilters = (
             IncomeExpenseFilters.from_json(report.filters_json)
@@ -463,8 +468,8 @@ class IncomeExpenseWindow(QMainWindow):
             include_transfers=include_transfers,
             transfer_category_ids=transfer_category_ids,
         )
-        parent_of = {c.id: c.parent_id for c in self._all_categories}
-        name_of = {c.id: c.name for c in self._all_categories}
+        parent_of = {c.id: c.parent_id for c in self._display_categories}
+        name_of = {c.id: c.name for c in self._display_categories}
         self._comp_slices = {
             side: compose_top_level(totals.get(side, {}), parent_of, name_of)
             for side in ("income", "expense")

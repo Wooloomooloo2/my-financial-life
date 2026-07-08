@@ -201,13 +201,18 @@ class SpendingReportWindow(QMainWindow):
         # Reports include closed accounts by default (ADR-115) — their history
         # matters for long-term trends; the filter dialog can uncheck them.
         self._all_accounts = repo.list_accounts(include_closed=True)
+        # ADR-143: the filter picker lists live (non-archived) categories, but
+        # the name/rollup maps include archived ones so a transaction under a
+        # since-archived category resolves to its name + rolls up, instead of a
+        # bare "id=N" row.
         self._all_categories = repo.list_category_tree()
-        self._categories_by_id = {c.id: c for c in self._all_categories}
+        self._display_categories = repo.list_category_tree(include_archived=True)
+        self._categories_by_id = {c.id: c for c in self._display_categories}
         self._all_canonical_payees = repo.list_canonical_payees()
         self._rollup_maps: dict[str, dict[int, int]] = {
-            "top":   category_root_map(self._all_categories),
-            "group": category_group_map(self._all_categories),
-            "leaf":  {c.id: c.id for c in self._all_categories},
+            "top":   category_root_map(self._display_categories),
+            "group": category_group_map(self._display_categories),
+            "leaf":  {c.id: c.id for c in self._display_categories},
         }
 
         # Active filters — either the loaded saved filters, or defaults.
@@ -613,7 +618,7 @@ class SpendingReportWindow(QMainWindow):
     def _distinct_bucket_count(self, rollup: str) -> int:
         rollup_map = self._rollup_maps.get(rollup, {})
         return len({
-            rollup_map[c.id] for c in self._all_categories
+            rollup_map[c.id] for c in self._display_categories
             if c.kind == self._DIRECTION.kind and c.id in rollup_map
             and rollup_map[c.id] != UNCATEGORISED_ID
         })
