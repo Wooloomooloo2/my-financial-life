@@ -56,6 +56,7 @@ from mfl_desktop.ui.investment_returns_filter_dialog import (
     InvestmentReturnsFilterDialog,
 )
 from mfl_desktop.ui.returns_chart import ReturnsChart
+from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
@@ -197,9 +198,9 @@ class InvestmentReturnsWindow(QMainWindow):
         # order (held first, by total return); once the user clicks a header
         # the choice sticks across filter changes.
         self._table.setSortingEnabled(True)
-        # Double-click a security row → its transactions over the period
-        # (ADR-083). The chart is portfolio-level so the table is the drill
-        # source; each row's security id is stashed on its first cell.
+        # Double-click routes by column (ADR-144): Symbol / Security → the
+        # security's Stock Record; any numeric cell → its transactions over the
+        # period (ADR-083). Each row's security id is stashed on its first cell.
         self._table.cellDoubleClicked.connect(self._on_security_row_activated)
         hh = self._table.horizontalHeader()
         hh.setSortIndicatorShown(True)
@@ -551,8 +552,30 @@ class InvestmentReturnsWindow(QMainWindow):
         # "max" (and any fallback): first transaction → today.
         return (earliest or today), today
 
-    def _on_security_row_activated(self, row: int, _col: int) -> None:
-        """Double-click a security row → its buys / sells / dividends over the
+    def _on_security_row_activated(self, row: int, col: int) -> None:
+        """Double-click routes by column (ADR-144): the Symbol / Security cells
+        open the security's Stock Record; any other (numeric) cell keeps the
+        transactions drill-down."""
+        if col in (0, 1):
+            self._open_stock_record_for_row(row)
+        else:
+            self._open_transactions_for_row(row)
+
+    def _open_stock_record_for_row(self, row: int) -> None:
+        """Symbol / Security cell → the security's Stock Record (ADR-144)."""
+        item = self._table.item(row, 0)
+        if item is None:
+            return
+        sid = item.data(_SID_ROLE)
+        if sid is None:
+            return
+        security = self._repo.get_security(int(sid))
+        if security is None:
+            return
+        StockRecordDialog(self._repo, security, self).exec()
+
+    def _open_transactions_for_row(self, row: int) -> None:
+        """Numeric cell → this security's buys / sells / dividends over the
         report's period (ADR-083). A single selected account drills
         per-account; the whole-portfolio / subset case opens cross-account."""
         item = self._table.item(row, 0)

@@ -60,6 +60,7 @@ from mfl_desktop.ui.investment_income_filter_dialog import (
     InvestmentIncomeFilterDialog,
 )
 from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter,
 )
@@ -168,6 +169,8 @@ class InvestmentIncomeWindow(QMainWindow):
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setAlternatingRowColors(True)
         self._table.setSortingEnabled(True)
+        # Double-click routes by column (ADR-144): Symbol / Security → the
+        # security's Stock Record; any numeric cell → its transactions.
         self._table.cellDoubleClicked.connect(self._on_security_row_activated)
         hh = self._table.horizontalHeader()
         hh.setSortIndicatorShown(True)
@@ -592,7 +595,29 @@ class InvestmentIncomeWindow(QMainWindow):
 
     # ── drill-down + filter ──
 
-    def _on_security_row_activated(self, row: int, _col: int) -> None:
+    def _on_security_row_activated(self, row: int, col: int) -> None:
+        """Double-click routes by column (ADR-144): the Symbol / Security cells
+        open the security's Stock Record; any other cell keeps the transactions
+        drill-down."""
+        if col in (0, 1):
+            self._open_stock_record_for_row(row)
+        else:
+            self._open_transactions_for_row(row)
+
+    def _open_stock_record_for_row(self, row: int) -> None:
+        """Symbol / Security cell → the security's Stock Record (ADR-144)."""
+        item = self._table.item(row, 0)
+        if item is None:
+            return
+        sid = item.data(_SID_ROLE)
+        if sid is None:
+            return
+        security = self._repo.get_security(int(sid))
+        if security is None:
+            return
+        StockRecordDialog(self._repo, security, self).exec()
+
+    def _open_transactions_for_row(self, row: int) -> None:
         item = self._table.item(row, 0)
         if item is None:
             return

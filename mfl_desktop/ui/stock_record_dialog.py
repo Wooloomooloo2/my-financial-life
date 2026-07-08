@@ -338,8 +338,10 @@ class StockRecordDialog(QDialog):
 
     def _reload_prices(self) -> None:
         series = self._repo.price_series(self._sid)
+        # Table shows the most recent date first (newest at top); the chart
+        # below still wants ascending, so only the table iterates reversed.
         self._prices_table.setRowCount(len(series))
-        for i, pr in enumerate(series):
+        for i, pr in enumerate(reversed(series)):
             date_item = QTableWidgetItem(pr.price_date)
             self._prices_table.setItem(i, 0, date_item)
             price_item = QTableWidgetItem(_fmt_num(pr.price, 4))
@@ -404,8 +406,11 @@ class StockRecordDialog(QDialog):
 
     def _reload_transactions(self) -> None:
         txns = self._repo.list_transactions_for_security(self._sid)
+        # Most recent transaction first (newest at top), matching the price
+        # table. This view is display-only; position/FIFO run off their own
+        # ascending replay in _reload_position.
         self._txn_table.setRowCount(len(txns))
-        for i, t in enumerate(txns):
+        for i, t in enumerate(reversed(txns)):
             self._txn_table.setItem(i, 0, QTableWidgetItem(t.posted_date))
             self._txn_table.setItem(i, 1, QTableWidgetItem(t.account_name))
             self._txn_table.setItem(i, 2, QTableWidgetItem(t.action or ""))
