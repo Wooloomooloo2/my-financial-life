@@ -100,11 +100,18 @@ source .venv/bin/activate
 Install dependencies and launch:
 
 ```bash
-pip install -r mfl_desktop/requirements.txt
+pip install -r requirements-desktop.txt
 
 # Launch the desktop app
 python -m mfl_desktop
 ```
+
+> **Install into the interpreter you launch with.** `requirements-desktop.txt`
+> is the complete, pinned runtime set (PySide6, cryptography, ofxtools, certifi).
+> If you activated the venv above, `pip` and `python` both point at it — good. If
+> you skipped the venv and run a global `python`, install into that same
+> interpreter with `python -m pip install -r requirements-desktop.txt` so the
+> two don't diverge.
 
 On first launch the app creates its database in the OS-standard per-user
 location (`~/Library/Application Support/MFL/MyFinancialLife.mfl` on macOS,
@@ -121,6 +128,21 @@ auto-created — seed it with `python -m mfl_desktop.cli init --db PATH`).
 1. Add your accounts (sidebar context menu → New Account, or the Account menu)
 2. Import a bank file (OFX / QFX / QIF / CSV) or add transactions manually
 3. Set a base currency and any FX / price API keys under **Manage → Currencies…** and **Manage → Securities…**
+
+### Troubleshooting
+
+**`ModuleNotFoundError: No module named 'cryptography'` (or `certifi`, `ofxtools`, `PySide6`) on launch.**
+A required package isn't installed in the interpreter you're running. This
+usually means dependencies were installed into a different Python than the one
+launching the app (e.g. installed into a venv but launching a global `python`,
+or a Python upgrade left `site-packages` incomplete). Reinstall the full pinned
+set into the *same* interpreter you launch with:
+
+```powershell
+python -m pip install -r requirements-desktop.txt
+```
+
+To confirm which interpreter that is, run `python -c "import sys; print(sys.executable)"`.
 
 ---
 
