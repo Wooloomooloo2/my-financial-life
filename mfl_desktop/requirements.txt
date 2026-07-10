@@ -1,5 +1,11 @@
-# mfl_desktop dependencies (per ADR-008 / ADR-009).
-# SQLite is in Python's stdlib — not listed.
+# mfl_desktop dependencies.
+#
+# NOT the source of truth. The canonical, fully-pinned desktop runtime set lives
+# at the repo root in `requirements-desktop.txt` (ADR-099). This file re-exports
+# it so `pip install -r mfl_desktop/requirements.txt` keeps working and can never
+# drift out of sync — there is exactly one list to maintain.
+#
+# Prefer installing the canonical file directly:
+#     pip install -r requirements-desktop.txt
 
-ofxtools>=0.9.4   # OFX/QFX parsing
-PySide6>=6.8.1    # native UI (Qt for Python)
+-r ../requirements-desktop.txt

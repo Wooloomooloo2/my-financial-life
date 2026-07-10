@@ -647,7 +647,7 @@ Most legacy-specific pitfalls only matter while maintaining the v0.1 web app; th
 ### Run the desktop app (the live target)
 ```powershell
 # from the project root, with an activated venv
-pip install -r mfl_desktop\requirements.txt
+pip install -r requirements-desktop.txt
 
 # one-time: create the database and seed a first account
 python -m mfl_desktop.cli init
