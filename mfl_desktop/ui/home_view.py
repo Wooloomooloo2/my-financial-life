@@ -14,19 +14,23 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QProgressBar,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from mfl_desktop.home_dashboard import gather_home_data
+from mfl_desktop.db.repository import Repository
+from mfl_desktop.home_dashboard import compute_net_worth_trend, gather_home_data
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.net_worth_sparkline import NetWorthSparkline
 
 _CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 
@@ -166,6 +170,39 @@ class _AccordionHeader(QFrame):
         self.toggled.emit(self._expanded)
 
 
+class _TrendSignals(QObject):
+    """Carries a background-computed net-worth trend back to the main thread.
+    Lives on the HomeView (main thread), so the cross-thread emit is auto-queued
+    onto the UI event loop."""
+    done = Signal(object)   # payload: {"sig": str, "trend": NetWorthTrend | None}
+
+
+class _TrendRunnable(QRunnable):
+    """Computes the hero's net-worth trend off the UI thread (ADR-150/035). Opens
+    its own Repository — a sqlite connection can't be shared across threads — and
+    is silent on failure (the hero simply stays number-only)."""
+
+    def __init__(self, db_path, display_ccy, today, sig, signals) -> None:
+        super().__init__()
+        self._db_path = db_path
+        self._ccy = display_ccy
+        self._today = today
+        self._sig = sig
+        self._signals = signals
+
+    def run(self) -> None:
+        trend = None
+        try:
+            bg = Repository(self._db_path)
+            try:
+                trend = compute_net_worth_trend(bg, self._today, self._ccy)
+            finally:
+                bg.close()
+        except Exception:
+            trend = None
+        self._signals.done.emit({"sig": self._sig, "trend": trend})
+
+
 class HomeView(QWidget):
     net_worth_requested = Signal()
     budget_requested = Signal()
@@ -185,6 +222,15 @@ class HomeView(QWidget):
         tokens.themed(self._scroll, "QScrollArea { background: {canvas}; }")
         outer.addWidget(self._scroll)
         self._container: Optional[QWidget] = None
+
+        # Net-worth hero trend (ADR-150). Computed off-thread and cached against a
+        # cheap data signature so the hero paints the sparkline synchronously
+        # while the data is unchanged, and only recomputes when it moves.
+        self._nw_trend = None            # NetWorthTrend | None (for _nw_trend_sig)
+        self._nw_trend_sig: Optional[str] = None
+        self._nw_trend_pending: Optional[str] = None
+        self._trend_signals = _TrendSignals()
+        self._trend_signals.done.connect(self._on_trend_ready)
 
     def set_repo(self, repo) -> None:
         """Point the dashboard at a different file (File ▸ Open swaps the live
@@ -208,7 +254,15 @@ class HomeView(QWidget):
         root.setSpacing(16)
 
         # ADR-119: the net-worth hero spans the full width above the grid.
-        root.addWidget(self._hero_card(data))
+        # ADR-150: its 12-month trend is computed off-thread; use the cached
+        # series if it matches the current data, else render number-only now and
+        # kick off a background compute that folds the sparkline in when ready.
+        sig = self._trend_sig_for(data)
+        have_for_sig = self._nw_trend_sig == sig     # computed (result may be None)
+        trend = self._nw_trend if have_for_sig else None
+        root.addWidget(self._hero_card(data, trend))
+        if not have_for_sig and self._nw_trend_pending != sig:
+            self._start_trend_compute(sig, data.display_ccy)
 
         # Two independently-packed columns (greedy-balanced by an approximate
         # per-card height weight) so a tall card never leaves the other column
@@ -271,21 +325,51 @@ class HomeView(QWidget):
 
     # ── individual cards ──
 
-    def _hero_card(self, data) -> _Card:
-        """The full-width net-worth hero (ADR-119) — big number, accent left
-        edge (via the homeHeroCard object name), with a short summary line."""
+    def _hero_card(self, data, trend=None) -> _Card:
+        """The full-width net-worth hero (ADR-119) — big number + accent left
+        edge (via the homeHeroCard object name). When a 12-month trend is
+        available (ADR-150) it fills the right of the card as a sparkline, and a
+        change indicator gives the number direction; otherwise it degrades to
+        the number-only card and the trend arrives on the next refresh."""
         card = _Card("NET WORTH", action="Net worth →")
         card.setObjectName("homeHeroCard")
+
+        # Two columns: the figures on the left, the trend on the right.
+        row = QWidget()
+        row_l = QHBoxLayout(row)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        row_l.setSpacing(24)
+
+        figures = QWidget()
+        fig_l = QVBoxLayout(figures)
+        fig_l.setContentsMargins(0, 0, 0, 0)
+        fig_l.setSpacing(4)
+
         big = QLabel(_fmt(data.net_worth, data.display_ccy, decimals=0))
-        tokens.themed(big, "font-size: 40px; font-weight: 700; color: {text};")
-        card.body().addWidget(big)
+        tokens.themed(big, "font-size: 44px; font-weight: 700; color: {text};")
+        # A touch of negative tracking sets the money apart from body text — a
+        # small nod to the "give numerals a voice" direction (Qt QSS has no
+        # letter-spacing, so it's set on the font).
+        big_font = big.font()
+        big_font.setLetterSpacing(QFont.PercentageSpacing, 97)
+        big.setFont(big_font)
+        fig_l.addWidget(big)
+
+        # Change indicator (this month), coloured by direction.
+        if trend is not None and trend.change_month is not None:
+            fig_l.addWidget(self._delta_line(trend, data.display_ccy))
+
         n_accts = sum(len(g.accounts) for g in data.account_groups)
         if n_accts:
-            sub = QLabel(
-                f"across {n_accts} account{'s' if n_accts != 1 else ''}"
-            )
+            parts = [f"across {n_accts} account{'s' if n_accts != 1 else ''}"]
+            if trend is not None and trend.change_year is not None:
+                parts.append(
+                    f"{_fmt(trend.change_year, data.display_ccy, decimals=0, signed=True)}"
+                    " over 12 months"
+                )
+            sub = QLabel(" · ".join(parts))
             tokens.themed(sub, "color: {muted}; font-size: 12px;")
-            card.body().addWidget(sub)
+            fig_l.addWidget(sub)
         if data.net_worth_excluded:
             note = QLabel(
                 f"{data.net_worth_excluded} account"
@@ -293,10 +377,76 @@ class HomeView(QWidget):
                 f"(no exchange rate)"
             )
             tokens.themed(note, "color: {warning}; font-size: 11px;")
-            card.body().addWidget(note)
+            fig_l.addWidget(note)
+        fig_l.addStretch(1)
+
+        row_l.addWidget(figures, 0)
+
+        if trend is not None and len(trend.points) >= 2:
+            spark = NetWorthSparkline()
+            spark.render(trend.points)
+            spark.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            row_l.addWidget(spark, 1)
+        else:
+            row_l.addStretch(1)
+
+        card.body().addWidget(row)
         card.make_clickable()
         card.clicked.connect(self.net_worth_requested)
         return card
+
+    def _delta_line(self, trend, ccy: str) -> QLabel:
+        """A coloured 'this month' change line under the net-worth figure. A
+        sub-unit drift reads as flat (muted, no arrow) rather than '▲ £0'."""
+        change = trend.change_month
+        if abs(change) < Decimal("0.5"):
+            lbl = QLabel("No change this month")
+            tokens.themed(lbl, "color: {muted}; font-size: 13px; font-weight: 600;")
+            return lbl
+        up = change > 0
+        arrow = "▲" if up else "▼"
+        token = "positive_strong" if up else "negative"
+        amount = _fmt(abs(change), ccy, decimals=0)
+        pct = ""
+        if trend.change_month_pct is not None:
+            pct = f" ({'+' if up else '−'}{abs(trend.change_month_pct) * 100:.1f}%)"
+        lbl = QLabel(f"{arrow} {amount}{pct} this month")
+        tokens.themed(
+            lbl, "color: {%s}; font-size: 13px; font-weight: 600;" % token
+        )
+        return lbl
+
+    # ── net-worth trend (ADR-150) ──
+
+    def _trend_sig_for(self, data) -> str:
+        """A cheap signature identifying the data the trend was computed for. It
+        changes exactly when the trend would — net worth moves, an account is
+        added/removed, the display currency changes, or the day rolls over."""
+        n_accts = sum(len(g.accounts) for g in data.account_groups)
+        return f"{data.net_worth}|{n_accts}|{data.display_ccy}|{date.today().isoformat()}"
+
+    def _start_trend_compute(self, sig: str, display_ccy: str) -> None:
+        db_path = getattr(self._repo, "db_path", None)
+        if db_path is None:
+            return
+        self._nw_trend_pending = sig
+        QThreadPool.globalInstance().start(
+            _TrendRunnable(
+                str(db_path), display_ccy, date.today(), sig, self._trend_signals,
+            )
+        )
+
+    def _on_trend_ready(self, payload) -> None:
+        """Background trend landed (main thread, queued). Cache it and repaint
+        Home; refresh() will find it cached for the current signature and draw
+        the sparkline — or, if the data has since moved, miss and recompute."""
+        sig = payload.get("sig")
+        if self._nw_trend_pending == sig:
+            self._nw_trend_pending = None
+        self._nw_trend = payload.get("trend")
+        self._nw_trend_sig = sig
+        if self._repo.is_open():
+            self.refresh()
 
     def _budget_card(self, data) -> Optional[_Card]:
         b = data.budget

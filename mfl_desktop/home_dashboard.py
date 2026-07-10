@@ -21,11 +21,20 @@ from typing import Optional
 
 from mfl_desktop import budget_calc as bc
 from mfl_desktop.holdings import compute_holdings_view
+from mfl_desktop.net_worth_history import gather_net_worth_history, month_end_samples
 from mfl_desktop.reports.payee_report import build_report
 
 logger = logging.getLogger(__name__)
 
 _ZERO = Decimal("0.00")
+
+# Family → asset/debt for the net-worth trend, single-sourced with the Net Worth
+# screen's `_FAMILY_VIEW` (ADR-121). Kept here (not imported from the UI) so this
+# module stays Qt-free.
+_NW_FAMILY_KINDS = {
+    "cash": "asset", "investment": "asset", "property": "asset",
+    "vehicle": "asset", "credit": "debt", "loan": "debt",
+}
 
 _FAMILY_LABELS = {
     "cash": "Cash",
@@ -122,6 +131,19 @@ class HomeData:
     invest_losses: list[HoldingPerf] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class NetWorthTrend:
+    """The Home hero's 12-month net-worth trend (ADR-150). Computed off the fast
+    path (in a background thread) because the underlying replay is ~400ms on a
+    large file — see ``compute_net_worth_trend``. ``points`` are ``(iso_date,
+    net)`` ascending in ``display_ccy``; deltas are ``None`` when undefined."""
+    points: list[tuple[str, Decimal]]
+    display_ccy: str
+    change_month: Optional[Decimal]        # net now − net at the prior month-end
+    change_month_pct: Optional[float]      # change_month / |prior month-end net|
+    change_year: Optional[Decimal]         # net now − net 12 months ago
+
+
 def _display_currency(repo) -> str:
     """The dashboard's display currency: the base-currency setting, else a
     GBP/first-account fallback (mirrors ADR-055's intent loosely)."""
@@ -179,6 +201,41 @@ def gather_home_data(repo, today: date, *, recent_n: int = 8, top_n: int = 5) ->
         top_categories=top_categories,
         invest_gains=gains,
         invest_losses=losses,
+    )
+
+
+def compute_net_worth_trend(
+    repo, today: date, display_ccy: Optional[str] = None, *, months: int = 12,
+) -> Optional[NetWorthTrend]:
+    """The last-``months`` net-worth trend for the Home hero (ADR-150).
+
+    Qt-free, and deliberately kept **out** of ``gather_home_data``: the
+    underlying ``gather_net_worth_history`` replay is ~400ms on a large file, so
+    the view runs this in a background thread and folds the result into the hero
+    when it lands. Returns ``None`` when there isn't enough history (< 2 samples)
+    to draw a line — the hero then stays the ADR-119 number-only card."""
+    ccy = display_ccy or _display_currency(repo)
+    # 12 month-ends back, anchored to the first of that month, through today.
+    start = today.replace(year=today.year - 1, day=1)
+    samples = month_end_samples(start, today)
+    hist = gather_net_worth_history(
+        repo, sample_dates=samples, display_ccy=ccy,
+        family_kinds=_NW_FAMILY_KINDS,
+    )
+    pts = [(p.date, p.net) for p in hist.points]
+    if len(pts) < 2:
+        return None
+    net_now = pts[-1][1]
+    net_prev = pts[-2][1]              # most recent full month-end before today
+    net_first = pts[0][1]
+    change_month = net_now - net_prev
+    change_pct = (
+        float(change_month / abs(net_prev)) if net_prev != 0 else None
+    )
+    return NetWorthTrend(
+        points=pts, display_ccy=ccy,
+        change_month=change_month, change_month_pct=change_pct,
+        change_year=net_now - net_first,
     )
 
 
