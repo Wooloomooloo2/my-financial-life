@@ -48,6 +48,15 @@ Reproduced deterministically offscreen: a real `_Card` in a `QScrollArea`, a cli
 
 This is why it took until now to surface. It needs a click on one of the two Home cards whose slot is modal (Bills/Schedules), while Home is the visible page — the report cards open non-modal singleton windows and never re-enter activation inside the click.
 
+It needs one more thing besides: the `ActivationChange` must be delivered *synchronously, inside the modal's nested loop*, while the click is still on the stack. Delivered after the click unwinds, `refresh()` frees a card nobody points at any more and nothing happens. The owner reports the app was **full-screen** when it crashed, and the report shows a Cocoa window animation live on another thread at the instant of the fault:
+
+```
+Thread 4:: Dispatch queue: com.apple.root.user-interactive-qos
+8   AppKit   -[NSAnimation _runBlocking] + 412
+```
+
+macOS full-screen is built on space transitions and `NSAnimation`, and the app contains no full-screen-specific code at all (no `WindowStateChange` handler, one `changeEvent` in the codebase), so full-screen cannot have changed *what* ran — only *when* Cocoa posted the activation. That is exactly the variable this crash turns on. Unproven: reproducing it needs a real display and a real space transition, which the offscreen platform plugin cannot model. Recorded because it is the likeliest reason a latent bug waited this long, and because the fix below is deliberately independent of that timing.
+
 ## Decision
 
 **`HomeView.refresh()` must not destroy the old container synchronously.** Take it out of the scroll area first, then let the event loop delete it once Qt has finished with the events in flight:
