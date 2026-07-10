@@ -22,9 +22,10 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +72,22 @@ def header_signature_from_content(content: str) -> str:
 
 def parse_with_mapping(content: str, mapping: CsvColumnMapping) -> list[dict]:
     """Parse CSV content using an explicit column mapping."""
-    reader = csv.DictReader(io.StringIO(content))
+    rows = list(csv.DictReader(io.StringIO(content)))
+    parse_date = make_generic_date_parser(
+        (r.get(mapping.date_col, "") for r in rows),
+    )
     transactions: list[dict] = []
 
-    for row in reader:
+    for row in rows:
         date_raw = row.get(mapping.date_col, "").strip()
         if mapping.date_format == "auto":
-            date_iso = _parse_generic_date(date_raw)
+            date_iso = parse_date(date_raw)
         else:
             try:
                 from datetime import datetime
                 date_iso = datetime.strptime(date_raw, mapping.date_format).strftime("%Y-%m-%d")
             except ValueError:
-                date_iso = _parse_generic_date(date_raw)
+                date_iso = parse_date(date_raw)
         if not date_iso:
             continue
 
@@ -507,9 +511,12 @@ def _parse_generic(content: str) -> list[dict]:
             f"Available columns: {', '.join(reader.fieldnames)}"
         )
 
+    rows = list(reader)
+    parse_date = make_generic_date_parser((r.get(date_col, "") for r in rows))
+
     transactions: list[dict] = []
-    for row in reader:
-        date_iso = _parse_generic_date(row.get(date_col, "").strip())
+    for row in rows:
+        date_iso = parse_date(row.get(date_col, "").strip())
         if not date_iso:
             continue
 
@@ -556,24 +563,78 @@ def _find_col(headers: dict[str, str], aliases: tuple) -> Optional[str]:
     return None
 
 
-def _parse_generic_date(date_str: str) -> str:
+def infer_day_first(samples: Iterable[str]) -> Optional[bool]:
+    """Decide whether a whole date column is day-first or month-first.
+
+    A single ``05/12/2021`` is undecidable, so a per-row format guess is a
+    coin flip that silently corrupts half a US export (ADR-148). Read the
+    column instead: a value whose *first* field exceeds 12 can only be
+    day-first; one whose *second* field exceeds 12 can only be month-first.
+
+    Returns True (day-first), False (month-first), or None when the column
+    never disambiguates — every row could be read either way — or when it
+    contradicts itself. The caller picks the fallback.
+    """
+    day_first_evidence = month_first_evidence = False
+    for raw in samples:
+        value = (raw or "").strip().strip('"')
+        parts = re.split(r"[/-]", value)
+        if len(parts) != 3:
+            continue
+        first, second, _ = parts
+        if len(first) == 4:
+            continue                      # ISO %Y-%m-%d — carries no vote
+        if not (first.isdigit() and second.isdigit()):
+            continue
+        if int(first) > 12:
+            day_first_evidence = True
+        elif int(second) > 12:
+            month_first_evidence = True
+    if day_first_evidence == month_first_evidence:
+        return None                       # no evidence, or self-contradictory
+    return day_first_evidence
+
+
+def _parse_generic_date(date_str: str, *, day_first: bool = True) -> str:
+    """Parse one date cell. ``day_first`` orders the two ambiguous slash
+    patterns; prefer ``make_generic_date_parser`` so the whole column decides
+    it rather than each row racing to the first format that happens to fit."""
     from datetime import datetime
     date_str = date_str.strip().strip('"')
-    formats = [
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%d-%m-%Y",
-        "%d/%m/%y",
-        "%m/%d/%y",
-        "%Y%m%d",
-    ]
+    ambiguous = (
+        ["%d/%m/%Y", "%m/%d/%Y"] if day_first else ["%m/%d/%Y", "%d/%m/%Y"]
+    )
+    short = ["%d/%m/%y", "%m/%d/%y"] if day_first else ["%m/%d/%y", "%d/%m/%y"]
+    formats = ["%Y-%m-%d", *ambiguous, "%d-%m-%Y", *short, "%Y%m%d"]
     for fmt in formats:
         try:
             return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
     return ""
+
+
+def make_generic_date_parser(samples: Iterable[str]) -> Callable[[str], str]:
+    """Build a date parser bound to one column's day/month order (ADR-148).
+
+    Falls back to day-first when the column is undecidable, matching the
+    historic behaviour, and says so in the log — an all-ambiguous column is
+    the one case where the file genuinely cannot tell us.
+    """
+    day_first = infer_day_first(samples)
+    if day_first is None:
+        logger.warning(
+            "CSV date column never disambiguates day from month "
+            "(no value with a field > 12); assuming day-first. Pick an "
+            "explicit date format in the mapping dialog if that is wrong."
+        )
+        day_first = True
+    else:
+        logger.info(
+            f"CSV date column inferred as "
+            f"{'day-first (DD/MM)' if day_first else 'month-first (MM/DD)'}"
+        )
+    return lambda s: _parse_generic_date(s, day_first=day_first)
 
 
 # ── Encoding helper ─────────────────────────────────────────────────────────

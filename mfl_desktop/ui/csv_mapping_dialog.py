@@ -29,7 +29,7 @@ from __future__ import annotations
 import csv
 import io
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -62,15 +62,15 @@ from mfl_desktop.import_engine.csv_parser import (
     _PAYEE_ALIASES,
     _decode,
     _parse_amount_str,
-    _parse_generic_date,
+    make_generic_date_parser,
 )
 from mfl_desktop.import_engine.import_service import PendingCsvMap
 
-# Date format options offered in the date-format combo. "auto" runs
-# _parse_generic_date which tries the most common patterns in order; the
-# remaining entries are explicit strptime patterns the user can pick when
-# auto guesses wrong (most commonly ambiguous DMY vs MDY). The combo is
-# editable, so a user can type a custom strptime pattern too.
+# Date format options offered in the date-format combo. "auto" infers the
+# column's day/month order from the file (ADR-148); the remaining entries are
+# explicit strptime patterns the user can pick when the column is entirely
+# ambiguous and auto's day-first fallback is wrong. The combo is editable, so
+# a user can type a custom strptime pattern too.
 _DATE_FORMAT_PRESETS = (
     "auto",
     "%Y-%m-%d",
@@ -439,16 +439,16 @@ class CsvMappingDialog(QDialog):
             self._show_preview_message("Could not decode the file as text.")
             return
 
-        reader = csv.DictReader(io.StringIO(content))
-        first_rows: list[dict] = []
-        for i, row in enumerate(reader):
-            if i >= 5:
-                break
-            first_rows.append(row)
+        all_rows = list(csv.DictReader(io.StringIO(content)))
+        # Infer day/month order from the whole column, not the five rows on
+        # screen — otherwise the preview can disagree with the import (ADR-148).
+        parse_date = make_generic_date_parser(
+            (r.get(mapping.date_col, "") for r in all_rows),
+        )
 
-        for raw_row in first_rows:
+        for raw_row in all_rows[:5]:
             date_cell, payee_cell, amount_cell, direction_cell, category_cell = (
-                self._preview_cells(raw_row, mapping)
+                self._preview_cells(raw_row, mapping, parse_date)
             )
             self._append_preview_row(
                 table, date_cell, payee_cell, amount_cell,
@@ -481,16 +481,18 @@ class CsvMappingDialog(QDialog):
 
     def _preview_cells(
         self, raw_row: dict, mapping: CsvColumnMapping,
+        parse_date: Callable[[str], str],
     ) -> tuple[str, str, str, str, str]:
         """Compute one preview row's cells from a raw CSV row + current mapping.
 
         Mirrors the per-row logic in csv_parser.parse_with_mapping but surfaces
         failures as "(unparseable)" instead of silently dropping the row.
+        ``parse_date`` is the column-bound parser the import will use.
         """
         # Date
         date_raw = (raw_row.get(mapping.date_col, "") or "").strip()
         if mapping.date_format == "auto":
-            date_iso = _parse_generic_date(date_raw)
+            date_iso = parse_date(date_raw)
         else:
             from datetime import datetime
             try:
@@ -498,7 +500,7 @@ class CsvMappingDialog(QDialog):
                     date_raw, mapping.date_format,
                 ).strftime("%Y-%m-%d")
             except ValueError:
-                date_iso = _parse_generic_date(date_raw)
+                date_iso = parse_date(date_raw)
         date_cell = date_iso if date_iso else "(unparseable)"
 
         # Amount + direction
