@@ -88,7 +88,9 @@ class _Card(QFrame):
     def mousePressEvent(self, e) -> None:  # noqa: N802 (Qt override)
         # Run base handling first, then emit — the clicked slot can navigate /
         # refresh Home and destroy this very card, so we must not touch ``self``
-        # (e.g. super().mousePressEvent) afterwards (use-after-free crash).
+        # afterwards. Note this ordering is necessary but *not* sufficient: Qt
+        # itself keeps using the receiver after this returns, so refresh() must
+        # also defer the card's destruction (see HomeView.refresh, ADR-149).
         super().mousePressEvent(e)
         if self._clickable:
             self.clicked.emit()
@@ -121,7 +123,9 @@ class _Row(QFrame):
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
         # super() before emit: the clicked slot may delete this row (Home
-        # rebuild on navigation), so never touch self after emitting.
+        # rebuild on navigation), so never touch self after emitting. Qt still
+        # touches the receiver after we return, so refresh() defers the actual
+        # destruction (ADR-149).
         super().mousePressEvent(e)
         if self._clickable:
             self.clicked.emit()
@@ -240,7 +244,18 @@ class HomeView(QWidget):
         grid_wrap.setLayout(grid)
         root.addWidget(grid_wrap)
 
+        # QScrollArea::setWidget *deletes* the widget it replaces, immediately.
+        # refresh() can run while one of this container's own cards is still on
+        # the stack mid-mouse-event — a card's clicked slot opens a modal dialog
+        # (Schedules), and closing it re-activates the window, whose
+        # ActivationChange handler refreshes Home. Destroying the card there
+        # leaves QApplication::notify dereferencing a freed receiver when the
+        # click unwinds (ADR-149). Take the old container out first and defer
+        # its destruction to the event loop, once Qt has finished with it.
+        old = self._scroll.takeWidget()
         self._scroll.setWidget(container)
+        if old is not None:
+            old.deleteLater()
         self._container = container
 
     def _build_cards(self, data) -> list:
