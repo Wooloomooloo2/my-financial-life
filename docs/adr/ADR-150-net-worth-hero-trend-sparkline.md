@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-11
 **Status:** Implemented (amended 2026-07-11 — see Amendment)
-**Related:** ADR-119 (net-worth hero + clickable cards). ADR-075 (Home dashboard, `gather_*` pattern). ADR-121 (net worth over time, computed-not-stored replay). ADR-135 (net-worth history sampling / bars). ADR-055 (convert-before-summing FX). ADR-026 (hand-rolled `paintEvent` charts). ADR-035 (background launch refresh via `QThreadPool`). ADR-149 (Home refresh defers widget destruction).
+**Related:** ADR-119 (net-worth hero + clickable cards). ADR-075 (Home dashboard, `gather_*` pattern). ADR-121 (net worth over time, computed-not-stored replay). ADR-135 (net-worth history sampling / bars). ADR-055 (convert-before-summing FX). ADR-046 (period-scoped investment total return). ADR-026 (hand-rolled `paintEvent` charts). ADR-035 (background launch refresh via `QThreadPool`). ADR-149 (Home refresh defers widget destruction).
 
 ## Context
 
@@ -46,6 +46,17 @@ Rejected:
 Owner feedback on the first cut: the summary said "this month" while the line spans 12 months — mismatched windows. And the "this-month" figure was really month-to-date (net now vs the last month-end), which drifts with the calendar (1 day's worth on the 1st, a month's worth on the 31st).
 
 The hero now summarises **two fixed rolling windows** that bracket the chart's span: **last 30 days** and **last 12 months**, each on its own line, coloured by direction. The 30-day figure is a true rolling delta — net now vs net exactly 30 days ago — sourced by riding a single extra "30 days ago" sample along in the same `gather_net_worth_history` replay (kept out of `points` so the chart stays a clean monthly cadence; no second replay). The 12-month change moves from a muted footnote to a first-class coloured line with its own percentage; the account count drops to the muted line on its own. `NetWorthTrend.change_month{,_pct}` became `change_30d{,_pct}`, and `change_year_pct` was added.
+
+### Investment Performance card matches the same windows
+
+Same feedback applied to the Investment Performance card, which showed **all-time unrealised** top gainers/losers — a different time basis from the hero. It now leads with the portfolio's **last-30-days** and **last-12-months** performance (the same two lines, reusing the hero's delta formatting), followed by the 12-month **top movers**.
+
+The metric is **true return, not value change**: a window's return excludes contributions, computed per investment account via the existing returns engine (ADR-046) as `terminal_value − opening_value + Σ(in-window cash flows)` — the identity its IRR bracketing already provides — summed across accounts and FX-converted per leg (ADR-055). Using the engine's own `total_return` would have been wrong here: it folds in *lifetime* unrealised appreciation, so the 30-day and 12-month figures would differ only by windowed realised/dividends and both read as "all-time-ish" — defeating the window comparison the owner asked for.
+
+Two consequences of the metric:
+
+- This is heavier than the old all-time snapshot (two windows × a per-account returns replay), so it moves **off the fast path** into the *same* background pass as the trend — one thread, one background `Repository`, both cards cached under one signature and painted together. The old synchronous `_investment_perf` (and its all-time `HomeData.invest_gains/losses`) is removed; `gather_home_data` no longer touches investments at all, so the fast path got a little cheaper too.
+- The per-security **percentage** is return-on-opening-value, which is unstable for a position built mostly *within* the window (a tiny opening base makes a real £2.6k→£45k holding read as "+1591 %"). Those percentages are suppressed (|return/opening| > 3.0 → show the money gain only); the money figure is always well-defined and is what the movers are ranked by.
 
 ## Consequences
 

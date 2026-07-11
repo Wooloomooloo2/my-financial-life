@@ -28,7 +28,11 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.db.repository import Repository
-from mfl_desktop.home_dashboard import compute_net_worth_trend, gather_home_data
+from mfl_desktop.home_dashboard import (
+    compute_investment_performance,
+    compute_net_worth_trend,
+    gather_home_data,
+)
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.net_worth_sparkline import NetWorthSparkline
 
@@ -170,17 +174,18 @@ class _AccordionHeader(QFrame):
         self.toggled.emit(self._expanded)
 
 
-class _TrendSignals(QObject):
-    """Carries a background-computed net-worth trend back to the main thread.
-    Lives on the HomeView (main thread), so the cross-thread emit is auto-queued
-    onto the UI event loop."""
-    done = Signal(object)   # payload: {"sig": str, "trend": NetWorthTrend | None}
+class _HomeBgSignals(QObject):
+    """Carries the background-computed Home cards back to the main thread. Lives
+    on the HomeView (main thread), so the cross-thread emit is auto-queued onto
+    the UI event loop."""
+    done = Signal(object)   # {"sig": str, "trend": ... | None, "invest": ... | None}
 
 
-class _TrendRunnable(QRunnable):
-    """Computes the hero's net-worth trend off the UI thread (ADR-150/035). Opens
-    its own Repository — a sqlite connection can't be shared across threads — and
-    is silent on failure (the hero simply stays number-only)."""
+class _HomeBgRunnable(QRunnable):
+    """Computes the Home cards too heavy for the fast path — the net-worth trend
+    and investment performance (ADR-150) — off the UI thread in one pass, sharing
+    one background Repository connection (a sqlite connection can't cross
+    threads). Each card's failure is isolated so one never sinks the other."""
 
     def __init__(self, db_path, display_ccy, today, sig, signals) -> None:
         super().__init__()
@@ -191,16 +196,26 @@ class _TrendRunnable(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
-        trend = None
+        trend = invest = None
         try:
             bg = Repository(self._db_path)
+        except Exception:
+            self._signals.done.emit({"sig": self._sig, "trend": None, "invest": None})
+            return
+        try:
             try:
                 trend = compute_net_worth_trend(bg, self._today, self._ccy)
-            finally:
-                bg.close()
-        except Exception:
-            trend = None
-        self._signals.done.emit({"sig": self._sig, "trend": trend})
+            except Exception:
+                trend = None
+            try:
+                invest = compute_investment_performance(bg, self._today, self._ccy)
+            except Exception:
+                invest = None
+        finally:
+            bg.close()
+        self._signals.done.emit(
+            {"sig": self._sig, "trend": trend, "invest": invest}
+        )
 
 
 class HomeView(QWidget):
@@ -223,14 +238,16 @@ class HomeView(QWidget):
         outer.addWidget(self._scroll)
         self._container: Optional[QWidget] = None
 
-        # Net-worth hero trend (ADR-150). Computed off-thread and cached against a
-        # cheap data signature so the hero paints the sparkline synchronously
-        # while the data is unchanged, and only recomputes when it moves.
-        self._nw_trend = None            # NetWorthTrend | None (for _nw_trend_sig)
-        self._nw_trend_sig: Optional[str] = None
-        self._nw_trend_pending: Optional[str] = None
-        self._trend_signals = _TrendSignals()
-        self._trend_signals.done.connect(self._on_trend_ready)
+        # Heavy Home cards (net-worth trend + investment performance, ADR-150)
+        # computed off-thread and cached against a cheap data signature, so they
+        # paint synchronously while the data is unchanged and only recompute when
+        # it moves. Both come back together from one background pass.
+        self._nw_trend = None            # NetWorthTrend | None
+        self._invest_perf = None         # InvestmentPerf | None
+        self._bg_sig: Optional[str] = None
+        self._bg_pending: Optional[str] = None
+        self._bg_signals = _HomeBgSignals()
+        self._bg_signals.done.connect(self._on_bg_ready)
 
     def set_repo(self, repo) -> None:
         """Point the dashboard at a different file (File ▸ Open swaps the live
@@ -257,12 +274,13 @@ class HomeView(QWidget):
         # ADR-150: its 12-month trend is computed off-thread; use the cached
         # series if it matches the current data, else render number-only now and
         # kick off a background compute that folds the sparkline in when ready.
-        sig = self._trend_sig_for(data)
-        have_for_sig = self._nw_trend_sig == sig     # computed (result may be None)
+        sig = self._bg_sig_for(data)
+        have_for_sig = self._bg_sig == sig           # computed (results may be None)
         trend = self._nw_trend if have_for_sig else None
+        invest = self._invest_perf if have_for_sig else None
         root.addWidget(self._hero_card(data, trend))
-        if not have_for_sig and self._nw_trend_pending != sig:
-            self._start_trend_compute(sig, data.display_ccy)
+        if not have_for_sig and self._bg_pending != sig:
+            self._start_bg_compute(sig, data.display_ccy)
 
         # Two independently-packed columns (greedy-balanced by an approximate
         # per-card height weight) so a tall card never leaves the other column
@@ -272,7 +290,7 @@ class HomeView(QWidget):
         left.setSpacing(16)
         right.setSpacing(16)
         left_w = right_w = 0
-        for card in self._build_cards(data):
+        for card in self._build_cards(data, invest):
             if card is None:
                 continue
             weight = getattr(card, "_weight", 4)
@@ -312,7 +330,7 @@ class HomeView(QWidget):
             old.deleteLater()
         self._container = container
 
-    def _build_cards(self, data) -> list:
+    def _build_cards(self, data, invest=None) -> list:
         return [
             self._budget_card(data),
             self._accounts_card(data),
@@ -320,7 +338,7 @@ class HomeView(QWidget):
             self._recent_card(data),
             self._top_payees_card(data),
             self._top_categories_card(data),
-            self._investments_card(data),
+            self._investments_card(data, invest),
         ]
 
     # ── individual cards ──
@@ -419,35 +437,37 @@ class HomeView(QWidget):
         )
         return lbl
 
-    # ── net-worth trend (ADR-150) ──
+    # ── heavy off-thread cards (ADR-150) ──
 
-    def _trend_sig_for(self, data) -> str:
-        """A cheap signature identifying the data the trend was computed for. It
-        changes exactly when the trend would — net worth moves, an account is
-        added/removed, the display currency changes, or the day rolls over."""
+    def _bg_sig_for(self, data) -> str:
+        """A cheap signature identifying the data the off-thread cards were
+        computed for. It changes exactly when they would — net worth moves (which
+        also captures a price change, since it feeds investment value), an account
+        is added/removed, the display currency changes, or the day rolls over."""
         n_accts = sum(len(g.accounts) for g in data.account_groups)
         return f"{data.net_worth}|{n_accts}|{data.display_ccy}|{date.today().isoformat()}"
 
-    def _start_trend_compute(self, sig: str, display_ccy: str) -> None:
+    def _start_bg_compute(self, sig: str, display_ccy: str) -> None:
         db_path = getattr(self._repo, "db_path", None)
         if db_path is None:
             return
-        self._nw_trend_pending = sig
+        self._bg_pending = sig
         QThreadPool.globalInstance().start(
-            _TrendRunnable(
-                str(db_path), display_ccy, date.today(), sig, self._trend_signals,
+            _HomeBgRunnable(
+                str(db_path), display_ccy, date.today(), sig, self._bg_signals,
             )
         )
 
-    def _on_trend_ready(self, payload) -> None:
-        """Background trend landed (main thread, queued). Cache it and repaint
-        Home; refresh() will find it cached for the current signature and draw
-        the sparkline — or, if the data has since moved, miss and recompute."""
+    def _on_bg_ready(self, payload) -> None:
+        """Background cards landed (main thread, queued). Cache them and repaint
+        Home; refresh() will find them cached for the current signature and draw
+        them — or, if the data has since moved, miss and recompute."""
         sig = payload.get("sig")
-        if self._nw_trend_pending == sig:
-            self._nw_trend_pending = None
+        if self._bg_pending == sig:
+            self._bg_pending = None
         self._nw_trend = payload.get("trend")
-        self._nw_trend_sig = sig
+        self._invest_perf = payload.get("invest")
+        self._bg_sig = sig
         if self._repo.is_open():
             self.refresh()
 
@@ -605,19 +625,31 @@ class HomeView(QWidget):
         card.clicked.connect(self.spending_report_requested)
         return card
 
-    def _investments_card(self, data) -> Optional[_Card]:
-        if not data.invest_gains and not data.invest_losses:
+    def _investments_card(self, data, invest=None) -> Optional[_Card]:
+        # Period-scoped performance (ADR-150) arrives from the background pass;
+        # until it lands (or when there are no investments) the card is absent.
+        if invest is None:
             return None
-        card = _Card("INVESTMENT PERFORMANCE · UNREALISED")
-        card._weight = len(data.invest_gains) + len(data.invest_losses) + 2
-        if data.invest_gains:
-            card.body().addWidget(_section_label("Top gains"))
-            for h in data.invest_gains:
-                card.body().addWidget(_perf_row(h, data.display_ccy, "positive"))
-        if data.invest_losses:
-            card.body().addWidget(_section_label("Top losses"))
-            for h in data.invest_losses:
-                card.body().addWidget(_perf_row(h, data.display_ccy, "negative"))
+        ccy = data.display_ccy
+        card = _Card("INVESTMENT PERFORMANCE")
+        card._weight = 3 + len(invest.gainers) + len(invest.losers)
+
+        # Two portfolio windows, matching the net-worth hero.
+        for change, pct, period in (
+            (invest.return_30d, invest.pct_30d, "last 30 days"),
+            (invest.return_12m, invest.pct_12m, "last 12 months"),
+        ):
+            lbl = self._delta_label(change, pct, period, ccy)
+            if lbl is not None:
+                card.body().addWidget(lbl)
+
+        # True-return top movers over the 12-month window.
+        if invest.gainers or invest.losers:
+            card.body().addWidget(_section_label("Top movers · 12 months"))
+            for h in invest.gainers:
+                card.body().addWidget(_perf_row(h, ccy, "positive"))
+            for h in invest.losers:
+                card.body().addWidget(_perf_row(h, ccy, "negative"))
         return card
 
 

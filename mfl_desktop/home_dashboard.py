@@ -3,11 +3,15 @@
 Qt-free. ``gather_home_data`` builds every card's data by calling the existing
 shipped compute helpers (net worth via ``compute_account_values`` +
 ``convert_amount`` per ADR-055, budget via ``compute_matrix``, spending via the
-FX-converting payee/category aggregates, holdings via ``compute_holdings_view``,
-bills via ``list_scheduled_txns``, recent via ``list_recent_transactions``), so
-the dashboard can never disagree with the dedicated screens. Each card is
-assembled independently and degrades to empty on any error, so one bad card
-never blanks the screen.
+FX-converting payee/category aggregates, bills via ``list_scheduled_txns``,
+recent via ``list_recent_transactions``), so the dashboard can never disagree
+with the dedicated screens. Each card is assembled independently and degrades to
+empty on any error, so one bad card never blanks the screen.
+
+Two cards are too heavy for that synchronous fast path — the net-worth trend and
+investment performance both replay transaction history (ADR-150). They live in
+``compute_net_worth_trend`` / ``compute_investment_performance`` and are run off
+the UI thread by the view, not carried on ``HomeData``.
 
 The view (``ui/home_view.py``) renders the returned ``HomeData`` into cards.
 """
@@ -20,7 +24,7 @@ from decimal import Decimal
 from typing import Optional
 
 from mfl_desktop import budget_calc as bc
-from mfl_desktop.holdings import compute_holdings_view
+from mfl_desktop.holdings import compute_returns
 from mfl_desktop.net_worth_history import gather_net_worth_history, month_end_samples
 from mfl_desktop.reports.payee_report import build_report
 
@@ -108,10 +112,13 @@ class SpendRow:
 
 @dataclass(frozen=True)
 class HoldingPerf:
+    """A per-security performance row. ``gain`` is a windowed true return in the
+    display currency (ADR-150 amendment); ``pct`` is that return over the
+    position's value at the window start."""
     security_id: int
     name: str
     symbol: str
-    gain: Decimal              # unrealized, display = security's account currency
+    gain: Decimal
     pct: Optional[float]
 
 
@@ -127,8 +134,9 @@ class HomeData:
     recent: list[RecentTxn] = field(default_factory=list)
     top_payees: list[SpendRow] = field(default_factory=list)
     top_categories: list[SpendRow] = field(default_factory=list)
-    invest_gains: list[HoldingPerf] = field(default_factory=list)
-    invest_losses: list[HoldingPerf] = field(default_factory=list)
+    # Investment performance is period-scoped and heavy, so it is computed off
+    # the fast path in a background thread — see ``compute_investment_performance``
+    # (ADR-150 amendment), not carried on HomeData.
 
 
 @dataclass(frozen=True)
@@ -145,6 +153,21 @@ class NetWorthTrend:
     change_30d_pct: Optional[float]        # change_30d / |net 30 days ago|
     change_year: Optional[Decimal]         # net now − net 12 months ago
     change_year_pct: Optional[float]       # change_year / |net 12 months ago|
+
+
+@dataclass(frozen=True)
+class InvestmentPerf:
+    """Home's investment-performance card (ADR-150 amendment). Two portfolio
+    windows matching the net-worth hero — last 30 days and last 12 months — as
+    *true return* (excludes contributions), plus the 12-month top movers.
+    Computed off the fast path in the same background thread as the trend."""
+    display_ccy: str
+    return_30d: Optional[Decimal]
+    pct_30d: Optional[float]
+    return_12m: Optional[Decimal]
+    pct_12m: Optional[float]
+    gainers: list[HoldingPerf] = field(default_factory=list)   # 12-month, best first
+    losers: list[HoldingPerf] = field(default_factory=list)    # 12-month, worst first
 
 
 def _display_currency(repo) -> str:
@@ -187,9 +210,6 @@ def gather_home_data(repo, today: date, *, recent_n: int = 8, top_n: int = 5) ->
     top_categories = _safe(
         _top_categories, repo, month_start, today_iso, display_ccy, top_n, default=[]
     )
-    gains, losses = _safe(
-        _investment_perf, repo, display_ccy, today_iso, top_n, default=([], []),
-    )
 
     return HomeData(
         display_ccy=display_ccy,
@@ -202,8 +222,6 @@ def gather_home_data(repo, today: date, *, recent_n: int = 8, top_n: int = 5) ->
         recent=recent,
         top_payees=top_payees,
         top_categories=top_categories,
-        invest_gains=gains,
-        invest_losses=losses,
     )
 
 
@@ -253,6 +271,119 @@ def compute_net_worth_trend(
         points=points, display_ccy=ccy,
         change_30d=change_30d, change_30d_pct=change_30d_pct,
         change_year=change_year, change_year_pct=change_year_pct,
+    )
+
+
+def compute_investment_performance(
+    repo, today: date, display_ccy: Optional[str] = None, *, top_n: int = 3,
+) -> Optional["InvestmentPerf"]:
+    """Investment performance over the hero's two windows — last 30 days and
+    last 12 months — as *true return* (ADR-150 amendment), plus the 12-month top
+    movers. Qt-free and kept OFF the fast path: it runs ``compute_returns``
+    (ADR-046) per investment account per window, so the view computes it in the
+    same background thread as the net-worth trend.
+
+    A window's true return excludes contributions: for each account it is
+    ``terminal_value − opening_value + Σ(in-window cash flows)`` — the identity
+    the returns engine's IRR bracketing is built on — summed across accounts and
+    FX-converted into ``display_ccy`` (each leg at its own date, ADR-055).
+    Returns ``None`` when there are no priced investment positions."""
+    ccy = display_ccy or _display_currency(repo)
+    investment = [a for a in repo.list_accounts() if a.family == "investment"]
+    if not investment:
+        return None
+    multipliers = repo.security_multipliers()
+    today_iso = today.isoformat()
+
+    def conv(amount: Decimal, from_ccy: str, on_date: str) -> Decimal:
+        if amount is None:
+            return _ZERO
+        if from_ccy == ccy:
+            return amount
+        c, _fb = repo.convert_amount(
+            amount, from_ccy=from_ccy, to_ccy=ccy, on_date=on_date,
+        )
+        return c if c is not None else _ZERO   # unconvertible → excluded
+
+    # Each account's history is gathered once and replayed per window.
+    acct_data = []
+    for acct in investment:
+        txns = repo.list_transactions_for_account(acct.id)
+        sec_ids = {t.security_id for t in txns if t.security_id is not None}
+        if not sec_ids:
+            continue
+        pser = {
+            sid: [(p.price_date, p.price) for p in repo.price_series(sid)]
+            for sid in sec_ids
+        }
+        acct_data.append((acct, txns, sec_ids, pser))
+    if not acct_data:
+        return None
+
+    def window(start: date):
+        ws = start.isoformat()
+        samples = month_end_samples(start, today)
+        tot_return = _ZERO
+        tot_open = _ZERO
+        by_sec: dict[int, dict] = {}
+
+        def _flows(cash_flows, from_ccy) -> Decimal:
+            return sum((conv(a, from_ccy, d) for d, a in cash_flows), _ZERO)
+
+        for acct, txns, sec_ids, pser in acct_data:
+            res = compute_returns(txns, samples, pser, ws, sec_ids, multipliers)
+            open_mv = conv(res.opening_market_value, acct.currency, ws)
+            term_mv = conv(res.terminal_market_value, acct.currency, today_iso)
+            tot_return += term_mv - open_mv + _flows(res.cash_flows, acct.currency)
+            tot_open += open_mv
+            for s in res.by_security:
+                s_open = conv(s.opening_market_value, acct.currency, ws)
+                s_term = conv(s.terminal_market_value, acct.currency, today_iso)
+                slot = by_sec.setdefault(
+                    s.security_id,
+                    {"name": s.name, "symbol": s.symbol,
+                     "return": _ZERO, "open": _ZERO},
+                )
+                slot["return"] += s_term - s_open + _flows(s.cash_flows, acct.currency)
+                slot["open"] += s_open
+        pct = float(tot_return / tot_open) if tot_open > 0 else None
+        return tot_return, pct, by_sec
+
+    try:
+        d12 = today.replace(year=today.year - 1)
+    except ValueError:                       # today is 29 Feb
+        d12 = today.replace(year=today.year - 1, day=28)
+
+    ret30, pct30, _ = window(today - timedelta(days=30))
+    ret12, pct12, by_sec12 = window(d12)
+
+    def _mover_pct(ret: Decimal, opening: Decimal) -> Optional[float]:
+        """Return-on-opening-value, or ``None`` when that base is degenerate. A
+        position built mostly *within* the window has a tiny opening value, so
+        return/opening explodes (a real £2.6k→£45k holding reads as +1591 %); we
+        show its money gain without a misleading percentage."""
+        if opening <= 0:
+            return None
+        p = float(ret / opening)
+        return p if abs(p) <= 3.0 else None
+
+    movers = [
+        HoldingPerf(
+            security_id=sid, name=v["name"], symbol=v["symbol"], gain=v["return"],
+            pct=_mover_pct(v["return"], v["open"]),
+        )
+        for sid, v in by_sec12.items()
+    ]
+    gainers = sorted(
+        [m for m in movers if m.gain > 0], key=lambda m: m.gain, reverse=True,
+    )[:top_n]
+    losers = sorted([m for m in movers if m.gain < 0], key=lambda m: m.gain)[:2]
+
+    if not gainers and not losers and ret30 == 0 and ret12 == 0:
+        return None
+    return InvestmentPerf(
+        display_ccy=ccy, return_30d=ret30, pct_30d=pct30,
+        return_12m=ret12, pct_12m=pct12, gainers=gainers, losers=losers,
     )
 
 
@@ -424,51 +555,3 @@ def _top_categories(repo, date_from, date_to, display_ccy, top_n):
         )
         for cid, pence in ranked
     ]
-
-
-def _investment_perf(repo, display_ccy, today_iso, top_n):
-    investment = [a for a in repo.list_accounts() if a.family == "investment"]
-    if not investment:
-        return [], []
-    price_map = {
-        sid: (p.price, p.price_date) for sid, p in repo.latest_prices().items()
-    }
-    multipliers = repo.security_multipliers()   # ADR-093: bond/option scaling
-    # Aggregate unrealized gain per security across all investment accounts,
-    # converting each holding to the display currency first (ADR-055 — a USD
-    # holding's gain must not be par-added into a GBP total or mislabelled).
-    agg: dict[int, dict] = {}
-    for acct in investment:
-        txns = repo.list_transactions_for_account(acct.id)
-        view = compute_holdings_view(txns, acct.opening_balance, price_map, multipliers)
-        for h in view.holdings:
-            if not h.priced or h.unrealized_gain is None:
-                continue
-            gain, _ = repo.convert_amount(
-                h.unrealized_gain, from_ccy=acct.currency,
-                to_ccy=display_ccy, on_date=today_iso,
-            )
-            if gain is None:
-                continue                         # no FX rate — exclude
-            cost, _ = repo.convert_amount(
-                h.cost_basis, from_ccy=acct.currency,
-                to_ccy=display_ccy, on_date=today_iso,
-            )
-            slot = agg.setdefault(
-                h.security_id,
-                {"name": h.name, "symbol": h.symbol,
-                 "gain": _ZERO, "cost": _ZERO},
-            )
-            slot["gain"] += gain
-            slot["cost"] += (cost or _ZERO)
-
-    perfs = [
-        HoldingPerf(
-            security_id=sid, name=v["name"], symbol=v["symbol"], gain=v["gain"],
-            pct=(float(v["gain"] / v["cost"]) if v["cost"] else None),
-        )
-        for sid, v in agg.items()
-    ]
-    gains = sorted([p for p in perfs if p.gain > 0], key=lambda p: p.gain, reverse=True)
-    losses = sorted([p for p in perfs if p.gain < 0], key=lambda p: p.gain)
-    return gains[:top_n], losses[:top_n]
