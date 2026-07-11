@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -136,12 +136,15 @@ class NetWorthTrend:
     """The Home hero's 12-month net-worth trend (ADR-150). Computed off the fast
     path (in a background thread) because the underlying replay is ~400ms on a
     large file — see ``compute_net_worth_trend``. ``points`` are ``(iso_date,
-    net)`` ascending in ``display_ccy``; deltas are ``None`` when undefined."""
+    net)`` ascending in ``display_ccy`` (the monthly series the chart draws);
+    the deltas summarise two rolling windows over that same span, ``None`` when
+    undefined."""
     points: list[tuple[str, Decimal]]
     display_ccy: str
-    change_month: Optional[Decimal]        # net now − net at the prior month-end
-    change_month_pct: Optional[float]      # change_month / |prior month-end net|
+    change_30d: Optional[Decimal]          # net now − net 30 days ago
+    change_30d_pct: Optional[float]        # change_30d / |net 30 days ago|
     change_year: Optional[Decimal]         # net now − net 12 months ago
+    change_year_pct: Optional[float]       # change_year / |net 12 months ago|
 
 
 def _display_currency(repo) -> str:
@@ -215,27 +218,41 @@ def compute_net_worth_trend(
     when it lands. Returns ``None`` when there isn't enough history (< 2 samples)
     to draw a line — the hero then stays the ADR-119 number-only card."""
     ccy = display_ccy or _display_currency(repo)
-    # 12 month-ends back, anchored to the first of that month, through today.
+    # 12 month-ends back, anchored to the first of that month, through today —
+    # the series the chart draws. A rolling "30 days ago" point rides along in
+    # the same replay purely to source the 30-day delta (it's kept out of the
+    # chart so the line stays a clean monthly cadence).
     start = today.replace(year=today.year - 1, day=1)
-    samples = month_end_samples(start, today)
+    monthly = month_end_samples(start, today)
+    d30 = today - timedelta(days=30)
     hist = gather_net_worth_history(
-        repo, sample_dates=samples, display_ccy=ccy,
+        repo, sample_dates=sorted(set(monthly) | {d30}), display_ccy=ccy,
         family_kinds=_NW_FAMILY_KINDS,
     )
-    pts = [(p.date, p.net) for p in hist.points]
-    if len(pts) < 2:
+    net_by_date = {p.date: p.net for p in hist.points}
+    points = [
+        (d.isoformat(), net_by_date[d.isoformat()])
+        for d in monthly if d.isoformat() in net_by_date
+    ]
+    if len(points) < 2:
         return None
-    net_now = pts[-1][1]
-    net_prev = pts[-2][1]              # most recent full month-end before today
-    net_first = pts[0][1]
-    change_month = net_now - net_prev
-    change_pct = (
-        float(change_month / abs(net_prev)) if net_prev != 0 else None
+    net_now = net_by_date.get(today.isoformat(), points[-1][1])
+    net_first = points[0][1]
+    net_30 = net_by_date.get(d30.isoformat())
+
+    change_30d = (net_now - net_30) if net_30 is not None else None
+    change_30d_pct = (
+        float(change_30d / abs(net_30))
+        if (net_30 is not None and net_30 != 0) else None
+    )
+    change_year = net_now - net_first
+    change_year_pct = (
+        float(change_year / abs(net_first)) if net_first != 0 else None
     )
     return NetWorthTrend(
-        points=pts, display_ccy=ccy,
-        change_month=change_month, change_month_pct=change_pct,
-        change_year=net_now - net_first,
+        points=points, display_ccy=ccy,
+        change_30d=change_30d, change_30d_pct=change_30d_pct,
+        change_year=change_year, change_year_pct=change_year_pct,
     )
 
 

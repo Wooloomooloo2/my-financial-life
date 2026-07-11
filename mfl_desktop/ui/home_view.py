@@ -355,19 +355,20 @@ class HomeView(QWidget):
         big.setFont(big_font)
         fig_l.addWidget(big)
 
-        # Change indicator (this month), coloured by direction.
-        if trend is not None and trend.change_month is not None:
-            fig_l.addWidget(self._delta_line(trend, data.display_ccy))
+        # Change summary — a 30-day and a 12-month window, coloured by direction
+        # (ADR-150). The chart shows the 12-month shape; these summarise it.
+        if trend is not None:
+            for change, pct, period in (
+                (trend.change_30d, trend.change_30d_pct, "last 30 days"),
+                (trend.change_year, trend.change_year_pct, "last 12 months"),
+            ):
+                lbl = self._delta_label(change, pct, period, data.display_ccy)
+                if lbl is not None:
+                    fig_l.addWidget(lbl)
 
         n_accts = sum(len(g.accounts) for g in data.account_groups)
         if n_accts:
-            parts = [f"across {n_accts} account{'s' if n_accts != 1 else ''}"]
-            if trend is not None and trend.change_year is not None:
-                parts.append(
-                    f"{_fmt(trend.change_year, data.display_ccy, decimals=0, signed=True)}"
-                    " over 12 months"
-                )
-            sub = QLabel(" · ".join(parts))
+            sub = QLabel(f"across {n_accts} account{'s' if n_accts != 1 else ''}")
             tokens.themed(sub, "color: {muted}; font-size: 12px;")
             fig_l.addWidget(sub)
         if data.net_worth_excluded:
@@ -395,22 +396,24 @@ class HomeView(QWidget):
         card.clicked.connect(self.net_worth_requested)
         return card
 
-    def _delta_line(self, trend, ccy: str) -> QLabel:
-        """A coloured 'this month' change line under the net-worth figure. A
-        sub-unit drift reads as flat (muted, no arrow) rather than '▲ £0'."""
-        change = trend.change_month
+    def _delta_label(self, change, pct, period: str, ccy: str):
+        """A coloured change line — '▲ £X (+Y%) · <period>' — for one window.
+        A sub-unit drift reads as flat (muted, no arrow); an undefined change
+        returns None so the caller can skip it."""
+        if change is None:
+            return None
         if abs(change) < Decimal("0.5"):
-            lbl = QLabel("No change this month")
+            lbl = QLabel(f"No change · {period}")
             tokens.themed(lbl, "color: {muted}; font-size: 13px; font-weight: 600;")
             return lbl
         up = change > 0
         arrow = "▲" if up else "▼"
         token = "positive_strong" if up else "negative"
         amount = _fmt(abs(change), ccy, decimals=0)
-        pct = ""
-        if trend.change_month_pct is not None:
-            pct = f" ({'+' if up else '−'}{abs(trend.change_month_pct) * 100:.1f}%)"
-        lbl = QLabel(f"{arrow} {amount}{pct} this month")
+        pct_s = ""
+        if pct is not None:
+            pct_s = f" ({'+' if up else '−'}{abs(pct) * 100:.1f}%)"
+        lbl = QLabel(f"{arrow} {amount}{pct_s} · {period}")
         tokens.themed(
             lbl, "color: {%s}; font-size: 13px; font-weight: 600;" % token
         )

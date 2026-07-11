@@ -1,7 +1,7 @@
 # ADR-150 — Net-worth hero carries a 12-month trend sparkline (computed off-thread)
 
 **Date:** 2026-07-11
-**Status:** Implemented
+**Status:** Implemented (amended 2026-07-11 — see Amendment)
 **Related:** ADR-119 (net-worth hero + clickable cards). ADR-075 (Home dashboard, `gather_*` pattern). ADR-121 (net worth over time, computed-not-stored replay). ADR-135 (net-worth history sampling / bars). ADR-055 (convert-before-summing FX). ADR-026 (hand-rolled `paintEvent` charts). ADR-035 (background launch refresh via `QThreadPool`). ADR-149 (Home refresh defers widget destruction).
 
 ## Context
@@ -40,6 +40,12 @@ Rejected:
 - **Persist / incrementally maintain a net-worth series** (a materialized table updated on write). The right answer if this becomes a hot path in several places, but it's a storage-model change with its own invalidation burden (every txn edit, FX rate, price, account change dirties it). Not worth it for one card; computed-not-stored + a background thread + a signature cache gets the same felt result with no new persistent state. Revisit if a second consumer wants the same series live.
 - **Embed the existing `NetWorthHistoryChart`.** It's a full report chart — axes, y-labels, legend, per-bar net markers, hover tooltips — far too busy inside a hero and sized for a report pane. A dedicated minimal sparkline is less code than configuring that one down.
 - **A count-up animation on the number.** Gimmicky, and it fights the "quiet everything around the one signature" discipline. The sparkline's draw-in is the only motion, and it's cheap.
+
+## Amendment (2026-07-11) — 30-day + 12-month deltas
+
+Owner feedback on the first cut: the summary said "this month" while the line spans 12 months — mismatched windows. And the "this-month" figure was really month-to-date (net now vs the last month-end), which drifts with the calendar (1 day's worth on the 1st, a month's worth on the 31st).
+
+The hero now summarises **two fixed rolling windows** that bracket the chart's span: **last 30 days** and **last 12 months**, each on its own line, coloured by direction. The 30-day figure is a true rolling delta — net now vs net exactly 30 days ago — sourced by riding a single extra "30 days ago" sample along in the same `gather_net_worth_history` replay (kept out of `points` so the chart stays a clean monthly cadence; no second replay). The 12-month change moves from a muted footnote to a first-class coloured line with its own percentage; the account count drops to the muted line on its own. `NetWorthTrend.change_month{,_pct}` became `change_30d{,_pct}`, and `change_year_pct` was added.
 
 ## Consequences
 
