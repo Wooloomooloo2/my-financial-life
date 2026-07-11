@@ -1,7 +1,7 @@
 # ADR-151 — Import matching tolerates settlement gaps; net-new rows are reviewable
 
 **Date:** 2026-07-11
-**Status:** Phase 1 (matching window) implemented; Phase 2 (review UX) planned
+**Status:** Implemented (Phase 1 matching window + Phase 2 review UX)
 **Related:** ADR-085 (cross-source duplicate detection). ADR-130 (amount-mismatch fuzzy tier). ADR-010 (manual-placeholder merge-on-confirm). ADR-036 (transfer matching). ADR-118 (import-time review). Feedback: "dialogs only when there's something to ask" (silent commit for clean known-format imports).
 
 ## Context
@@ -28,9 +28,11 @@ The tiers are safe by construction: a match is never auto-merged. A **strong** m
 
 The candidate SQL fetch (`list_dedupe_candidates`) widens to the ±10 tier so the weak pass has rows to consider; `import_service._apply_dedupe` passes both windows through.
 
-### Phase 2 — net-new visibility + "find a match" (planned)
+### Phase 2 — net-new visibility + "find a match" (implemented)
 
-The review dialog today lists only flagged matches. It will also present the **net-new** rows and, per row, a **"Find match…"** action that searches the account's existing transactions and lets the user link/merge a new row to one the matcher didn't flag — folding the choice into the existing confirmed-match commit path (the row becomes a user-accepted match). This is the owner's "opportunity to find a match" and the "clearer about net new" ask, and it makes the importer robust to matches the automatic tiers still miss.
+The review dialog previously listed only flagged matches. It now also presents the **net-new** rows below them ("N new transactions will be added to <account>") and, per row, a **"Find match…"** action. That opens `FindMatchDialog`, a picker over the account's existing transactions (`Repository.find_match_candidates` — exact-amount first, then nearest date, with a payee filter), and the user links the new row to one the matcher didn't flag. The choice folds into the **existing** confirmed-match commit path: `ImportReviewDialog.found_matches()` returns `{fitid: (existing_id, is_manual)}`, and `RegisterWindow._apply_found_matches` reclassifies those staged rows to `potential_match` and adds them to the accepted set, so a manual target merges and an imported target skips — no new commit machinery. This is the owner's "opportunity to find a match" and the "clearer about net new" ask, and it makes the importer robust to matches the automatic tiers still miss.
+
+Scope note: the net-new list appears **within** the review dialog, which still only opens when there is at least one flagged match (Phase 1 makes that the common case for statements with settlement gaps). A genuinely all-new batch still commits silently, honouring the standing "no dialog for clean known imports" preference. If an all-new batch ever needs the find-match affordance, opening the review on net-new alone is a one-line gate change — deliberately deferred rather than reversing that preference unprompted.
 
 Rejected:
 

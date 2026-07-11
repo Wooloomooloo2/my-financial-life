@@ -3016,6 +3016,25 @@ class RegisterWindow(QMainWindow):
         self._remember_import_dir(path)
         self._import_file(path)
 
+    def _apply_found_matches(self, pending, found, accepted) -> None:
+        """Reclassify user-picked 'Find match…' rows (ADR-151 Phase 2) as
+        accepted matches in the staged batch: a manual target merges, an
+        imported target skips — the same commit paths the auto-matcher's
+        confirmations take. Mutates the shared PendingImport, which
+        ``commit_import`` re-reads by token."""
+        if not found:
+            return
+        by_fitid = {tx.fitid: tx for tx in pending.transactions}
+        for fitid, (existing_id, is_manual) in found.items():
+            tx = by_fitid.get(fitid)
+            if tx is None:
+                continue
+            tx.status = "potential_match"
+            tx.match_txn_id = existing_id
+            tx.match_is_manual = is_manual
+            tx.match_strength = "strong"
+            accepted.add(fitid)
+
     def _import_file(self, path: str) -> None:
         try:
             file_bytes = Path(path).read_bytes()
@@ -3080,12 +3099,15 @@ class RegisterWindow(QMainWindow):
             if tx.status == "potential_match"
         ]
         if matches:
-            review = ImportReviewDialog(pending, parent=self)
+            review = ImportReviewDialog(pending, repo=self._repo, parent=self)
             if review.exec() != QDialog.Accepted:
                 self._service.discard_pending(token)
                 return
             accepted = review.accepted_fitids()
             adopted = review.adopted_amount_fitids()
+            # ADR-151 Phase 2: fold any hand-picked 'Find match…' choices into the
+            # accepted set by reclassifying those new rows as matches in place.
+            self._apply_found_matches(pending, review.found_matches(), accepted)
         else:
             accepted = set()
             adopted = set()

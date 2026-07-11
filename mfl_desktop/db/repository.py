@@ -86,6 +86,19 @@ class DedupeExisting:
 
 
 @dataclass(frozen=True)
+class MatchCandidate:
+    """An existing transaction offered as a manual match target in the import
+    review's 'Find a match' picker (ADR-151 Phase 2). Carries ``status`` so the
+    picker can show it, and ``is_manual`` so confirm routes merge-vs-skip."""
+    id: int
+    posted_date: str
+    amount_pence: int
+    payee_name: str
+    status: str
+    is_manual: bool
+
+
+@dataclass(frozen=True)
 class TransactionRow:
     """A transaction joined with its payee + category + account names.
 
@@ -4051,6 +4064,41 @@ class Repository:
                 amount_pence=r["amount"], payee_name=r["payee_name"],
                 import_hash=r["import_hash"],
                 is_manual=r["import_hash"] is None,
+            )
+            for r in rows
+        ]
+
+    def find_match_candidates(
+        self, account_id: int, around_date: str, amount_pence: int,
+        *, day_window: int = 60, limit: int = 200,
+    ) -> list["MatchCandidate"]:
+        """Existing transactions in an account offered as manual match targets
+        for a still-new import row (ADR-151 Phase 2, the 'Find a match' picker).
+
+        Spans every exact-amount row (any date) plus everything within
+        ``±day_window`` days of ``around_date``, ranked exact-amount first then
+        by date proximity — so the picker surfaces both the same-amount charge a
+        fortnight off and the nearby rows a payee search can whittle down."""
+        rows = self._conn.execute(
+            "SELECT t.id, t.posted_date, t.amount, t.status, "
+            "       COALESCE(p.name, '') AS payee_name, "
+            "       (t.import_hash IS NULL) AS is_manual "
+            "FROM txn t "
+            "LEFT JOIN payee p ON p.id = t.payee_id "
+            "WHERE t.account_id = ? "
+            "  AND ( t.amount = ? "
+            "        OR ABS(julianday(t.posted_date) - julianday(?)) <= ? ) "
+            "ORDER BY (t.amount = ?) DESC, "
+            "         ABS(julianday(t.posted_date) - julianday(?)) ASC "
+            "LIMIT ?",
+            (account_id, amount_pence, around_date, day_window,
+             amount_pence, around_date, limit),
+        ).fetchall()
+        return [
+            MatchCandidate(
+                id=r["id"], posted_date=r["posted_date"],
+                amount_pence=r["amount"], payee_name=r["payee_name"],
+                status=r["status"] or "", is_manual=bool(r["is_manual"]),
             )
             for r in rows
         ]

@@ -17,6 +17,13 @@ On confirm a ticked row is either **merged** into a hand-typed placeholder
 (manual target) or **skipped** as a duplicate (already-imported target); an
 unticked row is **added**. ``accepted_fitids()`` returns the ticked rows for
 ``ImportService.commit_import``.
+
+ADR-151 Phase 2: below the flagged matches, the dialog also lists the **net-new**
+rows this import will add, each with a **Find match…** action — a picker over the
+account's existing transactions — so the user can hand-link a row the automatic
+matcher missed (a match beyond the date window, a different amount, an unfamiliar
+payee). ``found_matches()`` returns those choices; the caller reclassifies them
+as accepted matches before commit.
 """
 from __future__ import annotations
 
@@ -60,24 +67,33 @@ class ImportReviewDialog(QDialog):
         "weak":   ("Possible", "{caution}"),
     }
 
-    def __init__(self, pending: "PendingImport", parent=None) -> None:
+    def __init__(self, pending: "PendingImport", repo=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Review import — {pending.account_name}")
         self.setModal(True)
-        self.resize(860, 540)
+        self.resize(880, 600)
 
         self._currency = pending.currency
+        self._repo = repo
+        self._account_id = pending.account_id
+        self._account_name = pending.account_name
         self._matches: list["ClassifiedTransaction"] = [
             tx for tx in pending.transactions if tx.status == "potential_match"
         ]
-        n_new = sum(1 for tx in pending.transactions if tx.status == "new")
+        self._new_rows: list["ClassifiedTransaction"] = [
+            tx for tx in pending.transactions if tx.status == "new"
+        ]
+        # fitid -> (existing_id, is_manual, label) for user-found matches (ADR-151
+        # Phase 2). These reclassify a 'new' row as an accepted match at commit.
+        self._found: dict[str, tuple[int, bool, str]] = {}
+        n_new = len(self._new_rows)
         total = len(self._matches) + n_new
 
         header = QLabel(
-            f"<b>{len(self._matches)}</b> of {total} transactions look like "
-            f"they're already in <b>{pending.account_name}</b>. "
-            "Ticked rows are skipped (or merged into a manual entry); "
-            "unticked rows are added.<br>"
+            f"<b>{len(self._matches)}</b> of {total} incoming transactions look "
+            f"like they're already in <b>{pending.account_name}</b>; the other "
+            f"<b>{n_new}</b> will be added. Ticked rows are skipped (or merged "
+            "into a manual entry); unticked rows are added.<br>"
             "Repeats are counted — if you really did spend the same amount "
             "more than once, only the copies already on file are proposed for "
             "skipping."
@@ -130,10 +146,19 @@ class ImportReviewDialog(QDialog):
         root.setSpacing(10)
         root.addWidget(header)
         root.addWidget(bulk_w)
-        root.addWidget(self._table, stretch=1)
+        root.addWidget(self._table, stretch=2)
+        new_section = self._build_new_section()
+        if new_section is not None:
+            root.addWidget(new_section, stretch=1)
         root.addWidget(buttons)
 
     # ── public API ──
+
+    def found_matches(self) -> dict:
+        """fitid -> (existing_id, is_manual) for rows the user matched by hand
+        via 'Find match…' (ADR-151 Phase 2). The caller reclassifies these as
+        accepted matches before commit."""
+        return {fid: (eid, man) for fid, (eid, man, _lbl) in self._found.items()}
 
     def accepted_fitids(self) -> set[str]:
         """Fitids of the rows ticked 'already present' (merge or skip)."""
@@ -244,3 +269,105 @@ class ImportReviewDialog(QDialog):
                 item.setCheckState(
                     Qt.Checked if tx.match_strength == "strong" else Qt.Unchecked
                 )
+
+    # ── net-new section + 'find a match' (ADR-151 Phase 2) ──
+
+    def _new_signed_pence(self, tx) -> int:
+        mag = int(tx.amount * 100)
+        return -mag if tx.tx_type == "debit" else mag
+
+    def _build_new_section(self):
+        """The net-new rows this import will add, each with a 'Find match…'
+        action to hand-link it to an existing transaction the matcher missed.
+        Returns None when there's nothing new or no repo to search."""
+        if not self._new_rows or self._repo is None:
+            return None
+        wrap = QWidget()
+        lay = QVBoxLayout(wrap)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self._new_label = QLabel()
+        self._new_label.setWordWrap(True)
+        lay.addWidget(self._new_label)
+
+        self._new_table = QTableWidget(len(self._new_rows), 3)
+        self._new_table.setHorizontalHeaderLabels(
+            ["Adding", "Amount", "Already recorded?"]
+        )
+        self._new_table.verticalHeader().setVisible(False)
+        self._new_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._new_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        hh = self._new_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for i, tx in enumerate(self._new_rows):
+            self._new_table.setItem(
+                i, 0, QTableWidgetItem(f"{tx.date_iso}   {tx.payee_raw}"),
+            )
+            amt = QTableWidgetItem(self._fmt_amount(tx))
+            amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._new_table.setItem(i, 1, amt)
+            self._new_table.setCellWidget(i, 2, self._new_match_cell(i, tx))
+        lay.addWidget(self._new_table)
+        self._update_new_label()
+        return wrap
+
+    def _update_new_label(self) -> None:
+        n = len(self._new_rows)
+        matched = len(self._found)
+        adding = n - matched
+        extra = f" · {matched} matched to an existing entry" if matched else ""
+        self._new_label.setText(
+            f"<b>{adding}</b> new transaction{'s' if adding != 1 else ''} will be "
+            f"added to <b>{self._account_name}</b>{extra}.  "
+            "Spot one that's already recorded? Use <i>Find match…</i>."
+        )
+
+    def _new_match_cell(self, row: int, tx) -> QWidget:
+        holder = QWidget()
+        lay = QHBoxLayout(holder)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(6)
+        found = self._found.get(tx.fitid)
+        lay.addStretch(1)
+        if found is None:
+            btn = QPushButton("Find match…")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(
+                lambda _=False, t=tx, r=row: self._open_find_match(t, r)
+            )
+            lay.addWidget(btn)
+        else:
+            _eid, is_manual, label = found
+            verb = "merge into" if is_manual else "skip vs"
+            tag = QLabel(f"→ {verb} {label}")
+            tokens.themed(tag, "color: {positive_strong}; font-weight: 600;")
+            clear = QPushButton("✕")
+            clear.setToolTip("Not a match — add as new")
+            clear.setCursor(Qt.PointingHandCursor)
+            clear.setFixedWidth(28)
+            clear.clicked.connect(
+                lambda _=False, t=tx, r=row: self._clear_found(t, r)
+            )
+            lay.addWidget(tag)
+            lay.addWidget(clear)
+        return holder
+
+    def _open_find_match(self, tx, row: int) -> None:
+        from mfl_desktop.ui.find_match_dialog import FindMatchDialog
+        dlg = FindMatchDialog(
+            self._repo, self._account_id,
+            new_date=tx.date_iso, new_amount_pence=self._new_signed_pence(tx),
+            new_payee=tx.payee_raw, currency=self._currency, parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted and dlg.chosen() is not None:
+            eid, is_manual = dlg.chosen()
+            self._found[tx.fitid] = (eid, is_manual, dlg.chosen_label())
+            self._new_table.setCellWidget(row, 2, self._new_match_cell(row, tx))
+            self._update_new_label()
+
+    def _clear_found(self, tx, row: int) -> None:
+        self._found.pop(tx.fitid, None)
+        self._new_table.setCellWidget(row, 2, self._new_match_cell(row, tx))
+        self._update_new_label()
