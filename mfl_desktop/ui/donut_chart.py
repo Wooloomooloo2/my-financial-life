@@ -48,14 +48,19 @@ class DonutSegment:
     value: float            # >= 0; should equal sum(child.value)
     color: QColor
     children: tuple[DonutChild, ...] = field(default_factory=tuple)
+    # A drill id for the inner slice itself (ADR-152). None keeps the inner ring
+    # non-clickable (the Net Worth sunburst — only its account children drill).
+    segment_id: Optional[int] = None
 
 
 class DonutChart(QWidget):
     """Stateless widget — call :meth:`set_data` to draw, :meth:`show_empty`
     for the no-data state."""
 
-    # Left-click on an outer-ring account slice → its account id (ADR-083).
-    # Not emitted for the inner-ring type slices.
+    # Left-click on a slice that carries a drill id → that id. Outer-ring slices
+    # carry their DonutChild.account_id (ADR-083, Net Worth → Account Summary);
+    # inner-ring slices carry their DonutSegment.segment_id when set (ADR-152,
+    # the category sunburst → transactions). Slices with no id aren't clickable.
     account_clicked = Signal(int)
 
     # Ring geometry as fractions of the outer radius.
@@ -183,7 +188,7 @@ class DonutChart(QWidget):
             self._draw_pie(p, mid_rect, seg_start, seg_span, seg.color, sep)
             self._hits.append(
                 (seg_start, seg_span, r_hole, r_mid, seg.label, seg_val,
-                 seg_val / total, None)
+                 seg_val / total, seg.segment_id)
             )
             a += seg_span
 

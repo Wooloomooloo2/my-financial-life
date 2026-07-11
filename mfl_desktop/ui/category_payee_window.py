@@ -411,6 +411,8 @@ class CategoryPayeeWindow(QMainWindow):
         layout.addWidget(self._mini_section_title("Where it goes"))
         self._donut = DonutChart()
         self._donut.setMinimumHeight(200)
+        # ADR-152: click a sunburst slice → the transactions behind it.
+        self._donut.account_clicked.connect(self._on_donut_slice_clicked)
         layout.addWidget(self._donut, stretch=1)
         return panel
 
@@ -528,47 +530,56 @@ class CategoryPayeeWindow(QMainWindow):
 
     def _render_donut(self) -> None:
         """Draw the two-ring category sunburst from the full cached matrix —
-        inner ring = budget-line group, outer ring = the leaf categories within
-        each. Values are in the display currency (the matrix already converted
-        them). Independent of the primary dimension and drill."""
-        groups: dict[int, dict[int, int]] = {}
-        group_totals: dict[int, int] = {}
+        inner ring = **top-level category**, outer ring = its **budget-line
+        groups** (ADR-152, top→group). Deliberately fixed at top→group and built
+        from the full matrix, so it stays a stable two-level overview of where
+        the money goes whatever the report's primary dimension, roll-up, Top-N
+        or drill — the inner ring lines up with the main top-level bars (the
+        earlier group→leaf pairing sat a level below them and read as a mismatch).
+        Every slice carries its category id, so a click opens its transactions."""
+        top_map = self._rollup_maps["top"]
+        group_map = self._group_map
+        tops: dict[int, dict[int, int]] = {}
+        top_totals: dict[int, int] = {}
         for cell in self._cells:
             pence = int(cell["spending_pence"])
             if pence <= 0:
                 continue
             leaf = cell["category_id"]
-            gid = self._group_map.get(leaf, leaf)
-            groups.setdefault(gid, {})
-            groups[gid][leaf] = groups[gid].get(leaf, 0) + pence
-            group_totals[gid] = group_totals.get(gid, 0) + pence
+            top = top_map.get(leaf, leaf)
+            grp = group_map.get(leaf, leaf)
+            tops.setdefault(top, {})
+            tops[top][grp] = tops[top].get(grp, 0) + pence
+            top_totals[top] = top_totals.get(top, 0) + pence
 
-        if not group_totals:
+        if not top_totals:
             self._donut.show_empty("No spending")
             return
 
         symbol = _symbol_for(self._display_ccy) or "£"
-        ordered = sorted(group_totals, key=lambda g: -group_totals[g])
+        ordered = sorted(top_totals, key=lambda t: -top_totals[t])
         segments: list[DonutSegment] = []
-        for i, gid in enumerate(ordered):
+        for i, top in enumerate(ordered):
             base = colour_for(i)
-            leaves = sorted(groups[gid].items(), key=lambda kv: -kv[1])
-            n = len(leaves)
+            grps = sorted(tops[top].items(), key=lambda kv: -kv[1])
+            n = len(grps)
             children = tuple(
                 DonutChild(
-                    label=self._category_label(leaf),
+                    label=self._category_label(gid),
                     value=pence / 100.0,
                     color=self._shade(base, j, n),
+                    account_id=gid,           # outer petal → this group's txns
                 )
-                for j, (leaf, pence) in enumerate(leaves)
+                for j, (gid, pence) in enumerate(grps)
             )
             segments.append(DonutSegment(
-                label=self._category_label(gid),
-                value=group_totals[gid] / 100.0,
+                label=self._category_label(top),
+                value=top_totals[top] / 100.0,
                 color=base,
                 children=children,
+                segment_id=top,               # inner slice → this top's txns
             ))
-        total = sum(group_totals.values()) / 100.0
+        total = sum(top_totals.values()) / 100.0
         self._donut.set_data(
             segments=segments,
             center_label="Spending",
@@ -782,6 +793,28 @@ class CategoryPayeeWindow(QMainWindow):
             title_label=f"{cat_name} · {payee_name}",
             custom_start=d_from, custom_end=d_to,
             payee_ids=payee_ids, payee_is_null=payee_is_null,
+            account_ids=subset, account_ids_label=subset_label,
+        )
+        win = TransactionsListWindow(self._repo, flt, parent=self)
+        win.setAttribute(Qt.WA_DeleteOnClose)
+        win.show()
+
+    def _on_donut_slice_clicked(self, category_id: int) -> None:
+        """A sunburst slice was clicked (ADR-152) — inner ring = a top-level
+        category, outer petal = a budget-line group. Open its transactions
+        across all payees (the category filter includes descendants), honouring
+        the report's current period and account scope but ignoring the primary
+        dimension / drill (the sunburst is a fixed top→group overview)."""
+        name = self._category_label(category_id)
+        d_from, d_to = self._resolve_date_bounds(self._current_filters)
+        names = {a.id: a.name for a in self._all_accounts}
+        account_id, account_name, subset, subset_label = drilldown_account_scope(
+            self._current_filters.account_ids, lambda i: names.get(i, ""),
+        )
+        flt = TxnListFilter.for_category(
+            account_id=account_id, account_name=account_name,
+            category_id=category_id, category_label=name,
+            period_key="custom", custom_start=d_from, custom_end=d_to,
             account_ids=subset, account_ids_label=subset_label,
         )
         win = TransactionsListWindow(self._repo, flt, parent=self)
