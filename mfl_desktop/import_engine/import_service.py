@@ -2,8 +2,8 @@
 
 Mirrors the v0.1 import flow (app/core/import_engine/import_service.py) but
 writes through the Repository instead of SPARQL. The classification logic
-(duplicate detection by import_hash, manual-match within ±2 days, status
-overrides from Banktivity) is preserved.
+(duplicate detection by import_hash, cross-source match within ±4 days with a
+weak 'possible' tier out to ±10, status overrides from Banktivity) is preserved.
 
 Key differences from v0.1:
 - Instance-based (`ImportService(repo)`), not module-level globals — makes
@@ -438,7 +438,9 @@ class ImportService:
             hi = date.fromisoformat(max(dates))
         except ValueError:
             return
-        window = dedupe.DEFAULT_WINDOW_DAYS
+        # Fetch candidates out to the widest (weak) tier so the extended
+        # 'possible' match (ADR-151) has rows to pair against.
+        window = dedupe.POSSIBLE_WINDOW_DAYS
         start = (lo - timedelta(days=window)).isoformat()
         end = (hi + timedelta(days=window)).isoformat()
 
@@ -465,6 +467,8 @@ class ImportService:
         ]
         matches = dedupe.match_duplicates(
             import_rows, existing_rows,
+            window_days=dedupe.DEFAULT_WINDOW_DAYS,
+            possible_window_days=dedupe.POSSIBLE_WINDOW_DAYS,
             fuzzy_amount_pct=dedupe.DEFAULT_FUZZY_AMOUNT_PCT,
         )
         for idx, m in matches.items():

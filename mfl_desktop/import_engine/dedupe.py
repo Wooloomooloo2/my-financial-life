@@ -29,10 +29,19 @@ from mfl_desktop.transfer_reconcile import (
     greedy_pair, score_candidate, _payee_tokens,
 )
 
-# Default date tolerance for pairing the *same* charge across sources — a
-# posted-date can drift a day or two between a bank's OFX and a Banktivity
-# export. NOT the window that governs repeats (consumption handles those).
-DEFAULT_WINDOW_DAYS = 2
+# Confident date tolerance for pairing the *same* charge across sources. A
+# posted-date routinely drifts a few days between when a charge is authorised
+# and when it settles — the classic "posted Friday, cleared Monday" is already 3
+# days, and a bank-holiday Monday pushes it to 4 (ADR-151). Matches inside this
+# window default to skip/merge. NOT the window that governs repeats (consumption
+# handles those).
+DEFAULT_WINDOW_DAYS = 4
+
+# Extended tolerance for a weak *possible* match (ADR-151): an exact-amount row
+# whose payee also overlaps but which sits beyond the confident window — a
+# settlement straggler. Surfaced for review as 'possible' (never a default
+# skip), so a long gap is caught without silently dropping a genuine repeat.
+POSSIBLE_WINDOW_DAYS = 10
 
 # Amount-mismatch tier (ADR-130 Phase 3b): after exact-amount pairing, a still-
 # unmatched download row can pair with a same-sign existing row whose amount is
@@ -87,6 +96,7 @@ class _Pair:
     is_manual: bool
     existing_date: str
     existing_payee: str
+    near: bool = False          # matched only via the extended 'possible' window
 
 
 def _days_apart(a_iso: str, b_iso: str) -> Optional[int]:
@@ -101,6 +111,7 @@ def match_duplicates(
     existing_rows: list[ExistingRow],
     *,
     window_days: int = DEFAULT_WINDOW_DAYS,
+    possible_window_days: int = 0,
     fuzzy_amount_pct: float = 0.0,
 ) -> dict[int, DedupeMatch]:
     """Pair import rows to existing rows (each existing row claimed once).
@@ -110,6 +121,11 @@ def match_duplicates(
     require an **exact signed-amount** match and a date within ``±window_days``;
     they're ordered same-day / same-payee first so the greedy walk claims the
     most plausible pairings before the window stretches.
+
+    ``possible_window_days`` > ``window_days`` opts into an **extended tier**
+    (ADR-151): an exact-amount row beyond the confident window but within this
+    one, *and* whose payee overlaps, pairs as a **weak** match — a settlement
+    straggler surfaced for review, never a default skip. 0 disables it.
 
     ``fuzzy_amount_pct`` > 0 runs a second, conservative **amount-mismatch**
     pass (ADR-130 Phase 3b) over the rows still unmatched: a same-sign existing
@@ -127,9 +143,15 @@ def match_duplicates(
     for imp in import_rows:
         for e in by_amount.get(imp.amount_pence, ()):  # exact amount only
             d = _days_apart(imp.date_iso, e.date_iso)
-            if d is None or d > window_days:
+            if d is None:
                 continue
             overlap = bool(_payee_tokens(imp.payee_raw) & _payee_tokens(e.payee_name))
+            if d <= window_days:
+                near = False
+            elif possible_window_days and d <= possible_window_days and overlap:
+                near = True                # extended 'possible' tier (weak only)
+            else:
+                continue
             score = score_candidate(
                 days_apart=d, amount_mismatch_pct=0.0, currencies_match=True,
                 src_payee=imp.payee_raw, tgt_payee=e.payee_name,
@@ -137,7 +159,7 @@ def match_duplicates(
             pairs.append(_Pair(
                 index=imp.index, existing_id=e.id, score=score, days_apart=d,
                 payee_overlap=overlap, is_manual=e.is_manual,
-                existing_date=e.date_iso, existing_payee=e.payee_name,
+                existing_date=e.date_iso, existing_payee=e.payee_name, near=near,
             ))
 
     kept = greedy_pair(
@@ -151,8 +173,12 @@ def match_duplicates(
     for p in kept:
         # Cross-source payee text is unreliable, so same-day is the dependable
         # "strong" signal; a manual placeholder is always strong (its match is
-        # the established merge-on-confirm behaviour).
-        strong = p.is_manual or p.days_apart == 0 or p.payee_overlap
+        # the established merge-on-confirm behaviour). A match found only via the
+        # extended window (ADR-151) is always weak — the wider the date gap, the
+        # more it needs a human glance before it's skipped.
+        strong = (not p.near) and (
+            p.is_manual or p.days_apart == 0 or p.payee_overlap
+        )
         out[p.index] = DedupeMatch(
             existing_id=p.existing_id, is_manual=p.is_manual,
             strength="strong" if strong else "weak",
