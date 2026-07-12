@@ -191,8 +191,24 @@ def nice_ticks(vmax: float, target_count: int = 5) -> tuple[float, float]:
 
 def fmt_currency(pounds: float, decimals: int = 0, symbol: str = "£") -> str:
     """``£1,234`` / ``£1,234.56`` — locale-free. ``symbol`` overrides the
-    currency glyph for reports that convert to a chosen display currency."""
+    currency glyph for reports that convert to a chosen display currency.
+
+    NB the ``£`` default is a convenience, not a fact: a caller that has a
+    display currency MUST pass ``symbol``. Relying on the default is what made
+    the Spending / Income Over Time charts stamp a pound sign on dollars
+    (ADR-156)."""
     return f"{symbol}{pounds:,.{decimals}f}"
+
+
+_CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
+
+
+def currency_symbol(currency: str) -> str:
+    """The glyph for a currency, or the code + a space when we have no glyph
+    ("CHF 1,234"). One definition, so a report can't disagree with a chart about
+    what a dollar looks like (ADR-156)."""
+    code = (currency or "").strip().upper()
+    return _CCY_SYMBOLS.get(code) or (f"{code} " if code else "£")
 
 
 def legend_chip(name: str, colour: QColor) -> QWidget:

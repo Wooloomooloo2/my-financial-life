@@ -69,9 +69,10 @@ def _build():
 
 def test_spending_nets_refund_and_clamps_negative():
     repo, ids = _build()
+    # ADR-156: returns {"rows", "unconverted"} now that it converts currencies.
     rows = repo.spending_aggregates(
         date_from=_FROM, date_to=_TO, granularity="month",
-    )
+    )["rows"]
     by_cat = {r["category_id"]: r["spending_pence"] for r in rows}
     assert by_cat.get(ids["meals"]) == 7000            # £100 − £30 = £70
     assert ids["reimb"] not in by_cat                  # −£30 nets ≤ 0 → dropped

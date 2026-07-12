@@ -75,6 +75,10 @@ class SpendingChart(QWidget):
         self._groups: list[tuple[int, str]] = []
         self._spending: dict[tuple[int, str], int] = {}
         self._avg_pounds = 0.0
+        # ADR-156: the report's display currency. The chart formats money in four
+        # places (axis, average pill, bar totals, tooltip) and used to hard-code
+        # the fmt_currency default of "£" in all of them.
+        self._symbol = "£"
         self._empty_message: Optional[str] = None
         # When False, the bottom-of-chart legend strip is skipped and
         # the legend band isn't reserved (the chart fills the space).
@@ -112,11 +116,13 @@ class SpendingChart(QWidget):
         groups: list[tuple[int, str]],
         spending: dict[tuple[int, str], int],
         avg_pounds: float,
+        currency_symbol: str = "£",
     ) -> None:
         self._buckets = buckets
         self._groups = groups
         self._spending = spending
         self._avg_pounds = avg_pounds
+        self._symbol = currency_symbol or "£"
         self._empty_message = None
         self.update()
 
@@ -229,7 +235,7 @@ class SpendingChart(QWidget):
         for i in range(n_ticks + 1):
             v = i * step
             y = chart.bottom() - (v / ymax) * chart.height()
-            label = fmt_currency(v)
+            label = fmt_currency(v, symbol=self._symbol)
             tw = fm.horizontalAdvance(label)
             painter.drawText(
                 int(chart.left() - tw - 8),
@@ -365,7 +371,7 @@ class SpendingChart(QWidget):
         font.setBold(True)
         painter.setFont(font)
         fm = QFontMetrics(font)
-        text = f"Avg {fmt_currency(self._avg_pounds)}"
+        text = f"Avg {fmt_currency(self._avg_pounds, symbol=self._symbol)}"
         tw = fm.horizontalAdvance(text) + 12
         th = fm.height() + 4
         pill = QRectF(
@@ -419,7 +425,8 @@ class SpendingChart(QWidget):
             return []
 
         fm = QFontMetrics(self._totals_font())
-        labels = [fmt_currency(total) for _x, _top, total in self._bar_totals]
+        labels = [fmt_currency(total, symbol=self._symbol)
+                  for _x, _top, total in self._bar_totals]
         widest = max(fm.horizontalAdvance(t) for t in labels)
         slot_w = chart.width() / len(self._buckets)
         if slot_w < widest + 8:      # +8: minimum gutter between neighbours
@@ -530,7 +537,10 @@ class SpendingChart(QWidget):
         for rect, group_index, bucket, pounds in self._segment_hitmap:
             if rect.contains(pos):
                 name = self._groups[group_index][1] if group_index < len(self._groups) else ""
-                text = f"{name}\n{bucket}\n{fmt_currency(pounds, 2)}"
+                text = (
+                    f"{name}\n{bucket}\n"
+                    f"{fmt_currency(pounds, 2, symbol=self._symbol)}"
+                )
                 QToolTip.showText(
                     self.mapToGlobal(QPoint(int(pos.x()), int(pos.y()))),
                     text,

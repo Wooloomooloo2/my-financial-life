@@ -5061,6 +5061,39 @@ class Repository:
         "year":    "strftime('%Y', t.posted_date)",
     }
 
+    def _to_display_ccy(
+        self,
+        pence: int,
+        ccy: str,
+        target_ccy: str,
+        on_date: str,
+        unconverted: dict[str, int],
+    ) -> Optional[int]:
+        """Convert ``pence`` from ``ccy`` into ``target_ccy`` at ``on_date``
+        (ADR-156). The shared rule behind every multi-currency aggregate.
+
+        Returns ``None`` when there is no rate on file. The caller must then
+        DROP the amount and it is recorded in ``unconverted`` — so the report can
+        say "£X wasn't converted" rather than silently understating a total,
+        which is the whole reason this is a helper and not an inline try/except.
+
+        A no-op (returns ``pence`` unchanged) when no display currency is asked
+        for, or when the amount is already in it — so a single-currency file
+        never touches the FX tables.
+        """
+        target_ccy = (target_ccy or "").strip().upper()
+        ccy = (ccy or "").strip().upper()
+        if not target_ccy or not ccy or ccy == target_ccy:
+            return pence
+        converted, _fallback = self.convert_amount(
+            Decimal(pence), from_ccy=ccy, to_ccy=target_ccy, on_date=on_date,
+        )
+        if converted is None:
+            if pence:
+                unconverted[ccy] = unconverted.get(ccy, 0) + abs(pence)
+            return None
+        return int(converted.to_integral_value(rounding=ROUND_HALF_UP))
+
     def spending_aggregates(
         self,
         *,
@@ -5070,7 +5103,8 @@ class Repository:
         account_ids: Optional[list[int]] = None,
         include_uncategorised: bool = True,
         payee_ids: Optional[list[int]] = None,
-    ) -> list[dict]:
+        display_currency: Optional[str] = None,
+    ) -> dict:
         """Net spending per (bucket, category_id) over a date range.
 
         **Net expense** definition (ADR-129): every ``kind='expense'`` line
@@ -5091,10 +5125,18 @@ class Repository:
         narrowing — every payee contributes (including the (No payee)
         rows where ``txn.payee_id`` is NULL).
 
-        Returns a list of dicts: ``{bucket, category_id, spending_pence}``
-        — pence are always ≥ 0. Caller rolls category_id up to a "report
-        group" id (see `mfl_desktop.reports.category_group_map`) and
-        aggregates further.
+        ``display_currency`` (ADR-156) converts every amount from its **account's**
+        currency into the target at ``date_to``, matching the Sankey / Payee /
+        Income & Expense reports. Without it this method summed raw minor units
+        across accounts — adding dollars to pounds 1:1 — which silently produced a
+        meaningless total on any multi-currency file.
+
+        Returns ``{"rows": [{bucket, category_id, spending_pence}, ...],
+        "unconverted": {ccy: pence}}`` — pence are always ≥ 0. ``unconverted``
+        holds amounts dropped for want of an FX rate, so the report can warn
+        rather than quietly understate. Caller rolls category_id up to a "report
+        group" id (see `mfl_desktop.reports.category_group_map`) and aggregates
+        further.
         """
         if granularity not in self._BUCKET_EXPR:
             raise ValueError(
@@ -5135,6 +5177,7 @@ class Repository:
         sql = (
             f"SELECT {bucket_expr} AS bucket, "
             f"       t.category_id AS category_id, "
+            f"       a.currency AS ccy, "
             f"       SUM(-t.amount) AS spending_pence "
             # Read from the split-unrolled view (ADR-051): a split transaction
             # contributes one row per category line (its line amount + category)
@@ -5143,27 +5186,46 @@ class Repository:
             # to scanning `txn` for the no-splits-in-the-file case.
             f"FROM txn_category_line t "
             f"JOIN category c ON c.id = t.category_id "
+            # ADR-156: amounts are in their ACCOUNT's currency, so group by it
+            # and convert each group — otherwise dollars and pounds are summed 1:1.
+            f"JOIN account a ON a.id = t.account_id "
             f"WHERE t.posted_date BETWEEN ? AND ? "
             f"  AND c.kind = 'expense' "
             # Net expense (ADR-129): all signs — a positive line (refund)
             # reduces the category's spend. Net-negative categories are
             # clamped below.
             f"  {filter_sql} "
-            f"GROUP BY bucket, t.category_id "
+            f"GROUP BY bucket, t.category_id, a.currency "
             f"ORDER BY bucket"
         )
         cur = self._conn.execute(sql, params)
-        out: list[dict] = []
+        target_ccy = (display_currency or "").strip().upper()
+        unconverted: dict[str, int] = {}
+        # Convert FIRST, then net, then clamp. Netting per-currency would clamp a
+        # currency's refunds away before they could offset that category's spend
+        # in another currency (ADR-129 nets across the whole category-bucket).
+        totals: dict[tuple[str, int], int] = {}
         for r in cur:
-            net = int(r["spending_pence"])
+            pence = self._to_display_ccy(
+                int(r["spending_pence"]), r["ccy"], target_ccy, date_to,
+                unconverted,
+            )
+            if pence is None:
+                continue      # no rate on file — recorded in `unconverted`
+            key = (r["bucket"], int(r["category_id"]))
+            totals[key] = totals.get(key, 0) + pence
+
+        out: list[dict] = []
+        for (bucket, category_id), net in totals.items():
             if net <= 0:
                 continue  # net refund/zero → £0 in the stack (ADR-129)
             out.append({
-                "bucket": r["bucket"],
-                "category_id": int(r["category_id"]),
+                "bucket": bucket,
+                "category_id": category_id,
                 "spending_pence": net,
             })
-        return out
+        out.sort(key=lambda r: r["bucket"])
+        return {"rows": out, "unconverted": unconverted}
 
     def income_aggregates(
         self,
@@ -5175,7 +5237,8 @@ class Repository:
         include_uncategorised: bool = True,
         payee_ids: Optional[list[int]] = None,
         include_reinvested: bool = False,
-    ) -> list[dict]:
+        display_currency: Optional[str] = None,
+    ) -> dict:
         """Inflow income per (bucket, category_id) over a date range — the
         income-side mirror of :meth:`spending_aggregates` (ADR-088, Income
         Over Time report).
@@ -5204,11 +5267,16 @@ class Repository:
         the owner tags them first (now possible per ADR-089). No double count:
         the cash pass requires ``amount > 0`` and reinvests are always 0.
 
-        Returns a list of dicts: ``{bucket, category_id, income_pence}`` —
-        pence are always ≥ 0. Caller rolls ``category_id`` up to a report
-        group id and aggregates further (same flow as the spending report).
-        Rows are not de-duplicated across the two passes; the caller already
-        sums by (bucket, group), so a category can legitimately appear twice.
+        ``display_currency`` (ADR-156) converts every amount from its **account's**
+        currency at ``date_to`` — see :meth:`spending_aggregates`. Both passes
+        convert, so a USD DRIP and a GBP dividend land in the same money.
+
+        Returns ``{"rows": [{bucket, category_id, income_pence}, ...],
+        "unconverted": {ccy: pence}}`` — pence are always ≥ 0. Caller rolls
+        ``category_id`` up to a report group id and aggregates further (same flow
+        as the spending report). Rows are not de-duplicated across the two
+        passes; the caller already sums by (bucket, group), so a category can
+        legitimately appear twice.
         """
         if granularity not in self._BUCKET_EXPR:
             raise ValueError(
@@ -5243,27 +5311,36 @@ class Repository:
         sql = (
             f"SELECT {bucket_expr} AS bucket, "
             f"       t.category_id AS category_id, "
+            f"       a.currency AS ccy, "
             f"       SUM(t.amount) AS income_pence "
             # Read from the split-unrolled view (ADR-051) so a split lands on
             # each line's own category (identical to scanning `txn` when the
             # file has no splits) — see spending_aggregates for the rationale.
             f"FROM txn_category_line t "
             f"JOIN category c ON c.id = t.category_id "
+            f"JOIN account a ON a.id = t.account_id "   # ADR-156: per-currency
             f"WHERE t.posted_date BETWEEN ? AND ? "
             f"  AND c.kind = 'income' "
             f"  AND t.amount > 0 "  # strict inflow — see docstring
             f"  {filter_sql} "
-            f"GROUP BY bucket, t.category_id "
+            f"GROUP BY bucket, t.category_id, a.currency "
             f"ORDER BY bucket"
         )
         cur = self._conn.execute(sql, params)
+        target_ccy = (display_currency or "").strip().upper()
+        unconverted: dict[str, int] = {}
+        totals: dict[tuple[str, int], int] = {}
+        for r in cur:
+            pence = self._to_display_ccy(
+                int(r["income_pence"]), r["ccy"], target_ccy, date_to, unconverted,
+            )
+            if pence is None:
+                continue
+            key = (r["bucket"], int(r["category_id"]))
+            totals[key] = totals.get(key, 0) + pence
         out = [
-            {
-                "bucket": r["bucket"],
-                "category_id": int(r["category_id"]),
-                "income_pence": int(r["income_pence"]),
-            }
-            for r in cur
+            {"bucket": b, "category_id": cid, "income_pence": p}
+            for (b, cid), p in totals.items()
         ]
 
         if include_reinvested:
@@ -5276,9 +5353,12 @@ class Repository:
                     filter_params=params[2:],
                     date_from=date_from,
                     date_to=date_to,
+                    target_ccy=target_ccy,
+                    unconverted=unconverted,
                 )
             )
-        return out
+        out.sort(key=lambda r: r["bucket"])
+        return {"rows": out, "unconverted": unconverted}
 
     def _reinvested_income_rows(
         self,
@@ -5288,6 +5368,8 @@ class Repository:
         filter_params: list,
         date_from: str,
         date_to: str,
+        target_ccy: str = "",
+        unconverted: Optional[dict[str, int]] = None,
     ) -> list[dict]:
         """Reinvested-distribution (DRIP) income per (bucket, category_id),
         valued at **quantity × price** (ADR-089). Reads ``txn`` directly — a
@@ -5303,34 +5385,44 @@ class Repository:
         sql = (
             f"SELECT {bucket_expr} AS bucket, "
             f"       t.category_id AS category_id, "
+            f"       a.currency AS ccy, "
             # `price` is a per-share unit price in **pounds** (a Buy's
             # pence `amount` == quantity × price × 100), so scale to pence.
             f"       CAST(ROUND(SUM(t.quantity * t.price) * 100) AS INTEGER) AS income_pence "
             f"FROM txn t "
             f"JOIN category c ON c.id = t.category_id "
+            f"JOIN account a ON a.id = t.account_id "   # ADR-156: per-currency
             f"WHERE t.posted_date BETWEEN ? AND ? "
             f"  AND c.kind = 'income' "
             f"  AND lower(t.action) IN ({action_ph}) "
             f"  AND t.quantity IS NOT NULL AND t.price IS NOT NULL "
             f"  {filter_sql} "
-            f"GROUP BY bucket, t.category_id "
+            f"GROUP BY bucket, t.category_id, a.currency "
             f"ORDER BY bucket"
         )
         params = [date_from, date_to] + actions + list(filter_params)
         cur = self._conn.execute(sql, params)
-        return [
-            {
+        if unconverted is None:
+            unconverted = {}
+        out: list[dict] = []
+        for r in cur:
+            if r["income_pence"] is None:
+                continue
+            pence = self._to_display_ccy(
+                int(r["income_pence"]), r["ccy"], target_ccy, date_to, unconverted,
+            )
+            if pence is None:
+                continue
+            out.append({
                 "bucket": r["bucket"],
                 "category_id": int(r["category_id"]),
-                "income_pence": int(r["income_pence"]),
+                "income_pence": pence,
                 # Tag so the report can surface these as their own
                 # "Reinvested Dividends" series rather than silently merging
                 # them into the cash category they're tagged with (ADR-110).
                 "reinvested": True,
-            }
-            for r in cur
-            if r["income_pence"] is not None
-        ]
+            })
+        return out
 
     def _portfolio_move_exclusion(self) -> tuple[str, list]:
         """SQL clause + params that exclude investment **portfolio-move

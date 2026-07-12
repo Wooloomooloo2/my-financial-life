@@ -29,6 +29,7 @@ from typing import Optional
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -55,7 +56,7 @@ from mfl_desktop.reports.filters import (
     TYPE_INCOME_OVER_TIME,
     TYPE_SPENDING_OVER_TIME,
 )
-from mfl_desktop.ui.chart_helpers import colour_for, legend_chip
+from mfl_desktop.ui.chart_helpers import colour_for, currency_symbol, legend_chip
 from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.spending_chart import SpendingChart
@@ -244,8 +245,21 @@ class SpendingReportWindow(QMainWindow):
         self._save_as_button.setProperty("mflVariant", "ghost")
         self._save_as_button.clicked.connect(self._on_save_as)
 
+        # ADR-156: display currency. Amounts live in each account's own currency,
+        # so a multi-currency file needs a target to convert into — without one
+        # this report summed dollars and pounds 1:1 and stamped a "£" on the
+        # result. Same non-persisted view preference as Net Worth (ADR-055) and
+        # the Sankey: it re-resolves to the default each time the report opens.
+        self._display_ccy = "GBP"
+        self._unconverted: dict[str, int] = {}
+        self._ccy_combo = QComboBox()
+        self._populate_ccy_combo()
+        self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
+
         self._page_header = PageHeader(show_rule=True)
         self._page_header.add_leading(self._back_button)
+        self._page_header.add_action(QLabel("Display in:"))
+        self._page_header.add_action(self._ccy_combo)
         self._page_header.add_action(self._filter_button)
         self._page_header.add_action(self._save_button)
         self._page_header.add_action(self._save_as_button)
@@ -402,6 +416,40 @@ class SpendingReportWindow(QMainWindow):
 
     # ── refresh / render ──
 
+    # ── display currency (ADR-156) ──
+
+    def _populate_ccy_combo(self) -> None:
+        """Fill the display-currency selector from the currencies in use,
+        defaulting to the base currency (then GBP, then the first in use) —
+        identical to the Sankey / Net Worth (ADR-055). A view preference, not
+        part of the saved filters."""
+        currencies = self._repo.list_distinct_currencies()
+        base = self._repo.get_setting("base_currency")
+        options = sorted(set(currencies) | ({base} if base else set()))
+        if not options:
+            options = ["GBP"]
+        if base and base in options:
+            default = base
+        elif "GBP" in options:
+            default = "GBP"
+        else:
+            default = options[0]
+        self._display_ccy = default
+        self._ccy_combo.blockSignals(True)
+        self._ccy_combo.clear()
+        for ccy in options:
+            self._ccy_combo.addItem(ccy, ccy)
+        i = self._ccy_combo.findData(default)
+        self._ccy_combo.setCurrentIndex(i if i >= 0 else 0)
+        self._ccy_combo.blockSignals(False)
+
+    def _on_ccy_changed(self, *_a) -> None:
+        self._display_ccy = self._ccy_combo.currentData() or "GBP"
+        self._refresh()
+
+    def _symbol(self) -> str:
+        return currency_symbol(self._display_ccy)
+
     def _refresh(self) -> None:
         filters = self._current_filters
         d_from, d_to = self._resolve_date_bounds(filters)
@@ -439,6 +487,7 @@ class SpendingReportWindow(QMainWindow):
             account_ids=account_ids,
             include_uncategorised=filters.include_uncategorised,
             payee_ids=expanded_payee_ids,
+            display_currency=self._display_ccy,   # ADR-156
         )
         # Income-only: fold in reinvested-dividend (DRIP) income (ADR-089). The
         # field lives only on IncomeOverTimeFilters, so guard on its presence —
@@ -450,7 +499,12 @@ class SpendingReportWindow(QMainWindow):
             agg_kwargs["include_reinvested"] = (
                 filters.include_reinvested_dividends and not self._drill_stack
             )
-        rows = aggregate(**agg_kwargs)
+        result = aggregate(**agg_kwargs)
+        rows = result["rows"]
+        # Amounts with no FX rate on file are dropped rather than counted at the
+        # wrong number. Kept so the summary panel can say so — a silently
+        # understated total is worse than the original bug (ADR-156).
+        self._unconverted = result["unconverted"]
         value_key = self._DIRECTION.value_key
 
         rollup_map = self._rollup_maps[filters.rollup_level]
@@ -522,6 +576,7 @@ class SpendingReportWindow(QMainWindow):
             groups=groups,
             spending=spending,
             avg_pounds=avg_pounds,
+            currency_symbol=self._symbol(),   # ADR-156
         )
 
         self._update_categories_legend(groups)
@@ -600,14 +655,28 @@ class SpendingReportWindow(QMainWindow):
             self._average_value.setText(note or "")
             self._buckets_value.setText("")
         else:
+            sym = self._symbol()   # ADR-156 — was hard-coded "£"
             total_pounds = total_pence / 100.0
             gran_word = _GRANULARITY_AVG_WORD.get(granularity or "month", "month")
             bucket_word = gran_word if bucket_count == 1 else f"{gran_word}s"
-            self._total_value.setText(f"Total: £{total_pounds:,.2f}")
+            self._total_value.setText(f"Total: {sym}{total_pounds:,.2f}")
             self._average_value.setText(
-                f"Average: £{(avg_pounds or 0):,.2f} / {gran_word}"
+                f"Average: {sym}{(avg_pounds or 0):,.2f} / {gran_word}"
             )
-            self._buckets_value.setText(f"{bucket_count} {bucket_word}")
+            bucket_text = f"{bucket_count} {bucket_word}"
+            # Money we could not convert is money missing from the total above.
+            # Say so — a silently understated figure is worse than the bug this
+            # conversion fixed (ADR-156).
+            if self._unconverted:
+                missing = ", ".join(
+                    f"{ccy} {pence / 100.0:,.2f}"
+                    for ccy, pence in sorted(self._unconverted.items())
+                )
+                bucket_text += (
+                    f"\n⚠ Not converted (no {self._display_ccy} rate on file): "
+                    f"{missing}"
+                )
+            self._buckets_value.setText(bucket_text)
 
     @staticmethod
     def _filter_line(label: str, selected: tuple, total: int) -> str:
