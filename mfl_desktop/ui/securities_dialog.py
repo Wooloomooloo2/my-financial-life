@@ -338,10 +338,19 @@ class SecuritiesDialog(QDialog):
             )
             return
         QApplication.restoreOverrideCursor()
+        # ADR-049 amendment: a security already holding the latest close is
+        # skipped without a Tiingo request, so "0 updated" is the *success* case
+        # when you're current — say so, rather than leaving it looking like a
+        # silent failure.
+        skipped_note = (
+            f" · {result.skipped_count} already up to date"
+            if result.skipped_count else ""
+        )
         self._refresh_status.setText(
             f"Last refresh: {_fmt_refresh_time(result.fetched_at)} · "
             f"{result.new_prices_count} price"
             f"{'s' if result.new_prices_count != 1 else ''} updated"
+            f"{skipped_note}"
         )
         if result.errors:
             shown = result.errors[:12]

@@ -2960,6 +2960,24 @@ class Repository:
             for r in cur
         }
 
+    def latest_market_price_dates(self) -> dict[int, str]:
+        """Newest **market** price date per security, keyed by security_id
+        (ADR-049 amendment) — the input to "is this security already current?",
+        which is what lets a latest-price refresh cost zero Tiingo requests when
+        there's nothing new to fetch.
+
+        Only ``manual`` / ``tiingo`` rows count, deliberately: a
+        ``transaction``-sourced row is a trade print seeded from the owner's own
+        buy/sell (``seed_prices_from_transactions``), not that day's close. If it
+        counted, a security bought on Friday would look priced-through-Friday and
+        never get its real close fetched."""
+        cur = self._conn.execute(
+            "SELECT security_id, MAX(price_date) AS md "
+            "FROM security_price WHERE source IN ('manual', 'tiingo') "
+            "GROUP BY security_id"
+        )
+        return {r["security_id"]: r["md"] for r in cur}
+
     def latest_price_for_security(self, security_id: int) -> Optional[PriceRow]:
         row = self._conn.execute(
             "SELECT security_id, price_date, price, "
