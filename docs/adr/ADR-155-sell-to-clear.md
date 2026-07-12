@@ -70,7 +70,15 @@ Dry-run by default; snapshots the file before writing; and **refuses to commit u
 
 - A closure entered through the dialog can no longer over- or under-sell. The position leaves the Holdings table, the Securities screen, and (if retired) the price sweep.
 - Applied to the owner's file: **PDBC, VWID and DSI phantoms gone**; portfolio value falls by **£239.75**, which is exactly `0.03 + 15.51 + 224.21` — the phantoms and nothing else. Realised gain on the six trimmed sales is now backed by their full cost basis.
-- **SUSA (7 shares, £1,090) is deliberately left alone.** The 2021-01-05 sale of 56 shares against 49 held is too large to be rounding: the file is missing a 7-share purchase, and the sale itself matches the statement. Fixing it needs the 2020 statement, not a guess. It will keep showing as a holding until then — that is the honest state, and the tool names it every run.
+- **SUSA (7 shares, £1,090) is left alone, and stays unresolved.** The 2021-01-05 sale of 56 shares against 49 held is too large to be rounding: the file is missing a ~7-share purchase, and the sale itself matches the statement. The obvious next step was to find that purchase — but the owner checked (2026-07-12) and **there is no such transaction on the statements**, so the gap cannot be closed from source documents.
+
+  That leaves no repair that is simply *correct*; each one trades a different inaccuracy, so the choice is the owner's rather than this ADR's:
+
+  - **Add the 7 shares** (`--add-shares "MS Access - Mark:SUSA"`) — the position clears and the sale keeps matching the statement's 56, but the inserted shares carry **no cost basis**, so SUSA's realised gain is overstated by whatever they originally cost.
+  - **Trim the sale to 49** — the position clears and the gain is exactly right, but the row **stops matching the statement** (implied price $93.64 against the recorded $81.939).
+  - **Leave it** (the current state) — the £1,090 phantom stays in the portfolio total and SUSA still reads as held.
+
+  Left as-is deliberately: a phantom that is *known and named* beats a repair that quietly launders a data gap into a number that looks authoritative. Tracked as an open owner action in `docs/RELEASE_1.0_BACKLOG.md`, and the tool reports it on every run.
 - Two 2010 `ShrsOut` rows in MS 401(k) (10.465 and 11.933 shares out of a zero holding), a 2012 Dodge & Cox sale (0.979) and a 2026 MS Pension sale (0.551) are likewise reported and skipped. They leave no phantom; they only make those securities' realised gain approximate.
 - `security.archived_at` finally has a writer, so the ADR-049 request budget stops being spent on securities the owner exited years ago.
 - The engine's silent oversell clamp **still exists**. This ADR removes the ways it gets fed and repairs what it produced; it does not make overselling impossible. A future validation pass should warn at entry and at import.

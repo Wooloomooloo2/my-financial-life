@@ -121,6 +121,11 @@ _Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold b
 - [ ] **UI-freeze checkpoint before the manual** — once P7's UI items land, declare the UI steady-state so W2's screenshots don't go stale (owner's explicit sequencing: manual is the *last* task).
 
 ### Open non-code owner action (carried from `backlog_notes.txt`)
+- [ ] **SUSA — 7 phantom shares in MS Access - Mark (£1,090), unresolved (ADR-155).** The 2021-01-05 sale of **56** shares runs against only **49** ever bought, so the holdings engine clamped the oversell to zero and a later plug materialised 7 basis-less shares that still show as a holding. Every other oversell in the file was repaired; this one is too large to be rounding, so it means a **purchase of ~7 shares that was never imported**. Owner checked (2026-07-12) and **can find no such transaction on the statements**, so the gap can't be closed from source documents. Whichever repair we eventually pick trades one inaccuracy for another, and that's the owner's call:
+  - *Add the 7 shares* (`tools/repair_share_oversells.py --add-shares "MS Access - Mark:SUSA"`) — the position clears and the sale keeps matching the statement's 56 shares, but the added shares carry **no cost basis**, so SUSA's realised gain is overstated by whatever they cost.
+  - *Trim the sale to 49* — the position clears and the gain is exactly right, but the row **no longer matches the statement** (implied price becomes $93.64 against the recorded $81.939).
+  - *Leave it* (current state) — the £1,090 phantom stays in the portfolio total, and SUSA keeps showing as held.
+  Not blocking 1.0; the app no longer *creates* this (ADR-155's Sell to clear), and the repair tool names it on every run.
 - [ ] **Post-ADR-112 category triage** — the pre-ADR-112 REI Master Card import forked 6 curated categories. Redo the merges by hand in Manage ▸ Categories (now also records import mappings, inoculating future imports): `Bills:Utilities:Cable and Internet`→`Bills:Cable and Internet`; `Bills:Utilities:Mobile Phone`→`Bills:Phone`; `Personal:Education:Tuition`/`:Books`→`Personal:Education`; `Fees:Charges`→owner's choice; `Cash`→`Personal:Cash`; then delete the emptied `Bills:Utilities` + `Fees`. Optionally enable "Match imports only".
 
 ---
