@@ -86,6 +86,12 @@ class SpendingChart(QWidget):
         # for hover hit-testing.
         self._segment_hitmap: list[tuple[QRectF, int, str, float]] = []
 
+        # Updated each paintEvent — (x_center, top_y, total_pounds) per bar, so
+        # the stack totals can be printed above them (ADR-154). Collected while
+        # the bars are laid out rather than recomputed, since _paint_bars
+        # already sums each stack and tracks its top edge.
+        self._bar_totals: list[tuple[float, float, float]] = []
+
         # Single-vs-double click disambiguation (ADR-114). A single click
         # drills; a double click opens transactions. The single-click action
         # is deferred by the double-click interval so the first press of a
@@ -154,7 +160,13 @@ class SpendingChart(QWidget):
         self._paint_y_labels(painter, chart_rect, ymax, ystep)
         self._paint_x_labels(painter, chart_rect)
         self._paint_bars(painter, chart_rect, ymax)
-        self._paint_average(painter, chart_rect, ymax)
+        # ADR-154: the stack totals are laid out first but drawn last. Laying
+        # them out first lets the average pill dodge them; drawing them last
+        # keeps the dashed average line from striking through the text.
+        totals = self._layout_bar_totals(chart_rect)
+        self._paint_average(painter, chart_rect, ymax,
+                            avoid=[r for r, _t in totals])
+        self._paint_bar_totals(painter, totals)
         if self._show_legend:
             self._paint_legend(painter, legend_rect)
         self._paint_axis_baseline(painter, chart_rect)
@@ -257,6 +269,7 @@ class SpendingChart(QWidget):
         self, painter: QPainter, chart: QRectF, ymax: float
     ) -> None:
         self._segment_hitmap.clear()
+        self._bar_totals.clear()
         n = len(self._buckets)
         if n == 0 or ymax <= 0:
             return
@@ -304,6 +317,9 @@ class SpendingChart(QWidget):
                 painter, bar_rect, radius, QColor(_ch.chart_surface()),
             )
 
+            # `running` is now the whole stack's total (ADR-154).
+            self._bar_totals.append((x_left + bar_w / 2, bar_top_y, running))
+
     def _draw_bar_segment(
         self,
         painter: QPainter,
@@ -327,7 +343,11 @@ class SpendingChart(QWidget):
             painter.setPen(Qt.NoPen)
 
     def _paint_average(
-        self, painter: QPainter, chart: QRectF, ymax: float
+        self,
+        painter: QPainter,
+        chart: QRectF,
+        ymax: float,
+        avoid: Optional[list[QRectF]] = None,
     ) -> None:
         if ymax <= 0 or self._avg_pounds <= 0:
             return
@@ -354,6 +374,16 @@ class SpendingChart(QWidget):
             tw,
             th,
         )
+        # ADR-154: the pill sits above the line at the right edge — exactly where
+        # the last bar's total label lands when that bar happens to be near the
+        # average (which it often is; the last bucket is usually a part-period).
+        # The total is data and the pill is annotation, so the pill moves: drop
+        # it below the line. Its dark fill keeps it legible over a bar.
+        if avoid and any(pill.intersects(r) for r in avoid):
+            below = QRectF(pill)
+            below.moveTop(y + 4)
+            if not any(below.intersects(r) for r in avoid):
+                pill = below
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor(_ch.chart_tooltip_bg())))
         painter.drawRoundedRect(pill, th / 2, th / 2)
@@ -363,6 +393,74 @@ class SpendingChart(QWidget):
             int(pill.top() + fm.ascent() + 2),
             text,
         )
+
+    def _totals_font(self) -> QFont:
+        font = QFont(self.font())
+        set_pt(font, 9)
+        font.setBold(True)
+        return font
+
+    def _layout_bar_totals(self, chart: QRectF) -> list[tuple[QRectF, str]]:
+        """Where each stack's total goes — geometry only, no painting (ADR-154).
+
+        A stacked bar's headline quantity is its total, and it was the one
+        number the chart never showed. The summary panel gives a grand total and
+        an average; hovering a segment gives that one segment. The per-bucket
+        total — what the bar actually *is* — could only be had by eyeballing
+        gridlines that may be £20,000 apart, or adding four tooltips up by hand.
+
+        Returns ``[]`` — suppressing the labels **wholesale** — when the widest
+        one wouldn't fit its slot. Granularity goes down to daily, so a wide span
+        can produce hundreds of buckets whose labels would collide into mush; the
+        tooltip still has the numbers there. All-or-nothing rather than per-bar,
+        so the chart never looks like it labelled an arbitrary subset.
+        """
+        if not self._bar_totals or not self._buckets:
+            return []
+
+        fm = QFontMetrics(self._totals_font())
+        labels = [fmt_currency(total) for _x, _top, total in self._bar_totals]
+        widest = max(fm.horizontalAdvance(t) for t in labels)
+        slot_w = chart.width() / len(self._buckets)
+        if slot_w < widest + 8:      # +8: minimum gutter between neighbours
+            return []
+
+        out: list[tuple[QRectF, str]] = []
+        for (x_center, top_y, _total), text in zip(self._bar_totals, labels):
+            tw = fm.horizontalAdvance(text)
+            # The y-axis reserves 12% headroom above the tallest bar (see
+            # _compute_y_axis) and there's a top margin above that, so this
+            # normally has room. Clamp anyway: one dominant bucket could still
+            # push its bar close enough to the top to clip the text.
+            baseline = max(top_y - 6, fm.ascent() + 2)
+            rect = QRectF(
+                x_center - tw / 2, baseline - fm.ascent(), tw, fm.height(),
+            )
+            out.append((rect, text))
+        return out
+
+    def _paint_bar_totals(
+        self, painter: QPainter, totals: list[tuple[QRectF, str]],
+    ) -> None:
+        if not totals:
+            return
+        fm = QFontMetrics(self._totals_font())
+        painter.setFont(self._totals_font())
+        surface = QColor(_ch.chart_surface())
+        ink = QPen(QColor(_ch.chart_ink()))
+        for rect, text in totals:
+            # Knock the background out behind the text first. Drawing the labels
+            # last already puts them *over* the gridlines and the dashed average
+            # line, but a dashed line still shows through the gaps between glyph
+            # strokes and reads as a strike-through — which is exactly what
+            # happened to a bar whose top landed just under the average.
+            # A label never overlaps a neighbouring bar (it is centred on its own
+            # bar and constrained to its slot), so the surface colour is always
+            # the correct thing to clear to.
+            painter.setPen(Qt.NoPen)
+            painter.fillRect(rect.adjusted(-3, -1, 3, 1), surface)
+            painter.setPen(ink)
+            painter.drawText(int(rect.left()), int(rect.top() + fm.ascent()), text)
 
     def _paint_legend(self, painter: QPainter, legend: QRectF) -> None:
         font = QFont(painter.font())
