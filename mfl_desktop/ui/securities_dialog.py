@@ -141,11 +141,20 @@ class SecuritiesDialog(QDialog):
             "in from accounts not yet migrated (no transactions)."
         )
         self._held_only.toggled.connect(lambda _c: self._apply_filter())
+        # ADR-155: retired securities are hidden from every other read path, so
+        # this is the one place they can be seen — and put back.
+        self._show_archived = QCheckBox("Show retired")
+        self._show_archived.setToolTip(
+            "Also list securities you've stopped tracking after closing the "
+            "position. Select one and click 'Track again' to restore it."
+        )
+        self._show_archived.toggled.connect(lambda _c: self._reload_table())
         self._count_label = QLabel("")
         tokens.themed(self._count_label, "QLabel { color: {muted}; }")
         filter_row.addWidget(QLabel("Filter:"))
         filter_row.addWidget(self._search_edit, 1)
         filter_row.addWidget(self._held_only)
+        filter_row.addWidget(self._show_archived)
         filter_row.addWidget(self._count_label)
         prices_layout.addLayout(filter_row)
 
@@ -179,6 +188,15 @@ class SecuritiesDialog(QDialog):
 
         open_row = QHBoxLayout()
         open_row.addStretch(1)
+        # ADR-155: the inverse of the close-out's "stop tracking" prompt.
+        self._track_btn = QPushButton("Track again")
+        self._track_btn.setToolTip(
+            "Restore a retired security: it returns to this list and to the "
+            "price refresh."
+        )
+        self._track_btn.clicked.connect(self._on_track_again)
+        self._track_btn.setVisible(False)
+        open_row.addWidget(self._track_btn)
         self._merge_btn = QPushButton("Merge…")
         self._merge_btn.setToolTip(
             "Combine the selected security with another record for the same "
@@ -240,9 +258,12 @@ class SecuritiesDialog(QDialog):
         repository, then render through the current search / held-only filter.
         Called on open and after any write (refresh, backfill, manual price,
         Stock Record edit)."""
-        self._all_securities = self._repo.list_securities()
+        self._all_securities = self._repo.list_securities(
+            include_archived=self._show_archived.isChecked(),
+        )
         self._latest = self._repo.latest_prices()
         self._held_ids = self._repo.securities_currently_held()
+        self._track_btn.setVisible(self._show_archived.isChecked())
         self._apply_filter()
 
     def _apply_filter(self) -> None:
@@ -260,7 +281,10 @@ class SecuritiesDialog(QDialog):
         self._table.setRowCount(len(visible))
         for i, s in enumerate(visible):
             self._table.setItem(i, 0, QTableWidgetItem(s.symbol or ""))
-            self._table.setItem(i, 1, QTableWidgetItem(s.name))
+            # ADR-155: a retired security is only ever visible here, so say so
+            # in the row itself rather than relying on the checkbox for context.
+            name = f"{s.name}  (retired)" if s.archived_at else s.name
+            self._table.setItem(i, 1, QTableWidgetItem(name))
             price_row = self._latest.get(s.id)
             if price_row is not None:
                 price_item = QTableWidgetItem(f"{price_row.price:,.4f}".rstrip("0").rstrip("."))
@@ -277,6 +301,29 @@ class SecuritiesDialog(QDialog):
         total = len(self._all_securities)
         suffix = "" if held_only else f" · {len(self._held_ids)} held"
         self._count_label.setText(f"Showing {len(visible)} of {total}{suffix}")
+
+    # ── retire / restore (ADR-155) ──────────────────────────────────────
+
+    def _on_track_again(self) -> None:
+        """Un-retire the selected security: it returns to the list and to the
+        next price refresh. Nothing else changes — retiring only ever gated
+        display and pricing."""
+        row = self._table.currentRow()
+        if not (0 <= row < len(self._row_securities)):
+            QMessageBox.information(
+                self, "Track again", "Select a retired security first.",
+            )
+            return
+        security = self._row_securities[row]
+        if not security.archived_at:
+            QMessageBox.information(
+                self, "Track again",
+                f"{security.symbol or security.name} is already being tracked.",
+            )
+            return
+        self._repo.unarchive_security(security.id)
+        self._repo.commit()
+        self._reload_table()
 
     # ── stock record ────────────────────────────────────────────────────
 
