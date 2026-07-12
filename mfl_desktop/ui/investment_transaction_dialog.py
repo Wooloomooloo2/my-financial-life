@@ -25,9 +25,14 @@ Field flow:
     term — paid to the seller on a buy, received on a sell — that is part of the
     cash but NOT the bond's cost basis (it nets against the first coupon). The
     signed cash impact is `∓ (total + accrued)`.
-    **Reinvested dividend / Shares in-out** — Qty (+ optional Price for basis);
-    cash impact 0. **Dividend / Interest / Cap-gain** — an Amount-in field
-    replaces Qty/Price. **Cash in/out** — an Amount field only, no security.
+    **Reinvested dividend** — the same tri-field group, with the total labelled
+    **Dividend amount** (qty × price × multiplier, no commission leg): it's the
+    distribution figure on the statement, so it both checks the shares/price and
+    lets you work backwards from the cash value to the share count. The stored
+    cash impact is still 0 — a reinvest moves no cash. **Shares in-out** — Qty
+    (+ optional Price for basis); cash impact 0. **Dividend / Interest /
+    Cap-gain** — an Amount-in field replaces Qty/Price. **Cash in/out** — an
+    Amount field only, no security.
 
 The stored ``txn.amount`` is always the SIGNED CASH IMPACT, so cash balance =
 SUM(amount) holds (ADR-043); ``txn.accrued_interest`` (ADR-093) carries the bond
@@ -115,6 +120,14 @@ def _kind(action: str) -> str:
     if a == "cash":
         return "cash"
     return "income"          # div / intinc / cglong / cgshort
+
+
+def _solves_total(kind: str) -> bool:
+    """Actions whose qty ⇄ price ⇄ total group is live. A reinvest moves no cash,
+    but its **value** (qty × price × multiplier) is the distribution figure on the
+    statement — showing it lets you check the shares/price, or work backwards from
+    the dividend amount to the share count."""
+    return kind in ("buy", "sell", "reinvest")
 
 
 class InvestmentTransactionDialog(QDialog):
@@ -450,7 +463,7 @@ class InvestmentTransactionDialog(QDialog):
     def _on_instrument_changed(self, _idx: int) -> None:
         self._apply_action_rules()
         # Multiplier may have changed (stock↔bond↔option) — re-solve the total.
-        if not self._loading and _kind(self._current_action()) in ("buy", "sell"):
+        if not self._loading and _solves_total(_kind(self._current_action())):
             self._solve_trade_field(self._trade_edit_order[-1])
 
     def _on_multiplier_field_changed(self, *_args) -> None:
@@ -458,13 +471,17 @@ class InvestmentTransactionDialog(QDialog):
         the tri-field group and refresh the hint."""
         if (
             not self._loading and not self._recomputing
-            and _kind(self._current_action()) in ("buy", "sell")
+            and _solves_total(_kind(self._current_action()))
         ):
             self._solve_trade_field(self._trade_edit_order[-1])
         self._recompute_hint()
 
     def _on_action_changed(self, _idx: int) -> None:
         self._apply_action_rules()
+        # The commission leg only applies to a trade, so switching Buy ⇄ Reinvest
+        # changes the total — re-solve whichever leg the user left alone.
+        if not self._loading and _solves_total(_kind(self._current_action())):
+            self._solve_trade_field(self._trade_edit_order[-1])
 
     def _apply_action_rules(self) -> None:
         kind = _kind(self._current_action())
@@ -474,7 +491,10 @@ class InvestmentTransactionDialog(QDialog):
         show_sec = kind != "cash"
         show_qty = kind in ("buy", "sell", "reinvest", "shares")
         show_price = kind in ("buy", "sell", "reinvest", "shares")
-        show_total = kind in ("buy", "sell")
+        # A reinvest shows the same tri-field total, labelled as the distribution
+        # amount — no cash moves, but it's the figure to check against the
+        # statement (and you can type it to back out the share count).
+        show_total = _solves_total(kind)
         show_commission = kind in ("buy", "sell")
         show_accrued = is_bond and kind in ("buy", "sell")
         show_amount = kind in ("income", "cash")
@@ -514,6 +534,15 @@ class InvestmentTransactionDialog(QDialog):
         else:
             self._set_label(self._qty, "Quantity:")
             self._set_label(self._price, "Price:")
+
+        # The total row is a cost on a trade and a distribution value on a
+        # reinvest — same maths, different name.
+        if kind == "reinvest":
+            self._set_label(self._total, "Dividend amount:")
+            self._total.setPlaceholderText("cash value (quantity × price)")
+        else:
+            self._set_label(self._total, "Total cost:")
+            self._total.setPlaceholderText("principal (qty × price × size ± fee)")
 
         # On create, default income actions to *Investment income* and the
         # manual Cash action to Uncategorised — until the user picks otherwise.
@@ -592,7 +621,7 @@ class InvestmentTransactionDialog(QDialog):
         if (
             not self._loading
             and not self._recomputing
-            and _kind(self._current_action()) in ("buy", "sell")
+            and _solves_total(_kind(self._current_action()))
         ):
             order = self._trade_edit_order
             if field in order:
@@ -617,14 +646,21 @@ class InvestmentTransactionDialog(QDialog):
         commission and the instrument multiplier, if both legs are present (and
         the divisor is non-zero). Total = qty × price × m + s·commission, where
         m is the value multiplier and s = +1 for a Buy (the fee adds to the cash
-        out) and −1 for a Sell (the fee nets off the proceeds). No-op when a
+        out) and −1 for a Sell (the fee nets off the proceeds). A reinvest has no
+        commission leg, so its total is simply qty × price × m. No-op when a
         needed value is missing."""
+        kind = _kind(self._current_action())
         qty = _to_decimal(self._qty.text())
         price = _to_decimal(self._price.text())
         total = _to_decimal(self._total.text())
-        comm = _to_decimal(self._commission.text()) or Decimal(0)
+        # The commission row is Buy/Sell-only — ignore any text left behind in it
+        # after switching action, so a reinvest's value stays exactly qty × price.
+        comm = (
+            (_to_decimal(self._commission.text()) or Decimal(0))
+            if kind in ("buy", "sell") else Decimal(0)
+        )
         m = self._multiplier()
-        s = Decimal(1) if _kind(self._current_action()) == "buy" else Decimal(-1)
+        s = Decimal(1) if kind == "buy" else Decimal(-1)
         self._recomputing = True
         try:
             if target == "total" and qty is not None and price is not None:
@@ -652,7 +688,12 @@ class InvestmentTransactionDialog(QDialog):
             base = ("Sell — enter any two of quantity, price, total; the third "
                     "fills in. Total = quantity × price × size − commission.")
         elif kind == "reinvest":
-            base = "Reinvested dividend — no cash moves; counts as income."
+            base = ("Reinvested dividend — no cash moves; counts as income. "
+                    "Enter any two of quantity, price, dividend amount; the "
+                    "third fills in.")
+            total = _to_decimal(self._total.text())
+            if total is not None:
+                base += f"  →  value {abs(total):,.2f}"
         elif kind == "shares":
             base = "Share transfer — no cash moves. Price is optional (cost basis)."
         elif kind == "split":
