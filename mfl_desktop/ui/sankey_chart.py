@@ -114,6 +114,36 @@ class SankeyChart(QWidget):
             return f"{pct:.0f}%"
         return fmt_currency(value, symbol=self._symbol)
 
+    def _denominator_for(self, node: SankeyNode, col: int) -> float:
+        """What a node's percentage is a share of (ADR-155).
+
+        A category is a share of **its own side's** total: an expense category
+        reads as a percentage of expenditure ("Household is 28% of my spending"),
+        an income category as a percentage of income. Those each sum to 100%.
+
+        A **balance node** — Savings or Deficit — is the exception, and getting
+        it wrong is what made a 49% saving rate report as 98%. Savings is
+        ``income - expense``, appended to the *expense* side to make the two
+        sides fill the spine; but it is deliberately NOT part of
+        ``total_expense``. Dividing it by expenditure therefore measures it
+        against a total that excludes it — for the owner's file,
+        ``24,216 / 24,763 = 98%``, a number that means nothing.
+
+        Savings and Deficit are both shares of **income**. That is the saving
+        rate the summary rail already states ("Saving rate: 49.4% of income"), so
+        the two agree instead of contradicting each other on the same screen; and
+        it is already what Deficit does, since Deficit lands on the income side.
+
+        The cost, accepted deliberately: the expense side now mixes denominators,
+        so its labels no longer sum to 100%. Savings is not a spending category,
+        so it never belonged in that sum.
+        """
+        if node.is_balance:
+            return self._total_income
+        if col == 0:
+            return max(self._total_income, self._total_expense)
+        return self._total_income if col < 0 else self._total_expense
+
     # ── layout ──
 
     def _assign_columns(self) -> tuple[int, int]:
@@ -242,11 +272,8 @@ class SankeyChart(QWidget):
 
         # Boxes + labels.
         for col, nodes in cols.items():
-            side_total = self._total_income if col < 0 else self._total_expense
-            if col == 0:
-                side_total = max(self._total_income, self._total_expense)
             for n in nodes:
-                self._paint_node(painter, n, col, side_total)
+                self._paint_node(painter, n, col, self._denominator_for(n, col))
 
         # Spine caption.
         if self._spine and self._spine._rect is not None:
