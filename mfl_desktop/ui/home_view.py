@@ -277,6 +277,10 @@ class HomeView(QWidget):
         # refresh_if_stale() skip a rebuild the user cannot tell apart from what
         # is already on screen.
         self._rendered_token: Optional[tuple] = None
+        # ADR-157: the last gathered HomeData and the token it was gathered for,
+        # so folding in the off-thread cards doesn't re-run the whole query pass.
+        self._last_data = None
+        self._last_token: Optional[tuple] = None
 
     def set_repo(self, repo) -> None:
         """Point the dashboard at a different file (File ▸ Open swaps the live
@@ -286,6 +290,9 @@ class HomeView(QWidget):
         # The generation counter is per-Repository, so a token from the old file
         # says nothing about the new one. Drop it: the next refresh must rebuild.
         self._rendered_token = None
+        # And the cached data belongs to the OLD file — never reuse it (ADR-157).
+        self._last_data = None
+        self._last_token = None
 
     # ── build ──
 
@@ -317,17 +324,32 @@ class HomeView(QWidget):
         self.refresh()
         return True
 
-    def refresh(self) -> None:
+    def refresh(self, *, reuse_data: bool = False) -> None:
+        """Rebuild the dashboard.
+
+        ``reuse_data`` (ADR-157) skips the re-gather and redraws from the data of
+        the last render. Only for a caller that knows the *data* hasn't moved and
+        only the presentation has — specifically :meth:`_on_bg_ready`, which folds
+        the off-thread cards into a dashboard it just drew. ``gather_home_data``
+        is ~85% of a refresh (480ms of 553ms against the live file), so redoing it
+        to add a sparkline was most of a second of pure waste. Guarded on the
+        freshness token anyway: if the data *did* move under us, we re-gather.
+        """
         if not self._repo.is_open():
             return
         # Sampled BEFORE the rebuild, so a write that lands while we're building
         # (a background price refresh) leaves the token stale rather than being
         # wrongly recorded as already on screen.
         token = self._freshness_token()
-        try:
-            data = gather_home_data(self._repo, date.today())
-        except Exception:
-            return
+        if reuse_data and self._last_data is not None and self._last_token == token:
+            data = self._last_data
+        else:
+            try:
+                data = gather_home_data(self._repo, date.today())
+            except Exception:
+                return
+            self._last_data = data
+            self._last_token = token
         container = QWidget()
         tokens.themed(container, "background: {canvas};")
         root = QVBoxLayout(container)
@@ -528,7 +550,12 @@ class HomeView(QWidget):
     def _on_bg_ready(self, payload) -> None:
         """Background cards landed (main thread, queued). Cache them and repaint
         Home; refresh() will find them cached for the current signature and draw
-        them — or, if the data has since moved, miss and recompute."""
+        them — or, if the data has since moved, miss and recompute.
+
+        ADR-157: ``reuse_data`` — only the trend/perf cards changed, and this is a
+        dashboard we ourselves just drew, so re-running the whole query pass to
+        add a sparkline is waste. refresh() still re-gathers if the data actually
+        moved while the worker was out."""
         sig = payload.get("sig")
         if self._bg_pending == sig:
             self._bg_pending = None
@@ -536,7 +563,7 @@ class HomeView(QWidget):
         self._invest_perf = payload.get("invest")
         self._bg_sig = sig
         if self._repo.is_open():
-            self.refresh()
+            self.refresh(reuse_data=True)
 
     def _budget_card(self, data) -> Optional[_Card]:
         b = data.budget

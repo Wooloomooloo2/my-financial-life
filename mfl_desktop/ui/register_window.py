@@ -627,8 +627,17 @@ class RegisterWindow(QMainWindow):
     # ── view modes ──
 
     def _show_home(self) -> None:
-        """Show the Home dashboard page (ADR-075) and refresh it from the DB."""
-        self._home_view.refresh()
+        """Show the Home dashboard page (ADR-075), refreshing it if the data has
+        moved since it was last drawn.
+
+        ADR-157: this was an unconditional rebuild, and it is on the sidebar's
+        selection path — which fires more than once during startup, and again on
+        every return to Home. Measured against the live file, Home was being
+        rebuilt five times in the first four seconds of launch (206 + 142 + 426 +
+        217 + 180 ms, including a 797ms UI freeze) before the user had touched
+        anything. ``refresh_if_stale`` is the same guard ADR-153 put on the
+        activation path; the two together are the whole of it."""
+        self._home_view.refresh_if_stale()
         self._main_stack.setCurrentIndex(0)
         self._account = None
         self._update_window_title()
