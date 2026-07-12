@@ -14,6 +14,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
+import shiboken6
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -175,9 +176,10 @@ class _AccordionHeader(QFrame):
 
 
 class _HomeBgSignals(QObject):
-    """Carries the background-computed Home cards back to the main thread. Lives
-    on the HomeView (main thread), so the cross-thread emit is auto-queued onto
-    the UI event loop."""
+    """Carries the background-computed Home cards back to the main thread. Created
+    on the main thread and owned by the runnable that emits it (ADR-153), so the
+    cross-thread emit is auto-queued onto the UI event loop and the sender cannot
+    outlive-then-predecease its emitter."""
     done = Signal(object)   # {"sig": str, "trend": ... | None, "invest": ... | None}
 
 
@@ -185,22 +187,49 @@ class _HomeBgRunnable(QRunnable):
     """Computes the Home cards too heavy for the fast path — the net-worth trend
     and investment performance (ADR-150) — off the UI thread in one pass, sharing
     one background Repository connection (a sqlite connection can't cross
-    threads). Each card's failure is isolated so one never sinks the other."""
+    threads). Each card's failure is isolated so one never sinks the other.
 
-    def __init__(self, db_path, display_ccy, today, sig, signals) -> None:
+    ADR-153: the runnable **owns** its signals object rather than borrowing the
+    view's, so a HomeView that dies while a pass is in flight (the window closes)
+    doesn't leave the worker holding the sender. Emitting *to* a destroyed
+    receiver is safe — Qt disconnects it automatically. This mirrors
+    ``_MarketRefreshRunnable`` in register_window.py.
+
+    Ownership alone is not enough, though. On **app shutdown** Qt/PySide destroy
+    the C++ QObject regardless of who holds the Python reference, so a pass still
+    running when the user quits emits from a deleted sender and raises
+    ``RuntimeError: Signal source has been deleted`` on the worker thread. Every
+    emit therefore goes through :meth:`_emit`, which checks the sender is still
+    alive. Draining the thread pool on quit was rejected — it would block the UI
+    for the length of a full net-worth trend."""
+
+    def __init__(self, db_path, display_ccy, today, sig) -> None:
         super().__init__()
         self._db_path = db_path
         self._ccy = display_ccy
         self._today = today
         self._sig = sig
-        self._signals = signals
+        self.signals = _HomeBgSignals()
+
+    def _emit(self, payload: dict) -> None:
+        """Hand the result back, unless the app is being torn down under us.
+
+        ``isValid`` is the shiboken check for "the C++ object behind this Python
+        wrapper still exists". The ``try`` is not redundant: shutdown races this
+        worker, so the object can be destroyed between the check and the emit.
+        Dropping the payload is exactly right — the receiver is gone too."""
+        try:
+            if shiboken6.isValid(self.signals):
+                self.signals.done.emit(payload)
+        except RuntimeError:
+            pass
 
     def run(self) -> None:
         trend = invest = None
         try:
             bg = Repository(self._db_path)
         except Exception:
-            self._signals.done.emit({"sig": self._sig, "trend": None, "invest": None})
+            self._emit({"sig": self._sig, "trend": None, "invest": None})
             return
         try:
             try:
@@ -213,9 +242,7 @@ class _HomeBgRunnable(QRunnable):
                 invest = None
         finally:
             bg.close()
-        self._signals.done.emit(
-            {"sig": self._sig, "trend": trend, "invest": invest}
-        )
+        self._emit({"sig": self._sig, "trend": trend, "invest": invest})
 
 
 class HomeView(QWidget):
@@ -246,20 +273,57 @@ class HomeView(QWidget):
         self._invest_perf = None         # InvestmentPerf | None
         self._bg_sig: Optional[str] = None
         self._bg_pending: Optional[str] = None
-        self._bg_signals = _HomeBgSignals()
-        self._bg_signals.done.connect(self._on_bg_ready)
+        # ADR-153: what the currently-rendered dashboard was built from. Lets
+        # refresh_if_stale() skip a rebuild the user cannot tell apart from what
+        # is already on screen.
+        self._rendered_token: Optional[tuple] = None
 
     def set_repo(self, repo) -> None:
         """Point the dashboard at a different file (File ▸ Open swaps the live
         repo — ADR-092). Without this the view keeps reading the old, now-closed
         repo and shows stale data until restart. Caller refreshes after."""
         self._repo = repo
+        # The generation counter is per-Repository, so a token from the old file
+        # says nothing about the new one. Drop it: the next refresh must rebuild.
+        self._rendered_token = None
 
     # ── build ──
+
+    def _freshness_token(self) -> tuple:
+        """What the dashboard's contents depend on (ADR-153). The data generation
+        covers every edit; ``date.today()`` covers the date-relative cards (bills
+        due, "last 30 days") on an app left open across midnight — the same
+        rollover the Schedules cue re-checks on activation (ADR-063)."""
+        return (self._repo.data_generation(), date.today())
+
+    def refresh_if_stale(self) -> bool:
+        """Rebuild only if the result would actually differ from what's on screen.
+
+        The register window refreshes Home whenever it regains activation, so that
+        edits made in another window show up (ADR-075). But activation fires on
+        *every* return of focus — closing a report, switching to a register,
+        alt-tabbing — and a full rebuild is expensive (it re-derives every account
+        value and reconstructs the whole card tree). Overwhelmingly it lands on
+        data that has not moved, and paints an identical dashboard.
+
+        Comparing the freshness token first keeps the ADR-075 guarantee (a real
+        edit still bumps the generation, so it still redraws) while making the
+        common no-op case cost a couple of microseconds. Returns whether it
+        rebuilt."""
+        if not self._repo.is_open():
+            return False
+        if self._freshness_token() == self._rendered_token:
+            return False
+        self.refresh()
+        return True
 
     def refresh(self) -> None:
         if not self._repo.is_open():
             return
+        # Sampled BEFORE the rebuild, so a write that lands while we're building
+        # (a background price refresh) leaves the token stale rather than being
+        # wrongly recorded as already on screen.
+        token = self._freshness_token()
         try:
             data = gather_home_data(self._repo, date.today())
         except Exception:
@@ -329,6 +393,7 @@ class HomeView(QWidget):
         if old is not None:
             old.deleteLater()
         self._container = container
+        self._rendered_token = token
 
     def _build_cards(self, data, invest=None) -> list:
         return [
@@ -452,11 +517,13 @@ class HomeView(QWidget):
         if db_path is None:
             return
         self._bg_pending = sig
-        QThreadPool.globalInstance().start(
-            _HomeBgRunnable(
-                str(db_path), display_ccy, date.today(), sig, self._bg_signals,
-            )
-        )
+        runnable = _HomeBgRunnable(str(db_path), display_ccy, date.today(), sig)
+        # Connect to the runnable's OWN signals object (ADR-153). Qt drops the
+        # connection automatically if this view is destroyed first, so a pass
+        # still in flight when Home goes away lands harmlessly instead of
+        # emitting from a deleted sender.
+        runnable.signals.done.connect(self._on_bg_ready)
+        QThreadPool.globalInstance().start(runnable)
 
     def _on_bg_ready(self, payload) -> None:
         """Background cards landed (main thread, queued). Cache them and repaint

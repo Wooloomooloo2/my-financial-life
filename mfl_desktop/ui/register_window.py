@@ -574,17 +574,23 @@ class RegisterWindow(QMainWindow):
         ADR-063). The overdue/due-soon split is date-relative, so an app
         left open across midnight — or a schedule posted from another
         window — should re-colour the button without forcing a relaunch.
-        Cheap enough to run on every activation (a handful of schedules)."""
+        Cheap enough to run on every activation (a handful of schedules).
+
+        ADR-153: Home is refreshed here too (ADR-075, so edits made elsewhere show
+        up), but *conditionally*. Activation fires on every return of focus —
+        closing a report, switching to a register, alt-tabbing — and an
+        unconditional rebuild cost ~450ms of synchronous work on the UI thread,
+        which is what made closing a report feel like it stuck.
+        ``refresh_if_stale`` keeps the guarantee (a real edit still redraws) and
+        makes the overwhelmingly common unchanged case free."""
         super().changeEvent(event)
         if event.type() == QEvent.ActivationChange and self.isActiveWindow():
             self._refresh_schedules_cue()
-            # ADR-075: keep the Home dashboard fresh when it's the visible page
-            # and the window regains focus (edits made elsewhere show up).
             # getattr-guarded: an ActivationChange can fire during construction
             # before the stack exists.
             stack = getattr(self, "_main_stack", None)
             if stack is not None and stack.currentIndex() == 0:
-                self._home_view.refresh()
+                self._home_view.refresh_if_stale()
 
     # ── sidebar plumbing ──
 
@@ -1228,6 +1234,18 @@ class RegisterWindow(QMainWindow):
                 "Update finished with errors:", errors,
             )
 
+    def on_background_data_written(self) -> None:
+        """A launch refresh (FX or prices, ADR-035/044) wrote on its own
+        connection. Invalidate the derived caches and redraw the visible page so
+        the new figures land (ADR-153).
+
+        Only called when the worker actually wrote something, so a launch that
+        fetches nothing — the common case, both refreshes being throttled to once
+        a day — costs nothing at all."""
+        if not self._repo.is_open():
+            return   # file closed/swapped while the launch refresh was in flight
+        self._refresh_after_market_update()
+
     def _refresh_after_market_update(self) -> None:
         """Reflect new prices/rates in the sidebar and the visible page WITHOUT
         changing the current view. ``_refresh_sidebar_balances`` re-selects an
@@ -1235,6 +1253,12 @@ class RegisterWindow(QMainWindow):
         account — so reload preserving selection instead. The sidebar's reload
         has no 'home' restore case (it falls back to All transactions), so when
         Home is showing we re-assert it after the reload."""
+        # ADR-153: the prices/rates were written by a worker on its OWN sqlite
+        # connection, which neither our connection's total_changes nor
+        # PRAGMA data_version can see. Say so explicitly, or every cache keyed on
+        # data_generation (account values; the Home freshness token) would still
+        # be holding pre-refresh figures.
+        self._repo.note_external_change()
         on_home = self._main_stack.currentIndex() == 0
         self._refresh_sidebar_keep_selection()
         if on_home:

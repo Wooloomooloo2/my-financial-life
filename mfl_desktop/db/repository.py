@@ -872,10 +872,62 @@ class Repository:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA synchronous = NORMAL")
+        # ADR-153: generation-keyed memo for compute_account_values, the single
+        # most expensive derivation in the app and the one the UI recomputes
+        # most often. See data_generation() for how staleness is detected.
+        self._ext_gen = 0
+        self._acct_values_gen: Optional[tuple] = None
+        self._acct_values_cache: dict[tuple, dict[int, Decimal]] = {}
 
     @property
     def db_path(self) -> Path:
         return self._db_path
+
+    # ── cache invalidation (ADR-153) ─────────────────────────────────────────
+
+    def data_generation(self) -> tuple:
+        """A cheap token that changes whenever the data behind a derived value
+        may have moved. Callers use it to skip recomputing — or re-rendering —
+        against a database that hasn't changed.
+
+        It combines three sources, because no single one sees every writer:
+
+        * ``total_changes`` — rows written through *this* connection. A plain
+          attribute (~90ns, no SQL). Covers every edit made through the UI.
+        * ``PRAGMA data_version`` — commits made by another *process* (~12µs).
+        * ``_ext_gen`` — bumped by hand via :meth:`note_external_change` for the
+          background threads that write through their own ``Repository`` on
+          their own connection (the launch and toolbar price/FX refreshes,
+          ADR-035/044/116).
+
+        That third source is the one that matters, and it is not redundant.
+        ``data_version`` is *documented* to observe other connections' commits,
+        and in one probe it did observe a sibling connection in our own process —
+        but in another it did not, and I could not make the difference
+        deterministic. So the contract is explicit notification; ``data_version``
+        is a cheap backstop, not the guarantee. **Anything that writes through
+        its own connection must call** :meth:`note_external_change` **on the main
+        thread when it lands**, or callers will hold stale derived values.
+        """
+        return (
+            self._conn.total_changes,
+            self._conn.execute("PRAGMA data_version").fetchone()[0],
+            self._ext_gen,
+        )
+
+    def note_external_change(self) -> None:
+        """Declare that a background thread wrote through its own connection, so
+        anything keyed on :meth:`data_generation` must recompute. Call on the
+        main thread when the worker's result lands (ADR-153)."""
+        self._ext_gen += 1
+
+    @property
+    def total_writes(self) -> int:
+        """Rows written through this connection since it was opened. Lets a
+        background worker tell whether its pass actually changed anything, so it
+        only asks the main thread to invalidate when there is something to see
+        (ADR-153)."""
+        return self._conn.total_changes
 
     def save_copy(self, dest_path: Path | str) -> None:
         """Atomic online backup of the current database to dest_path.
@@ -1374,7 +1426,32 @@ class Repository:
         vs the projected (whole-ledger) balance. Prices are always the latest on
         file; only the transaction set is dated.
 
-        Closed accounts are omitted unless ``include_closed=True`` (ADR-069)."""
+        Closed accounts are omitted unless ``include_closed=True`` (ADR-069).
+
+        Memoised against :meth:`data_generation` (ADR-153). This is the app's
+        most expensive derivation — it replays every investment account's whole
+        ledger through the FIFO holdings engine — and the UI calls it on every
+        sidebar reload and every Home refresh, almost always for data that has
+        not moved. The cache is keyed on the arguments as well as the
+        generation, since ``as_of_date`` changes the answer."""
+        key = (include_closed, as_of_date)
+        gen = self.data_generation()
+        if gen == self._acct_values_gen:
+            hit = self._acct_values_cache.get(key)
+            if hit is not None:
+                # Copy: callers treat the result as theirs to mutate, and Decimal
+                # values are immutable, so a shallow copy fully isolates them.
+                return dict(hit)
+        else:
+            self._acct_values_cache.clear()
+            self._acct_values_gen = gen
+        values = self._compute_account_values_uncached(include_closed, as_of_date)
+        self._acct_values_cache[key] = values
+        return dict(values)
+
+    def _compute_account_values_uncached(
+        self, include_closed: bool, as_of_date: Optional[str],
+    ) -> dict[int, Decimal]:
         balances = self.compute_account_balances(
             include_closed=include_closed, as_of_date=as_of_date,
         )

@@ -12,9 +12,10 @@ import argparse
 import sys
 from pathlib import Path
 
+import shiboken6
 from PySide6.QtWidgets import QApplication
 
-from PySide6.QtCore import QThreadPool, QRunnable
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from mfl_desktop import launch, sandbox
 from mfl_desktop.app_session import remember_last_db
@@ -30,31 +31,68 @@ from mfl_desktop.ui.theme import apply_theme, SETTING_KEY as THEME_SETTING_KEY
 from mfl_desktop.version import __version__
 
 
-class _FxRefreshRunnable(QRunnable):
-    """Background launch refresh (ADR-035). Once-per-day at most; silent
-    on failure so a missing API key or a flaky network never blocks the
-    launch path."""
+class _LaunchRefreshSignals(QObject):
+    """Announces that a launch refresh actually wrote something (ADR-153)."""
+    wrote = Signal()
+
+
+class _LaunchRefreshRunnable(QRunnable):
+    """Shared plumbing for the two background launch refreshes.
+
+    ADR-153: each writes through its **own** sqlite connection, which the main
+    thread's ``data_generation`` cannot reliably see (``total_changes`` is
+    per-connection). Before ADR-153 that didn't matter — the window rebuilt Home
+    from scratch on the next activation regardless, so the new prices appeared by
+    luck. Now that derived values are cached, a writer on another connection has
+    to say so, or the user sees pre-refresh figures until their next edit.
+
+    So each subclass reports whether its pass changed any rows, and only then is
+    the main thread asked to invalidate and redraw. The emit is guarded because
+    the app can be torn down while a launch refresh is still in flight."""
 
     def __init__(self, db_path: Path) -> None:
         super().__init__()
         self._db_path = db_path
+        self.signals = _LaunchRefreshSignals()
+
+    def _work(self, bg: Repository) -> None:
+        raise NotImplementedError
 
     def run(self) -> None:
-        # Use a dedicated Repository connection — the main-thread
-        # Repository's sqlite3 connection isn't safe to share across
-        # threads, and the launch refresh is its own atomic unit.
+        # A dedicated Repository connection — the main-thread Repository's
+        # sqlite3 connection isn't safe to share across threads, and the launch
+        # refresh is its own atomic unit.
+        wrote = False
         try:
             bg = Repository(self._db_path)
             try:
-                refresh_latest_into(bg)
+                before = bg.total_writes
+                self._work(bg)
+                wrote = bg.total_writes != before
             finally:
                 bg.close()
         except Exception:
             # Swallow — the user can always hit Refresh Now manually.
-            pass
+            return
+        if not wrote:
+            return
+        try:
+            if shiboken6.isValid(self.signals):
+                self.signals.wrote.emit()
+        except RuntimeError:
+            pass   # app torn down mid-refresh; nobody left to tell
 
 
-class _PriceRefreshRunnable(QRunnable):
+class _FxRefreshRunnable(_LaunchRefreshRunnable):
+    """Background launch refresh (ADR-035). Once-per-day at most; silent
+    on failure so a missing API key or a flaky network never blocks the
+    launch path."""
+
+    def _work(self, bg: Repository) -> None:
+        refresh_latest_into(bg)
+
+
+class _PriceRefreshRunnable(_LaunchRefreshRunnable):
     """Background launch refresh of security prices (ADR-044/047). Mirrors the
     FX runnable: own Repository connection, silent on failure (missing Tiingo
     key / flaky network never blocks launch).
@@ -69,21 +107,10 @@ class _PriceRefreshRunnable(QRunnable):
       3. refresh_latest_prices_into — today's close (own 24h throttle).
     """
 
-    def __init__(self, db_path: Path) -> None:
-        super().__init__()
-        self._db_path = db_path
-
-    def run(self) -> None:
-        try:
-            bg = Repository(self._db_path)
-            try:
-                bg.seed_prices_from_transactions()
-                backfill_missing_history_into(bg)
-                refresh_latest_prices_into(bg)
-            finally:
-                bg.close()
-        except Exception:
-            pass
+    def _work(self, bg: Repository) -> None:
+        bg.seed_prices_from_transactions()
+        backfill_missing_history_into(bg)
+        refresh_latest_prices_into(bg)
 
 
 APP_NAME = "MFL"
@@ -316,12 +343,18 @@ def main(argv: list[str] | None = None) -> int:
     # Background launch refresh of FX rates (ADR-035). No-op when no API
     # key is set, when the last refresh was less than 24h ago, or when
     # there are no non-USD accounts to fetch rates for.
-    QThreadPool.globalInstance().start(_FxRefreshRunnable(db_path))
-
+    #
     # Background launch refresh of security prices (ADR-044). No-op when no
     # Tiingo key is set, when the last refresh was < 24h ago, or when no
     # securities carry a ticker symbol.
-    QThreadPool.globalInstance().start(_PriceRefreshRunnable(db_path))
+    #
+    # ADR-153: both write on their own connection, so each tells the window when
+    # it actually wrote — otherwise the cached account values would keep showing
+    # pre-refresh prices. Queued (worker → main thread), and only when there is
+    # something to show, so a no-op launch costs nothing.
+    for runnable in (_FxRefreshRunnable(db_path), _PriceRefreshRunnable(db_path)):
+        runnable.signals.wrote.connect(win.on_background_data_written)
+        QThreadPool.globalInstance().start(runnable)
 
     return app.exec()
 

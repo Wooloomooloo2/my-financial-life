@@ -63,8 +63,15 @@ def _run(body: str) -> subprocess.CompletedProcess:
 def test_deleting_the_clicked_card_synchronously_would_crash():
     """Pin the mechanism itself: if the receiver of a mouse press is destroyed
     while the press is still unwinding, Qt segfaults. If this ever stops
-    crashing, Qt changed and the guard below may be relaxed."""
-    r = _run("""
+    crashing, Qt changed and the guard below may be relaxed.
+
+    Retried, because a use-after-free is *undefined behaviour*, not a guaranteed
+    fault: sometimes the freed memory is still mapped and readable and the click
+    unwinds cleanly. A single attempt made this canary fail intermittently under
+    CPU load (ADR-153). "Crashes at least once in N tries" is the honest form of
+    the claim — if Qt ever really did make this safe, every attempt would survive
+    and the assertion would still fire."""
+    body = """
         from mfl_desktop.ui.home_view import _Card
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
 
@@ -86,19 +93,21 @@ def test_deleting_the_clicked_card_synchronously_would_crash():
         app.processEvents()
         QTest.mouseClick(card, Qt.LeftButton)
         print("SURVIVED")
-    """)
-    assert r.returncode != 0, (
-        "expected a crash from the unguarded pattern; Qt may have changed "
-        f"(stdout={r.stdout!r})"
+    """
+    attempts = [_run(body) for _ in range(5)]
+    crashed = [r for r in attempts if r.returncode != 0 and "SURVIVED" not in r.stdout]
+    assert crashed, (
+        "the unguarded pattern survived all 5 attempts; Qt may have changed and "
+        "the ADR-149 guard could be revisited "
+        f"(returncodes={[r.returncode for r in attempts]})"
     )
-    assert "SURVIVED" not in r.stdout
 
 
 def test_real_home_refresh_survives_a_click_that_rebuilds_it():
     """The real HomeView.refresh(), driven by a real click on a real card whose
     slot opens a modal dialog — exactly the crashed call stack."""
     r = _run("""
-        import tempfile, pathlib
+        import tempfile, pathlib, shiboken6
         from mfl_desktop.db.repository import Repository
         from mfl_desktop.ui.home_view import HomeView
 
@@ -118,18 +127,27 @@ def test_real_home_refresh_survives_a_click_that_rebuilds_it():
             home.refresh()
         home.schedules_requested.connect(on_schedules)
 
-        cards = [w for w in home.findChildren(QWidget)
-                 if w.metaObject().className().endswith("_Card")
-                 or type(w).__name__ == "_Card"]
-        clickable = [c for c in cards if getattr(c, "_clickable", False)]
-        assert clickable, "no clickable card found on Home"
+        def live_cards():
+            # Re-queried before EVERY click, never snapshotted. A click that
+            # rebuilds Home destroys the other cards, and so does the ADR-150
+            # background pass when it lands mid-loop; iterating a stale list
+            # would click a freed wrapper and raise RuntimeError. That is a bug
+            # in the test, not the use-after-free this file is about — and it
+            # made the test fail intermittently under CPU load (ADR-153).
+            return [w for w in home.findChildren(QWidget)
+                    if type(w).__name__ == "_Card"
+                    and getattr(w, "_clickable", False)
+                    and shiboken6.isValid(w)]
+
+        assert live_cards(), "no clickable card found on Home"
 
         # Click every clickable card; each rebuilds Home under its own feet.
         for _ in range(3):
-            cards = [w for w in home.findChildren(QWidget)
-                     if type(w).__name__ == "_Card" and getattr(w, "_clickable", False)]
-            for card in cards:
-                QTest.mouseClick(card, Qt.LeftButton)
+            for i in range(len(live_cards())):
+                cards = live_cards()
+                if i >= len(cards):
+                    break            # the rebuild left fewer cards than before
+                QTest.mouseClick(cards[i], Qt.LeftButton)
                 app.processEvents()
         print("SURVIVED")
     """)
