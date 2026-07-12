@@ -125,6 +125,41 @@ _Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold b
 
 ---
 
+## 1b. Defect register (opened 2026-07-12)
+
+**Why this exists:** there was no bug list. Defects were recorded only as "known limitation" footnotes inside individual ADRs, so nobody could see them together — which is how a *wrong-number* bug (ADR-156) sat in a daily-use report, filed as a cosmetic one. This is now the single place a known defect is written down. Add to it rather than to an ADR footnote.
+
+**Caveat on completeness:** the list below is what is *known*, not the result of an audit. It is biased toward code recently worked on (reports, Home, the DB layer). **Imports, budgets, reconcile, scheduled transactions and bank feeds have not been examined for defects.** An audit of those is unscheduled and worth doing before 1.0.
+
+### Open — correctness
+
+- [ ] **Multi-currency folder sums are a naive sum.** A sidebar folder mixing GBP and USD accounts shows an arithmetically meaningless total (no FX conversion). Known and deliberately deferred when it was written; the owner's file *does* now have both currencies, so this is live. Fix mirrors ADR-156: convert per account currency, or show per-currency subtotals.
+- [ ] **Kind-drill misses splits.** The category-kind drill matches a row's own `category_id`, but a split transaction's parent row carries the parent/`NULL` category — so a split whose *lines* carry the kind's categories is skipped. (Recorded in the ADR that introduced the drill.)
+- [ ] **Splits import as a single row** — import fidelity loss; the split structure is flattened.
+- [ ] **A merged security's saved report silently matches nothing.** An Investment Returns report whose filter pins an *absorbed* security id keeps that stale id after a merge; it matches no rows and reports empty rather than erroring or re-pointing.
+- [ ] **Historical net worth understates early points** when FX/price history doesn't reach back far enough — accounts drop out of early buckets. A banner warns, but the series is still wrong at the left edge.
+- [ ] **First price backfill exceeds the Tiingo rate limit.** The first catch-up launch wants ~58 requests against a 50/hour cap → 429s partway through.
+
+### Open — performance (from the 2026-07-12 instrumented-launch investigation)
+
+- [ ] **Quitting the app freezes for ~2.4s** — three stalls at shutdown (1204 + 922 + 320 ms). Undiagnosed; the likely suspect is the WAL checkpoint on clean close (ADR-057).
+- [ ] **Unexplained ~1,596 ms UI freeze during launch** — caught by a UI-thread watchdog but it landed outside instrumented code, so the cause is unknown.
+- [ ] **`AccountSummaryWindow`, `BudgetWindow` and `TransactionsListWindow` reload on every `WindowActivate`** — the same anti-pattern ADR-153/157 fixed for Home, still present on three windows. Alt-tabbing to any of them re-runs a full query.
+- [ ] **`list_category_tree()` is a correlated subquery** re-scanning the split-unrolled view once per category (200 passes over 35k rows, 50–75 ms) — and **every report constructor calls it twice**. A single `GROUP BY` + `LEFT JOIN` returns identical results in half the time. ~100 ms off every report open.
+
+### Open — consistency
+
+- [ ] **The currency-symbol map is duplicated** in `home_view` and `sankey_report_window`. Both are correct today; they should collapse onto `chart_helpers.currency_symbol()` (ADR-156) next time either is touched.
+
+### Closed recently
+
+- [x] **Spending / Income Over Time summed currencies 1:1 — DONE (ADR-156).** The aggregates had no currency awareness at all: dollars were added to pounds and the result stamped with a `£`. On the owner's file (25 USD + 13 GBP accounts) 2025 income read 416,906 where the true figure is 325,410 GBP — overstated ~28%. Both reports now convert and gained a "Display in" selector. **Any figure previously read off these two reports should be treated as wrong.**
+- [x] **Cash Flow Sankey showed a 98% saving rate — DONE (ADR-155).** The Savings node was divided by *expenditure* (which excludes it) instead of income, contradicting the rail's own "Saving rate: 49.4% of income" on the same screen.
+- [x] **Home rebuilt itself 5× at launch — DONE (ADR-153 + ADR-157).** 1,169 ms of redundant synchronous rebuilds including a 797 ms UI freeze, via three unguarded paths (window activation, sidebar navigation, background-card arrival). Now 2 rebuilds / 405 ms.
+- [x] **Latent crash: background Home pass emitted from a destroyed QObject — DONE (ADR-153).** Quitting with a pass in flight raised `RuntimeError: Signal source has been deleted` on the worker thread.
+
+---
+
 ## 2. Workstream K — Packaging, signing & store readiness
 
 > **⚠ SUPERSEDED — distribution reversed twice since this section was written (2026-06-16). Current plan:**

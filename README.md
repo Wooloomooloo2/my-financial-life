@@ -199,7 +199,7 @@ computation factored into dependency-free, offscreen-testable pure modules
 ## Documentation
 
 Architecture and design rationale live as **Architecture Decision Records** in
-[`docs/adr/`](docs/adr/) — 75 and counting, each recording the decision, the
+[`docs/adr/`](docs/adr/) — 156 and counting, each recording the decision, the
 alternatives rejected, and the consequences. Start with the index:
 
 - [`docs/adr/README.md`](docs/adr/README.md) — full ADR index with summaries
