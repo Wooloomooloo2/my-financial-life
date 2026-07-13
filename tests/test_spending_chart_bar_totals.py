@@ -1,4 +1,4 @@
-"""Stack totals are printed above the bars (ADR-154).
+"""Stack totals are printed above the bars (ADR-157).
 
 The stacked-bar chart (Spending Over Time / Income Over Time) showed a grand
 total and an average in the summary panel, and a per-segment value on hover, but

@@ -1,4 +1,4 @@
-# ADR-153 — Window activation stops rebuilding Home; account values are cached
+# ADR-156 — Window activation stops rebuilding Home; account values are cached
 
 **Date:** 2026-07-12
 **Status:** Implemented

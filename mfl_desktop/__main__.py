@@ -32,16 +32,16 @@ from mfl_desktop.version import __version__
 
 
 class _LaunchRefreshSignals(QObject):
-    """Announces that a launch refresh actually wrote something (ADR-153)."""
+    """Announces that a launch refresh actually wrote something (ADR-156)."""
     wrote = Signal()
 
 
 class _LaunchRefreshRunnable(QRunnable):
     """Shared plumbing for the two background launch refreshes.
 
-    ADR-153: each writes through its **own** sqlite connection, which the main
+    ADR-156: each writes through its **own** sqlite connection, which the main
     thread's ``data_generation`` cannot reliably see (``total_changes`` is
-    per-connection). Before ADR-153 that didn't matter — the window rebuilt Home
+    per-connection). Before ADR-156 that didn't matter — the window rebuilt Home
     from scratch on the next activation regardless, so the new prices appeared by
     luck. Now that derived values are cached, a writer on another connection has
     to say so, or the user sees pre-refresh figures until their next edit.
@@ -348,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     # Tiingo key is set, when the last refresh was < 24h ago, or when no
     # securities carry a ticker symbol.
     #
-    # ADR-153: both write on their own connection, so each tells the window when
+    # ADR-156: both write on their own connection, so each tells the window when
     # it actually wrote — otherwise the cached account values would keep showing
     # pre-refresh prices. Queued (worker → main thread), and only when there is
     # something to show, so a no-op launch costs nothing.

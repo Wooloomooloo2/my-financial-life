@@ -1,12 +1,12 @@
-# ADR-156 — Spending / Income Over Time convert to a display currency
+# ADR-159 — Spending / Income Over Time convert to a display currency
 
 **Date:** 2026-07-12
 **Status:** Implemented
-**Related:** ADR-055 (display-currency conversion; the non-persisted "Display in" view preference). ADR-026 (the hand-rolled stacked-bar chart). ADR-088 (Income Over Time as the mirror of Spending Over Time). ADR-129 (net expense — refunds reduce a category's spend). ADR-089/110 (reinvested-dividend income). ADR-154 (bar totals — which added a *fourth* place the hard-coded `£` appeared).
+**Related:** ADR-055 (display-currency conversion; the non-persisted "Display in" view preference). ADR-026 (the hand-rolled stacked-bar chart). ADR-088 (Income Over Time as the mirror of Spending Over Time). ADR-129 (net expense — refunds reduce a category's spend). ADR-089/110 (reinvested-dividend income). ADR-157 (bar totals — which added a *fourth* place the hard-coded `£` appeared).
 
 ## Context
 
-ADR-154 flagged, in passing, that `SpendingChart` hard-codes `£`: `fmt_currency`'s default symbol is used for the y-axis, the average pill, the tooltip, and (newly) the bar totals. It was filed as a cosmetic bug for non-UK users.
+ADR-157 flagged, in passing, that `SpendingChart` hard-codes `£`: `fmt_currency`'s default symbol is used for the y-axis, the average pill, the tooltip, and (newly) the bar totals. It was filed as a cosmetic bug for non-UK users.
 
 It is not cosmetic. Pulling the thread found that **`spending_aggregates` and `income_aggregates` had no currency awareness at all**:
 
@@ -55,7 +55,7 @@ An amount with **no rate on file is dropped, not counted at face value**, and th
 
 ### Rejected
 
-- **Just pass the symbol through (the ADR-154 reading).** Fixes the glyph and leaves the arithmetic broken — the worst outcome, because a correctly-labelled wrong number is more believable than an obviously-wrong one.
+- **Just pass the symbol through (the ADR-157 reading).** Fixes the glyph and leaves the arithmetic broken — the worst outcome, because a correctly-labelled wrong number is more believable than an obviously-wrong one.
 - **Convert at each transaction's own date** rather than at `date_to`. Arguably more "correct" for a historical series, but it disagrees with every other report in the app, and an inconsistency between two reports showing the same money is worse than a defensible convention applied uniformly. If we revisit this, it should change everywhere at once.
 - **Count unconvertible amounts at face value** (1:1) rather than dropping them. That *is* the bug.
 - **Force a base currency at first run.** Worth doing on its own merits (the owner's file has none), but it wouldn't fix this — the aggregates ignored currency entirely, base or not.

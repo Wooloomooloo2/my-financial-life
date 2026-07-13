@@ -580,7 +580,7 @@ class RegisterWindow(QMainWindow):
         window — should re-colour the button without forcing a relaunch.
         Cheap enough to run on every activation (a handful of schedules).
 
-        ADR-153: Home is refreshed here too (ADR-075, so edits made elsewhere show
+        ADR-156: Home is refreshed here too (ADR-075, so edits made elsewhere show
         up), but *conditionally*. Activation fires on every return of focus —
         closing a report, switching to a register, alt-tabbing — and an
         unconditional rebuild cost ~450ms of synchronous work on the UI thread,
@@ -634,12 +634,12 @@ class RegisterWindow(QMainWindow):
         """Show the Home dashboard page (ADR-075), refreshing it if the data has
         moved since it was last drawn.
 
-        ADR-157: this was an unconditional rebuild, and it is on the sidebar's
+        ADR-160: this was an unconditional rebuild, and it is on the sidebar's
         selection path — which fires more than once during startup, and again on
         every return to Home. Measured against the live file, Home was being
         rebuilt five times in the first four seconds of launch (206 + 142 + 426 +
         217 + 180 ms, including a 797ms UI freeze) before the user had touched
-        anything. ``refresh_if_stale`` is the same guard ADR-153 put on the
+        anything. ``refresh_if_stale`` is the same guard ADR-156 put on the
         activation path; the two together are the whole of it."""
         self._home_view.refresh_if_stale()
         self._main_stack.setCurrentIndex(0)
@@ -1257,7 +1257,7 @@ class RegisterWindow(QMainWindow):
     def on_background_data_written(self) -> None:
         """A launch refresh (FX or prices, ADR-035/044) wrote on its own
         connection. Invalidate the derived caches and redraw the visible page so
-        the new figures land (ADR-153).
+        the new figures land (ADR-156).
 
         Only called when the worker actually wrote something, so a launch that
         fetches nothing — the common case, both refreshes being throttled to once
@@ -1273,7 +1273,7 @@ class RegisterWindow(QMainWindow):
         account — so reload preserving selection instead. The sidebar's reload
         has no 'home' restore case (it falls back to All transactions), so when
         Home is showing we re-assert it after the reload."""
-        # ADR-153: the prices/rates were written by a worker on its OWN sqlite
+        # ADR-156: the prices/rates were written by a worker on its OWN sqlite
         # connection, which neither our connection's total_changes nor
         # PRAGMA data_version can see. Say so explicitly, or every cache keyed on
         # data_generation (account values; the Home freshness token) would still

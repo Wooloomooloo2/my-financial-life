@@ -877,7 +877,7 @@ class Repository:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA synchronous = NORMAL")
-        # ADR-153: generation-keyed memo for compute_account_values, the single
+        # ADR-156: generation-keyed memo for compute_account_values, the single
         # most expensive derivation in the app and the one the UI recomputes
         # most often. See data_generation() for how staleness is detected.
         self._ext_gen = 0
@@ -888,7 +888,7 @@ class Repository:
     def db_path(self) -> Path:
         return self._db_path
 
-    # ── cache invalidation (ADR-153) ─────────────────────────────────────────
+    # ── cache invalidation (ADR-156) ─────────────────────────────────────────
 
     def data_generation(self) -> tuple:
         """A cheap token that changes whenever the data behind a derived value
@@ -923,7 +923,7 @@ class Repository:
     def note_external_change(self) -> None:
         """Declare that a background thread wrote through its own connection, so
         anything keyed on :meth:`data_generation` must recompute. Call on the
-        main thread when the worker's result lands (ADR-153)."""
+        main thread when the worker's result lands (ADR-156)."""
         self._ext_gen += 1
 
     @property
@@ -931,7 +931,7 @@ class Repository:
         """Rows written through this connection since it was opened. Lets a
         background worker tell whether its pass actually changed anything, so it
         only asks the main thread to invalidate when there is something to see
-        (ADR-153)."""
+        (ADR-156)."""
         return self._conn.total_changes
 
     def save_copy(self, dest_path: Path | str) -> None:
@@ -1433,7 +1433,7 @@ class Repository:
 
         Closed accounts are omitted unless ``include_closed=True`` (ADR-069).
 
-        Memoised against :meth:`data_generation` (ADR-153). This is the app's
+        Memoised against :meth:`data_generation` (ADR-156). This is the app's
         most expensive derivation — it replays every investment account's whole
         ledger through the FIFO holdings engine — and the UI calls it on every
         sidebar reload and every Home refresh, almost always for data that has
@@ -5133,7 +5133,7 @@ class Repository:
         unconverted: dict[str, int],
     ) -> Optional[int]:
         """Convert ``pence`` from ``ccy`` into ``target_ccy`` at ``on_date``
-        (ADR-156). The shared rule behind every multi-currency aggregate.
+        (ADR-159). The shared rule behind every multi-currency aggregate.
 
         Returns ``None`` when there is no rate on file. The caller must then
         DROP the amount and it is recorded in ``unconverted`` — so the report can
@@ -5188,7 +5188,7 @@ class Repository:
         narrowing — every payee contributes (including the (No payee)
         rows where ``txn.payee_id`` is NULL).
 
-        ``display_currency`` (ADR-156) converts every amount from its **account's**
+        ``display_currency`` (ADR-159) converts every amount from its **account's**
         currency into the target at ``date_to``, matching the Sankey / Payee /
         Income & Expense reports. Without it this method summed raw minor units
         across accounts — adding dollars to pounds 1:1 — which silently produced a
@@ -5249,7 +5249,7 @@ class Repository:
             # to scanning `txn` for the no-splits-in-the-file case.
             f"FROM txn_category_line t "
             f"JOIN category c ON c.id = t.category_id "
-            # ADR-156: amounts are in their ACCOUNT's currency, so group by it
+            # ADR-159: amounts are in their ACCOUNT's currency, so group by it
             # and convert each group — otherwise dollars and pounds are summed 1:1.
             f"JOIN account a ON a.id = t.account_id "
             f"WHERE t.posted_date BETWEEN ? AND ? "
@@ -5330,7 +5330,7 @@ class Repository:
         the owner tags them first (now possible per ADR-089). No double count:
         the cash pass requires ``amount > 0`` and reinvests are always 0.
 
-        ``display_currency`` (ADR-156) converts every amount from its **account's**
+        ``display_currency`` (ADR-159) converts every amount from its **account's**
         currency at ``date_to`` — see :meth:`spending_aggregates`. Both passes
         convert, so a USD DRIP and a GBP dividend land in the same money.
 
@@ -5381,7 +5381,7 @@ class Repository:
             # file has no splits) — see spending_aggregates for the rationale.
             f"FROM txn_category_line t "
             f"JOIN category c ON c.id = t.category_id "
-            f"JOIN account a ON a.id = t.account_id "   # ADR-156: per-currency
+            f"JOIN account a ON a.id = t.account_id "   # ADR-159: per-currency
             f"WHERE t.posted_date BETWEEN ? AND ? "
             f"  AND c.kind = 'income' "
             f"  AND t.amount > 0 "  # strict inflow — see docstring
@@ -5454,7 +5454,7 @@ class Repository:
             f"       CAST(ROUND(SUM(t.quantity * t.price) * 100) AS INTEGER) AS income_pence "
             f"FROM txn t "
             f"JOIN category c ON c.id = t.category_id "
-            f"JOIN account a ON a.id = t.account_id "   # ADR-156: per-currency
+            f"JOIN account a ON a.id = t.account_id "   # ADR-159: per-currency
             f"WHERE t.posted_date BETWEEN ? AND ? "
             f"  AND c.kind = 'income' "
             f"  AND lower(t.action) IN ({action_ph}) "

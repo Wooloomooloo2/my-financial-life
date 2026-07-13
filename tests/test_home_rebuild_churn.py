@@ -1,6 +1,6 @@
-"""Home stops rebuilding itself five times at launch (ADR-157).
+"""Home stops rebuilding itself five times at launch (ADR-160).
 
-ADR-153 guarded the *activation* path, but two other callers still rebuilt Home
+ADR-156 guarded the *activation* path, but two other callers still rebuilt Home
 unconditionally, and instrumenting a real launch against the live file caught it:
 
     [2.12s]  206.5 ms  HomeView.refresh  (FULL REBUILD)   <- _show_home

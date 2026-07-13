@@ -245,7 +245,7 @@ class SpendingReportWindow(QMainWindow):
         self._save_as_button.setProperty("mflVariant", "ghost")
         self._save_as_button.clicked.connect(self._on_save_as)
 
-        # ADR-156: display currency. Amounts live in each account's own currency,
+        # ADR-159: display currency. Amounts live in each account's own currency,
         # so a multi-currency file needs a target to convert into — without one
         # this report summed dollars and pounds 1:1 and stamped a "£" on the
         # result. Same non-persisted view preference as Net Worth (ADR-055) and
@@ -416,7 +416,7 @@ class SpendingReportWindow(QMainWindow):
 
     # ── refresh / render ──
 
-    # ── display currency (ADR-156) ──
+    # ── display currency (ADR-159) ──
 
     def _populate_ccy_combo(self) -> None:
         """Fill the display-currency selector from the currencies in use,
@@ -487,7 +487,7 @@ class SpendingReportWindow(QMainWindow):
             account_ids=account_ids,
             include_uncategorised=filters.include_uncategorised,
             payee_ids=expanded_payee_ids,
-            display_currency=self._display_ccy,   # ADR-156
+            display_currency=self._display_ccy,   # ADR-159
         )
         # Income-only: fold in reinvested-dividend (DRIP) income (ADR-089). The
         # field lives only on IncomeOverTimeFilters, so guard on its presence —
@@ -503,7 +503,7 @@ class SpendingReportWindow(QMainWindow):
         rows = result["rows"]
         # Amounts with no FX rate on file are dropped rather than counted at the
         # wrong number. Kept so the summary panel can say so — a silently
-        # understated total is worse than the original bug (ADR-156).
+        # understated total is worse than the original bug (ADR-159).
         self._unconverted = result["unconverted"]
         value_key = self._DIRECTION.value_key
 
@@ -576,7 +576,7 @@ class SpendingReportWindow(QMainWindow):
             groups=groups,
             spending=spending,
             avg_pounds=avg_pounds,
-            currency_symbol=self._symbol(),   # ADR-156
+            currency_symbol=self._symbol(),   # ADR-159
         )
 
         self._update_categories_legend(groups)
@@ -655,7 +655,7 @@ class SpendingReportWindow(QMainWindow):
             self._average_value.setText(note or "")
             self._buckets_value.setText("")
         else:
-            sym = self._symbol()   # ADR-156 — was hard-coded "£"
+            sym = self._symbol()   # ADR-159 — was hard-coded "£"
             total_pounds = total_pence / 100.0
             gran_word = _GRANULARITY_AVG_WORD.get(granularity or "month", "month")
             bucket_word = gran_word if bucket_count == 1 else f"{gran_word}s"
@@ -666,7 +666,7 @@ class SpendingReportWindow(QMainWindow):
             bucket_text = f"{bucket_count} {bucket_word}"
             # Money we could not convert is money missing from the total above.
             # Say so — a silently understated figure is worse than the bug this
-            # conversion fixed (ADR-156).
+            # conversion fixed (ADR-159).
             if self._unconverted:
                 missing = ", ".join(
                     f"{ccy} {pence / 100.0:,.2f}"

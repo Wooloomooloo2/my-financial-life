@@ -1,4 +1,4 @@
-# ADR-154 — Stacked-bar charts print each bar's total above it
+# ADR-157 — Stacked-bar charts print each bar's total above it
 
 **Date:** 2026-07-12
 **Status:** Implemented

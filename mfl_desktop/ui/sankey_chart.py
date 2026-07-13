@@ -115,7 +115,7 @@ class SankeyChart(QWidget):
         return fmt_currency(value, symbol=self._symbol)
 
     def _denominator_for(self, node: SankeyNode, col: int) -> float:
-        """What a node's percentage is a share of (ADR-155).
+        """What a node's percentage is a share of (ADR-158).
 
         A category is a share of **its own side's** total: an expense category
         reads as a percentage of expenditure ("Household is 28% of my spending"),

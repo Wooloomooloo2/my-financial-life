@@ -68,7 +68,7 @@ def test_deleting_the_clicked_card_synchronously_would_crash():
     Retried, because a use-after-free is *undefined behaviour*, not a guaranteed
     fault: sometimes the freed memory is still mapped and readable and the click
     unwinds cleanly. A single attempt made this canary fail intermittently under
-    CPU load (ADR-153). "Crashes at least once in N tries" is the honest form of
+    CPU load (ADR-156). "Crashes at least once in N tries" is the honest form of
     the claim — if Qt ever really did make this safe, every attempt would survive
     and the assertion would still fire."""
     body = """
@@ -133,7 +133,7 @@ def test_real_home_refresh_survives_a_click_that_rebuilds_it():
             # background pass when it lands mid-loop; iterating a stale list
             # would click a freed wrapper and raise RuntimeError. That is a bug
             # in the test, not the use-after-free this file is about — and it
-            # made the test fail intermittently under CPU load (ADR-153).
+            # made the test fail intermittently under CPU load (ADR-156).
             return [w for w in home.findChildren(QWidget)
                     if type(w).__name__ == "_Card"
                     and getattr(w, "_clickable", False)

@@ -1,4 +1,4 @@
-"""Activation no longer rebuilds Home, and account values are cached (ADR-153).
+"""Activation no longer rebuilds Home, and account values are cached (ADR-156).
 
 Three things are pinned here.
 

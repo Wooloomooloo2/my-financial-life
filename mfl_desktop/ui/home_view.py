@@ -177,7 +177,7 @@ class _AccordionHeader(QFrame):
 
 class _HomeBgSignals(QObject):
     """Carries the background-computed Home cards back to the main thread. Created
-    on the main thread and owned by the runnable that emits it (ADR-153), so the
+    on the main thread and owned by the runnable that emits it (ADR-156), so the
     cross-thread emit is auto-queued onto the UI event loop and the sender cannot
     outlive-then-predecease its emitter."""
     done = Signal(object)   # {"sig": str, "trend": ... | None, "invest": ... | None}
@@ -189,7 +189,7 @@ class _HomeBgRunnable(QRunnable):
     one background Repository connection (a sqlite connection can't cross
     threads). Each card's failure is isolated so one never sinks the other.
 
-    ADR-153: the runnable **owns** its signals object rather than borrowing the
+    ADR-156: the runnable **owns** its signals object rather than borrowing the
     view's, so a HomeView that dies while a pass is in flight (the window closes)
     doesn't leave the worker holding the sender. Emitting *to* a destroyed
     receiver is safe — Qt disconnects it automatically. This mirrors
@@ -273,11 +273,11 @@ class HomeView(QWidget):
         self._invest_perf = None         # InvestmentPerf | None
         self._bg_sig: Optional[str] = None
         self._bg_pending: Optional[str] = None
-        # ADR-153: what the currently-rendered dashboard was built from. Lets
+        # ADR-156: what the currently-rendered dashboard was built from. Lets
         # refresh_if_stale() skip a rebuild the user cannot tell apart from what
         # is already on screen.
         self._rendered_token: Optional[tuple] = None
-        # ADR-157: the last gathered HomeData and the token it was gathered for,
+        # ADR-160: the last gathered HomeData and the token it was gathered for,
         # so folding in the off-thread cards doesn't re-run the whole query pass.
         self._last_data = None
         self._last_token: Optional[tuple] = None
@@ -290,14 +290,14 @@ class HomeView(QWidget):
         # The generation counter is per-Repository, so a token from the old file
         # says nothing about the new one. Drop it: the next refresh must rebuild.
         self._rendered_token = None
-        # And the cached data belongs to the OLD file — never reuse it (ADR-157).
+        # And the cached data belongs to the OLD file — never reuse it (ADR-160).
         self._last_data = None
         self._last_token = None
 
     # ── build ──
 
     def _freshness_token(self) -> tuple:
-        """What the dashboard's contents depend on (ADR-153). The data generation
+        """What the dashboard's contents depend on (ADR-156). The data generation
         covers every edit; ``date.today()`` covers the date-relative cards (bills
         due, "last 30 days") on an app left open across midnight — the same
         rollover the Schedules cue re-checks on activation (ADR-063)."""
@@ -327,7 +327,7 @@ class HomeView(QWidget):
     def refresh(self, *, reuse_data: bool = False) -> None:
         """Rebuild the dashboard.
 
-        ``reuse_data`` (ADR-157) skips the re-gather and redraws from the data of
+        ``reuse_data`` (ADR-160) skips the re-gather and redraws from the data of
         the last render. Only for a caller that knows the *data* hasn't moved and
         only the presentation has — specifically :meth:`_on_bg_ready`, which folds
         the off-thread cards into a dashboard it just drew. ``gather_home_data``
@@ -540,7 +540,7 @@ class HomeView(QWidget):
             return
         self._bg_pending = sig
         runnable = _HomeBgRunnable(str(db_path), display_ccy, date.today(), sig)
-        # Connect to the runnable's OWN signals object (ADR-153). Qt drops the
+        # Connect to the runnable's OWN signals object (ADR-156). Qt drops the
         # connection automatically if this view is destroyed first, so a pass
         # still in flight when Home goes away lands harmlessly instead of
         # emitting from a deleted sender.
@@ -552,7 +552,7 @@ class HomeView(QWidget):
         Home; refresh() will find them cached for the current signature and draw
         them — or, if the data has since moved, miss and recompute.
 
-        ADR-157: ``reuse_data`` — only the trend/perf cards changed, and this is a
+        ADR-160: ``reuse_data`` — only the trend/perf cards changed, and this is a
         dashboard we ourselves just drew, so re-running the whole query pass to
         add a sparkline is waste. refresh() still re-gathers if the data actually
         moved while the worker was out."""

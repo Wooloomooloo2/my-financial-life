@@ -69,7 +69,7 @@ def _build():
 
 def test_spending_nets_refund_and_clamps_negative():
     repo, ids = _build()
-    # ADR-156: returns {"rows", "unconverted"} now that it converts currencies.
+    # ADR-159: returns {"rows", "unconverted"} now that it converts currencies.
     rows = repo.spending_aggregates(
         date_from=_FROM, date_to=_TO, granularity="month",
     )["rows"]

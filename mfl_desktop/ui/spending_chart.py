@@ -75,7 +75,7 @@ class SpendingChart(QWidget):
         self._groups: list[tuple[int, str]] = []
         self._spending: dict[tuple[int, str], int] = {}
         self._avg_pounds = 0.0
-        # ADR-156: the report's display currency. The chart formats money in four
+        # ADR-159: the report's display currency. The chart formats money in four
         # places (axis, average pill, bar totals, tooltip) and used to hard-code
         # the fmt_currency default of "£" in all of them.
         self._symbol = "£"
@@ -91,7 +91,7 @@ class SpendingChart(QWidget):
         self._segment_hitmap: list[tuple[QRectF, int, str, float]] = []
 
         # Updated each paintEvent — (x_center, top_y, total_pounds) per bar, so
-        # the stack totals can be printed above them (ADR-154). Collected while
+        # the stack totals can be printed above them (ADR-157). Collected while
         # the bars are laid out rather than recomputed, since _paint_bars
         # already sums each stack and tracks its top edge.
         self._bar_totals: list[tuple[float, float, float]] = []
@@ -166,7 +166,7 @@ class SpendingChart(QWidget):
         self._paint_y_labels(painter, chart_rect, ymax, ystep)
         self._paint_x_labels(painter, chart_rect)
         self._paint_bars(painter, chart_rect, ymax)
-        # ADR-154: the stack totals are laid out first but drawn last. Laying
+        # ADR-157: the stack totals are laid out first but drawn last. Laying
         # them out first lets the average pill dodge them; drawing them last
         # keeps the dashed average line from striking through the text.
         totals = self._layout_bar_totals(chart_rect)
@@ -323,7 +323,7 @@ class SpendingChart(QWidget):
                 painter, bar_rect, radius, QColor(_ch.chart_surface()),
             )
 
-            # `running` is now the whole stack's total (ADR-154).
+            # `running` is now the whole stack's total (ADR-157).
             self._bar_totals.append((x_left + bar_w / 2, bar_top_y, running))
 
     def _draw_bar_segment(
@@ -380,7 +380,7 @@ class SpendingChart(QWidget):
             tw,
             th,
         )
-        # ADR-154: the pill sits above the line at the right edge — exactly where
+        # ADR-157: the pill sits above the line at the right edge — exactly where
         # the last bar's total label lands when that bar happens to be near the
         # average (which it often is; the last bucket is usually a part-period).
         # The total is data and the pill is annotation, so the pill moves: drop
@@ -407,7 +407,7 @@ class SpendingChart(QWidget):
         return font
 
     def _layout_bar_totals(self, chart: QRectF) -> list[tuple[QRectF, str]]:
-        """Where each stack's total goes — geometry only, no painting (ADR-154).
+        """Where each stack's total goes — geometry only, no painting (ADR-157).
 
         A stacked bar's headline quantity is its total, and it was the one
         number the chart never showed. The summary panel gives a grand total and

@@ -1,4 +1,4 @@
-"""The Savings node is a percentage of income, not of expenditure (ADR-155).
+"""The Savings node is a percentage of income, not of expenditure (ADR-158).
 
 Owner report: the Cash Flow Sankey showed "Savings 98%" while the summary rail
 on the same screen said "Saving rate: 49.4% of income".

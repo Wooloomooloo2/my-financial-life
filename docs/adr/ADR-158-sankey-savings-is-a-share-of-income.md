@@ -1,4 +1,4 @@
-# ADR-155 — The Cash Flow Sankey's Savings node is a share of income, not of expenditure
+# ADR-158 — The Cash Flow Sankey's Savings node is a share of income, not of expenditure
 
 **Date:** 2026-07-12
 **Status:** Implemented

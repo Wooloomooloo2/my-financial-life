@@ -1,4 +1,4 @@
-"""Spending / Income Over Time convert to a display currency (ADR-156).
+"""Spending / Income Over Time convert to a display currency (ADR-159).
 
 `spending_aggregates` and `income_aggregates` used to do `SUM(-t.amount)` with no
 currency awareness at all, then the chart formatted the result with
