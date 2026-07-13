@@ -25,9 +25,14 @@ Field flow:
     term — paid to the seller on a buy, received on a sell — that is part of the
     cash but NOT the bond's cost basis (it nets against the first coupon). The
     signed cash impact is `∓ (total + accrued)`.
-    **Reinvested dividend / Shares in-out** — Qty (+ optional Price for basis);
-    cash impact 0. **Dividend / Interest / Cap-gain** — an Amount-in field
-    replaces Qty/Price. **Cash in/out** — an Amount field only, no security.
+    **Reinvested dividend** — the same tri-field group, with the total labelled
+    **Dividend amount** (qty × price × multiplier, no commission leg): it's the
+    distribution figure on the statement, so it both checks the shares/price and
+    lets you work backwards from the cash value to the share count. The stored
+    cash impact is still 0 — a reinvest moves no cash. **Shares in-out** — Qty
+    (+ optional Price for basis); cash impact 0. **Dividend / Interest /
+    Cap-gain** — an Amount-in field replaces Qty/Price. **Cash in/out** — an
+    Amount field only, no security.
 
 The stored ``txn.amount`` is always the SIGNED CASH IMPACT, so cash balance =
 SUM(amount) holds (ADR-043); ``txn.accrued_interest`` (ADR-093) carries the bond
@@ -46,6 +51,7 @@ from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
@@ -61,6 +67,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop import txn_status
 from mfl_desktop.db.repository import AccountSummary, Repository, SecurityRow, TransactionRow
+from mfl_desktop.holdings import shares_held
 from mfl_desktop.import_engine.qif_actions import is_reinvest
 from mfl_desktop.prices import lookup_symbol_name
 from mfl_desktop.ui import tokens
@@ -117,6 +124,14 @@ def _kind(action: str) -> str:
     return "income"          # div / intinc / cglong / cgshort
 
 
+def _solves_total(kind: str) -> bool:
+    """Actions whose qty ⇄ price ⇄ total group is live. A reinvest moves no cash,
+    but its **value** (qty × price × multiplier) is the distribution figure on the
+    statement — showing it lets you check the shares/price, or work backwards from
+    the dividend amount to the share count."""
+    return kind in ("buy", "sell", "reinvest")
+
+
 class InvestmentTransactionDialog(QDialog):
     """Create or edit one investment-account transaction."""
 
@@ -152,6 +167,8 @@ class InvestmentTransactionDialog(QDialog):
         self._form.addRow("Account:", acct_label)
 
         self._date = make_date_edit()
+        # ADR-155: a Sell-to-clear's quantity is the holding *as of this date*.
+        self._date.dateChanged.connect(lambda *_: self._refresh_close_quantity())
         self._form.addRow("Date:", self._date)
 
         self._action = QComboBox()
@@ -230,6 +247,20 @@ class InvestmentTransactionDialog(QDialog):
         self._cusip = QLineEdit()
         self._cusip.setPlaceholderText("CUSIP / ISIN (optional)")
         self._form.addRow("CUSIP / ISIN:", self._cusip)
+
+        # ADR-155: a Sell that closes the position out. Ticking it sells the
+        # *exact* shares the holdings engine says are left — not a figure the
+        # user rounds off a statement — so the position lands on zero with no
+        # residual. The quantity goes read-only and the proceeds become the
+        # field you type.
+        self._close_position = QCheckBox("Sell to clear — close the position out")
+        self._close_position.setToolTip(
+            "Sells every remaining share of this security in this account.\n"
+            "Quantity is taken from the holdings engine, so the position "
+            "clears to exactly zero with no leftover fraction."
+        )
+        self._close_position.toggled.connect(self._on_close_position_toggled)
+        self._form.addRow("", self._close_position)
 
         self._qty = QLineEdit()
         self._qty.setPlaceholderText("shares")
@@ -450,7 +481,7 @@ class InvestmentTransactionDialog(QDialog):
     def _on_instrument_changed(self, _idx: int) -> None:
         self._apply_action_rules()
         # Multiplier may have changed (stock↔bond↔option) — re-solve the total.
-        if not self._loading and _kind(self._current_action()) in ("buy", "sell"):
+        if not self._loading and _solves_total(_kind(self._current_action())):
             self._solve_trade_field(self._trade_edit_order[-1])
 
     def _on_multiplier_field_changed(self, *_args) -> None:
@@ -458,13 +489,17 @@ class InvestmentTransactionDialog(QDialog):
         the tri-field group and refresh the hint."""
         if (
             not self._loading and not self._recomputing
-            and _kind(self._current_action()) in ("buy", "sell")
+            and _solves_total(_kind(self._current_action()))
         ):
             self._solve_trade_field(self._trade_edit_order[-1])
         self._recompute_hint()
 
     def _on_action_changed(self, _idx: int) -> None:
         self._apply_action_rules()
+        # The commission leg only applies to a trade, so switching Buy ⇄ Reinvest
+        # changes the total — re-solve whichever leg the user left alone.
+        if not self._loading and _solves_total(_kind(self._current_action())):
+            self._solve_trade_field(self._trade_edit_order[-1])
 
     def _apply_action_rules(self) -> None:
         kind = _kind(self._current_action())
@@ -474,11 +509,16 @@ class InvestmentTransactionDialog(QDialog):
         show_sec = kind != "cash"
         show_qty = kind in ("buy", "sell", "reinvest", "shares")
         show_price = kind in ("buy", "sell", "reinvest", "shares")
-        show_total = kind in ("buy", "sell")
+        # A reinvest shows the same tri-field total, labelled as the distribution
+        # amount — no cash moves, but it's the figure to check against the
+        # statement (and you can type it to back out the share count).
+        show_total = _solves_total(kind)
         show_commission = kind in ("buy", "sell")
         show_accrued = is_bond and kind in ("buy", "sell")
         show_amount = kind in ("income", "cash")
         show_ratio = kind == "split"
+        # ADR-155: closing out is a Sell-only affordance.
+        show_close = kind == "sell"
         # ADR-086 + ADR-089: cash income/expense **and** reinvests are
         # categorisable (a reinvest is zero-cash, so its category only feeds the
         # income report's reinvested-dividend valuation, never the cash totals).
@@ -495,6 +535,12 @@ class InvestmentTransactionDialog(QDialog):
         # Bond metadata.
         for w in (self._face, self._coupon, self._maturity, self._cusip):
             self._set_row_visible(w, show_sec and is_bond)
+        self._set_row_visible(self._close_position, show_close)
+        if not show_close and self._close_position.isChecked():
+            # Switching away from Sell must not leave a stale lock on the
+            # quantity (the checkbox is hidden, so the user couldn't undo it).
+            self._close_position.setChecked(False)
+            self._set_qty_locked(False)
         self._set_row_visible(self._qty, show_qty)
         self._set_row_visible(self._price, show_price)
         self._set_row_visible(self._commission, show_commission)
@@ -514,6 +560,20 @@ class InvestmentTransactionDialog(QDialog):
         else:
             self._set_label(self._qty, "Quantity:")
             self._set_label(self._price, "Price:")
+
+        # The total row is a cost on a trade and a distribution value on a
+        # reinvest — same maths, different name.
+        if kind == "reinvest":
+            self._set_label(self._total, "Dividend amount:")
+            self._total.setPlaceholderText("cash value (quantity × price)")
+        elif self._closing_position():
+            # ADR-155: with the quantity pinned to the holding, the proceeds are
+            # what you type — off the statement — and the price falls out.
+            self._set_label(self._total, "Proceeds:")
+            self._total.setPlaceholderText("cash received (from the statement)")
+        else:
+            self._set_label(self._total, "Total cost:")
+            self._total.setPlaceholderText("principal (qty × price × size ± fee)")
 
         # On create, default income actions to *Investment income* and the
         # manual Cash action to Uncategorised — until the user picks otherwise.
@@ -536,6 +596,96 @@ class InvestmentTransactionDialog(QDialog):
         if show_total and not self._total.text().strip() and not self._loading:
             self._solve_trade_field("total")
         self._recompute_hint()
+
+    # ── Sell to clear (ADR-155) ──
+
+    def _held_shares(self) -> float:
+        """Shares of the selected security this account still holds, as of the
+        transaction's own date. Zero when no security is chosen.
+
+        Dated, not "as of today", so back-filling a closure you're only entering
+        now sells what you held *then*. On an edit, the row being edited is
+        excluded — otherwise re-opening a saved Sell-to-clear would read its own
+        shares as still held and halve the quantity on every save."""
+        sid = self._security.currentData()
+        if sid is None:
+            return 0.0
+        return shares_held(
+            self._repo.list_transactions_for_account(self._account.id),
+            int(sid),
+            as_of=self._date.date().toString("yyyy-MM-dd"),
+            exclude_txn_id=(self._seed.id if self._seed is not None else None),
+            multipliers=self._repo.security_multipliers(),
+        )
+
+    def _closing_position(self) -> bool:
+        return (
+            _kind(self._current_action()) == "sell"
+            and self._close_position.isChecked()
+        )
+
+    def _refresh_close_quantity(self) -> None:
+        """Re-derive the locked quantity — the holding depends on both the
+        security and the date, so changing either while Sell-to-clear is ticked
+        must move the quantity with it, or we'd sell a stale figure."""
+        if self._loading or not self._closing_position():
+            return
+        held = self._held_shares()
+        self._recomputing = True
+        try:
+            self._qty.setText(_trim(Decimal(repr(held))) if held > 0 else "")
+        finally:
+            self._recomputing = False
+        if held > 0:
+            self._solve_trade_field("price")
+        self._recompute_hint()
+
+    def _on_close_position_toggled(self, checked: bool) -> None:
+        """Ticking fills the quantity with the exact holding and locks it; the
+        proceeds become the field to type. Unticking hands the quantity back."""
+        if self._loading:
+            return
+        if checked:
+            held = self._held_shares()
+            if held <= 0:
+                QMessageBox.warning(
+                    self, "Sell to clear",
+                    "There's nothing to clear — this account holds no shares of "
+                    "that security on the transaction date.\n\nPick the security "
+                    "first, and check the date.",
+                )
+                self._close_position.setChecked(False)
+                return
+            self._recomputing = True
+            try:
+                self._qty.setText(_trim(Decimal(repr(held))))
+            finally:
+                self._recomputing = False
+            # Quantity is now a derived figure, so the user's edits drive
+            # price ⇄ proceeds instead: typing the statement's cash backs out the
+            # price actually realised.
+            self._trade_edit_order = ["total", "qty", "price"]
+            self._solve_trade_field("price")
+        self._set_qty_locked(checked)
+        self._apply_action_rules()
+
+    def _set_qty_locked(self, locked: bool) -> None:
+        """Lock the quantity and *look* locked — a read-only field styled like an
+        editable one just reads as a field that ignores you."""
+        self._qty.setReadOnly(locked)
+        if locked:
+            tokens.themed(
+                self._qty,
+                "QLineEdit { background: {surface_alt}; color: {muted_strong}; }",
+            )
+            self._qty.setToolTip(
+                "Every share left in this account — taken from your holdings, "
+                "so the position clears to exactly zero. Untick 'Sell to clear' "
+                "to sell a different quantity."
+            )
+        else:
+            self._qty.setStyleSheet("")
+            self._qty.setToolTip("")
 
     def _current_action(self) -> str:
         return self._action.currentData() or ""
@@ -592,13 +742,18 @@ class InvestmentTransactionDialog(QDialog):
         if (
             not self._loading
             and not self._recomputing
-            and _kind(self._current_action()) in ("buy", "sell")
+            and _solves_total(_kind(self._current_action()))
         ):
             order = self._trade_edit_order
             if field in order:
                 order.remove(field)
             order.insert(0, field)
-            self._solve_trade_field(order[-1])   # least-recently edited = target
+            target = order[-1]                   # least-recently edited = target
+            # ADR-155: with the quantity pinned to the holding it is never a
+            # solve target — editing the price moves the proceeds instead.
+            if target == "qty" and self._closing_position():
+                target = "total"
+            self._solve_trade_field(target)
         self._recompute_hint()
 
     def _on_commission_changed(self, *_args) -> None:
@@ -617,14 +772,21 @@ class InvestmentTransactionDialog(QDialog):
         commission and the instrument multiplier, if both legs are present (and
         the divisor is non-zero). Total = qty × price × m + s·commission, where
         m is the value multiplier and s = +1 for a Buy (the fee adds to the cash
-        out) and −1 for a Sell (the fee nets off the proceeds). No-op when a
+        out) and −1 for a Sell (the fee nets off the proceeds). A reinvest has no
+        commission leg, so its total is simply qty × price × m. No-op when a
         needed value is missing."""
+        kind = _kind(self._current_action())
         qty = _to_decimal(self._qty.text())
         price = _to_decimal(self._price.text())
         total = _to_decimal(self._total.text())
-        comm = _to_decimal(self._commission.text()) or Decimal(0)
+        # The commission row is Buy/Sell-only — ignore any text left behind in it
+        # after switching action, so a reinvest's value stays exactly qty × price.
+        comm = (
+            (_to_decimal(self._commission.text()) or Decimal(0))
+            if kind in ("buy", "sell") else Decimal(0)
+        )
         m = self._multiplier()
-        s = Decimal(1) if _kind(self._current_action()) == "buy" else Decimal(-1)
+        s = Decimal(1) if kind == "buy" else Decimal(-1)
         self._recomputing = True
         try:
             if target == "total" and qty is not None and price is not None:
@@ -637,6 +799,8 @@ class InvestmentTransactionDialog(QDialog):
             elif (
                 target == "qty" and price not in (None, Decimal(0))
                 and total is not None and m != 0
+                # ADR-155: the close-out quantity is the holding, full stop.
+                and not self._closing_position()
             ):
                 self._qty.setText(_trim((total - s * comm) / (price * m)))
         finally:
@@ -648,11 +812,23 @@ class InvestmentTransactionDialog(QDialog):
         if kind == "buy":
             base = ("Buy — enter any two of quantity, price, total; the third "
                     "fills in. Total = quantity × price × size + commission.")
+        elif kind == "sell" and self._closing_position():
+            held = _to_decimal(self._qty.text())
+            base = ("Sell to clear — quantity is every share left in this "
+                    "account, so the position lands on exactly zero. Type the "
+                    "proceeds from your statement; the price fills in.")
+            if held is not None:
+                base += f"  →  clearing {held:,} shares"
         elif kind == "sell":
             base = ("Sell — enter any two of quantity, price, total; the third "
                     "fills in. Total = quantity × price × size − commission.")
         elif kind == "reinvest":
-            base = "Reinvested dividend — no cash moves; counts as income."
+            base = ("Reinvested dividend — no cash moves; counts as income. "
+                    "Enter any two of quantity, price, dividend amount; the "
+                    "third fills in.")
+            total = _to_decimal(self._total.text())
+            if total is not None:
+                base += f"  →  value {abs(total):,.2f}"
         elif kind == "shares":
             base = "Share transfer — no cash moves. Price is optional (cost basis)."
         elif kind == "split":
@@ -701,6 +877,7 @@ class InvestmentTransactionDialog(QDialog):
             finally:
                 self._loading = was_loading
             self._apply_action_rules()
+            self._refresh_close_quantity()
 
     def _on_symbol_finished(self) -> None:
         """Resolve the typed ticker to a Security: an existing security with
@@ -814,6 +991,22 @@ class InvestmentTransactionDialog(QDialog):
         wants_qty = kind in ("buy", "sell", "reinvest", "shares")
         qty = _to_decimal(self._qty.text()) if wants_qty else None
         price = _to_decimal(self._price.text()) if wants_qty else None
+        # ADR-155: on a close-out, take the quantity from the engine rather than
+        # from the field. The displayed figure is trimmed for readability, and
+        # selling a *rounded* quantity is the very thing that leaves a residual
+        # (or oversells into a phantom). `repr` keeps every bit of the float, so
+        # the FIFO lots drain to exactly nothing.
+        if self._closing_position() and security_id is not None:
+            held = self._held_shares()
+            if held <= 0:
+                QMessageBox.warning(
+                    self, "Sell to clear",
+                    "This account holds no shares of that security on "
+                    f"{self._date.date().toString('yyyy-MM-dd')}, so there is "
+                    "nothing to clear.",
+                )
+                return
+            qty = Decimal(repr(held))
         if kind == "split":
             qty = _to_decimal(self._ratio.text())
             if qty is None or qty <= 0:
@@ -931,7 +1124,42 @@ class InvestmentTransactionDialog(QDialog):
                 f"The transaction was not saved:\n\n{e}",
             )
             return
+        if self._closing_position() and security_id is not None:
+            self._offer_to_archive(security_id)
         self.accept()
+
+    def _offer_to_archive(self, security_id: int) -> None:
+        """After a close-out, offer to retire the security (ADR-155).
+
+        Only when *no* account holds it any more — the same security can sit in
+        several accounts, and closing one of them is no reason to stop pricing
+        the others. Declining is free: the position is closed either way, and
+        this only governs whether the row keeps being priced and listed."""
+        if security_id in self._repo.securities_currently_held():
+            return
+        sec = self._repo.get_security(security_id)
+        label = (sec.symbol or sec.name) if sec is not None else "this security"
+        answer = QMessageBox.question(
+            self, "Position closed",
+            f"{label} is no longer held in any account.\n\n"
+            "Stop tracking it? It will drop off the Securities screen and stop "
+            "using a price request on every refresh. Its transactions, prices "
+            "and realised gain are kept, and you can track it again at any time "
+            "from the Securities screen.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self._repo.archive_security(security_id)
+            self._repo.commit()
+        except Exception as e:  # noqa: BLE001
+            self._repo.rollback()
+            QMessageBox.warning(
+                self, "Could not stop tracking",
+                f"The transaction saved, but the security was not retired:\n\n{e}",
+            )
 
     def _on_save_and_new(self) -> None:
         """ADR-107: commit like Save, but flag the register to reopen a fresh

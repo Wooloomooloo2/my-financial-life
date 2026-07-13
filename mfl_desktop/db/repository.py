@@ -204,6 +204,11 @@ class SecurityRow:
     symbol: str
     type: str
     earliest_txn_date: Optional[str] = None
+    # ADR-155: set when the position was closed out and the security retired —
+    # it stops being priced and drops off the Securities list. Only the
+    # dialog-feeding queries populate it; the pricing queries filter on it in
+    # SQL and never need to read it back.
+    archived_at: Optional[str] = None
     # Instrument class + per-class metadata (ADR-093). Default to a plain equity
     # so every pre-093 construction site reads back exactly as before. The
     # value-math source of truth is ``price_multiplier`` (cash value of one unit
@@ -2743,7 +2748,7 @@ class Repository:
         "COALESCE(type, '') AS type, "
         "instrument_type, price_multiplier, face_value, coupon_rate, "
         "maturity_date, cusip, underlying_symbol, strike, expiry_date, "
-        "option_type, contract_size"
+        "option_type, contract_size, archived_at"
     )
 
     @staticmethod
@@ -2762,16 +2767,55 @@ class Repository:
             underlying_symbol=r["underlying_symbol"], strike=r["strike"],
             expiry_date=r["expiry_date"], option_type=r["option_type"],
             contract_size=r["contract_size"],
+            archived_at=r["archived_at"],
         )
 
-    def list_securities(self) -> list[SecurityRow]:
-        """Every non-archived security, sorted by name."""
+    def list_securities(self, *, include_archived: bool = False) -> list[SecurityRow]:
+        """Securities sorted by name — non-archived only unless asked otherwise.
+
+        ADR-155 gave ``archived_at`` its first writer (``archive_security``), so
+        the Securities dialog needs a way to see past the filter every other
+        read path applies; that's what ``include_archived`` is for."""
+        where = "" if include_archived else "WHERE archived_at IS NULL "
         cur = self._conn.execute(
             f"SELECT {self._SECURITY_COLS} "
-            "FROM security WHERE archived_at IS NULL "
+            f"FROM security {where}"
             "ORDER BY name COLLATE NOCASE"
         )
         return [self._security_row(r) for r in cur]
+
+    def archive_security(
+        self, security_id: int, *, when: Optional[str] = None,
+    ) -> None:
+        """Stop tracking a security (ADR-155): a fully-exited position needs no
+        prices and shouldn't clutter the Securities screen.
+
+        ``security.archived_at`` has been in the schema since ADR-043 and every
+        read path already filters on it — ``securities_to_price`` (so a sweep
+        stops spending a Tiingo request on it), ``securities_missing_history``,
+        ``securities_with_incomplete_history``, ``list_securities`` — but until
+        now nothing ever wrote it. Purely a display/pricing gate: transactions,
+        prices and realized gains are untouched, so archiving is lossless and
+        ``unarchive_security`` puts it back exactly."""
+        if when is None:
+            self._conn.execute(
+                "UPDATE security SET archived_at = datetime('now') WHERE id = ?",
+                (security_id,),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE security SET archived_at = ? WHERE id = ?",
+                (when, security_id),
+            )
+
+    def unarchive_security(self, security_id: int) -> None:
+        """Track a security again (ADR-155) — the exact inverse of
+        ``archive_security``; it reappears in the Securities list and in the
+        next price sweep."""
+        self._conn.execute(
+            "UPDATE security SET archived_at = NULL WHERE id = ?",
+            (security_id,),
+        )
 
     def get_security(self, security_id: int) -> Optional[SecurityRow]:
         """One fully-populated security by id (ADR-093), or None if missing."""
@@ -2816,7 +2860,8 @@ class Repository:
             "  COALESCE(s.type, '') AS type, "
             "  s.instrument_type, s.price_multiplier, s.face_value, "
             "  s.coupon_rate, s.maturity_date, s.cusip, s.underlying_symbol, "
-            "  s.strike, s.expiry_date, s.option_type, s.contract_size "
+            "  s.strike, s.expiry_date, s.option_type, s.contract_size, "
+            "  s.archived_at "
             "FROM security s "
             "JOIN txn t ON t.security_id = s.id "
             f"WHERE t.account_id IN ({placeholders}) "
@@ -3036,6 +3081,24 @@ class Repository:
             )
             for r in cur
         }
+
+    def latest_market_price_dates(self) -> dict[int, str]:
+        """Newest **market** price date per security, keyed by security_id
+        (ADR-049 amendment) — the input to "is this security already current?",
+        which is what lets a latest-price refresh cost zero Tiingo requests when
+        there's nothing new to fetch.
+
+        Only ``manual`` / ``tiingo`` rows count, deliberately: a
+        ``transaction``-sourced row is a trade print seeded from the owner's own
+        buy/sell (``seed_prices_from_transactions``), not that day's close. If it
+        counted, a security bought on Friday would look priced-through-Friday and
+        never get its real close fetched."""
+        cur = self._conn.execute(
+            "SELECT security_id, MAX(price_date) AS md "
+            "FROM security_price WHERE source IN ('manual', 'tiingo') "
+            "GROUP BY security_id"
+        )
+        return {r["security_id"]: r["md"] for r in cur}
 
     def latest_price_for_security(self, security_id: int) -> Optional[PriceRow]:
         row = self._conn.execute(

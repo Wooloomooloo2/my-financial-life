@@ -25,5 +25,9 @@ mfl_desktop/_build_info.py
 # Marketing screenshots (generated for the website handoff; not app source).
 screenshots/
 
+# Rotating DB snapshots + Data Library saves written by the app at runtime
+# (ADR-057 / ADR-059). Local data, never source.
+Snapshots/
+
 # macOS noise
 .DS_Store

@@ -409,6 +409,40 @@ def compute_holdings_view(
     )
 
 
+def shares_held(
+    txns: list[TransactionRow],
+    security_id: int,
+    *,
+    as_of: Optional[str] = None,
+    exclude_txn_id: Optional[int] = None,
+    multipliers: Optional[dict[int, float]] = None,
+) -> float:
+    """Open shares of ``security_id`` after replaying ``txns`` — the exact
+    figure a Sell-to-clear must sell (ADR-155).
+
+    Deliberately delegates to ``compute_holdings_view`` rather than re-summing
+    share-ins minus share-outs. The engine **clamps an oversell at zero** and
+    drops the excess (see the FIFO drain in ``compute_holdings_view``), so a
+    naive net can disagree with what the app actually shows — by exactly the
+    phantom that ADR-155 exists to eliminate. Selling the engine's figure is
+    what drives the position to zero on screen; selling the naive one would not.
+
+    ``as_of`` (inclusive) and ``exclude_txn_id`` scope the replay: an *edit* of
+    an existing sell must not count that sell's own shares as still held.
+    Returns 0.0 for a security with no open position.
+    """
+    rows = [
+        t for t in txns
+        if (as_of is None or t.posted_date <= as_of)
+        and (exclude_txn_id is None or t.id != exclude_txn_id)
+    ]
+    view = compute_holdings_view(rows, Decimal("0"), {}, multipliers)
+    for h in view.holdings:
+        if h.security_id == security_id:
+            return h.shares
+    return 0.0
+
+
 # ── Valuation over time (ADR-045) ──────────────────────────────────────────
 
 

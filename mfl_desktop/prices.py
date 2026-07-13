@@ -45,6 +45,14 @@ RATE_LIMIT_BACKOFF_SECONDS = 3600
 # is then retried automatically (a ticker that gains coverage heals itself).
 PRICE_UNAVAILABLE_COOLDOWN_DAYS = 30
 
+# The UTC hour after which a US trading day's close is expected to be published
+# (ADR-049 amendment). US markets close 16:00 ET (20:00/21:00 UTC) and Tiingo's
+# end-of-day row settles after that; 22:00 UTC is a deliberately conservative
+# line, so before it we consider *yesterday's* close the newest one available.
+# Erring late is the safe direction: it costs a few hours' staleness, never a
+# wasted sweep of the whole portfolio against a close that doesn't exist yet.
+CLOSE_PUBLISHED_UTC_HOUR = 22
+
 # Default earliest date for a history backfill (ADR-049 amendment). Tiingo's
 # daily-prices endpoint returns only the latest SINGLE row when no startDate is
 # sent; the full series requires an explicit startDate. This far-past date is
@@ -269,6 +277,62 @@ def _rate_limited_until(repo: "Repository") -> Optional[datetime]:
     return ts if _now_utc() < ts else None
 
 
+def expected_close_date(now: Optional[datetime] = None) -> str:
+    """The most recent date whose end-of-day close should be published, as
+    'YYYY-MM-DD' (ADR-049 amendment).
+
+    Today only counts once we're past ``CLOSE_PUBLISHED_UTC_HOUR`` — before that
+    the newest available close is yesterday's — and Saturday/Sunday walk back to
+    Friday. Market **holidays** are deliberately not modelled here: maintaining an
+    exchange calendar (and its per-market divergence) is a standing liability for
+    a handful of days a year. They're *learned* instead — see ``_close_target``.
+    """
+    d = (now or _now_utc()).astimezone(timezone.utc)
+    day = d.date()
+    if d.hour < CLOSE_PUBLISHED_UTC_HOUR:
+        day -= timedelta(days=1)
+    while day.weekday() >= 5:            # 5 = Saturday, 6 = Sunday
+        day -= timedelta(days=1)
+    return day.isoformat()
+
+
+def _close_target(repo: "Repository", now: Optional[datetime] = None) -> str:
+    """The close date a refresh should be trying to reach — the calendar
+    expectation, corrected by what Tiingo last actually served (ADR-049
+    amendment).
+
+    This is how holidays are handled without an exchange calendar. On (say) a
+    holiday Monday, ``expected_close_date`` says "Monday", we sweep, and Tiingo's
+    newest row comes back Friday. We remember that pairing
+    (``tiingo_close_seen_for`` = the date we expected, ``tiingo_market_close_date``
+    = the date the market actually last closed). Every later refresh that same day
+    sees "we already asked for Monday and the market's newest close is Friday",
+    lowers its target to Friday, finds every security current, and spends **zero**
+    requests. Come Tuesday the expectation moves on and the pairing goes stale, so
+    a real fetch happens again.
+    """
+    expected = expected_close_date(now)
+    seen_for = (repo.get_setting("tiingo_close_seen_for") or "").strip()
+    actual = (repo.get_setting("tiingo_market_close_date") or "").strip()
+    if seen_for == expected and actual and actual < expected:
+        return actual                    # expected day wasn't a trading day
+    return expected
+
+
+def _record_close_seen(
+    repo: "Repository", prices: dict[str, tuple[float, str]],
+    now: Optional[datetime] = None,
+) -> None:
+    """Remember the newest close Tiingo actually served for the day we asked
+    about, so a repeat refresh on a non-trading day costs nothing (see
+    ``_close_target``). No-op when the sweep returned nothing to learn from."""
+    dates = [on_date for _, on_date in prices.values() if on_date]
+    if not dates:
+        return
+    repo.set_setting("tiingo_close_seen_for", expected_close_date(now))
+    repo.set_setting("tiingo_market_close_date", max(dates))
+
+
 def _record_rate_limit(
     repo: "Repository", retry_after_seconds: Optional[int] = None,
 ) -> str:
@@ -308,15 +372,26 @@ def _hours_since(iso_ts: str) -> Optional[float]:
 
 
 def refresh_latest_prices_into(
-    repo: "Repository", *, force: bool = False,
+    repo: "Repository", *, force: bool = False, now: Optional[datetime] = None,
 ) -> RefreshResult:
     """Fetch the latest close for every tickered security and upsert into
     ``security_price``.
 
-    No-op when: the API key is unset; the last refresh was < 24h ago and
-    ``force=False`` (launch path); or no securities carry a symbol. Records the
-    refresh timestamp on success; failures leave it untouched so the next
-    launch retries.
+    **Costs zero requests when there is nothing new to fetch** (ADR-049
+    amendment). Tiingo's daily endpoint is one request per ticker and the free
+    tier allows only 50 per hour, so a sweep of an N-ticker portfolio costs N —
+    and re-sweeping symbols whose close we already hold is how a 32-ticker
+    portfolio blows the hourly cap in two clicks. Every security whose newest
+    *market* price is already at (or past) the latest published close is skipped
+    without a request, which makes a refresh on a weekend, a holiday, or minutes
+    after the last one entirely free.
+
+    No-op when: the API key is unset; a 429 back-off is active; the last refresh
+    was < 24h ago and ``force=False`` (launch path); no securities carry a
+    symbol; or every held security is already current. ``force`` bypasses the 24h
+    clock — it does **not** re-download closes we already have. Records the
+    refresh timestamp on success; failures leave it untouched so the next launch
+    retries. ``now`` overrides the clock (tests; production passes None).
     """
     api_key = repo.get_setting("tiingo_api_key")
     if not api_key:
@@ -346,10 +421,24 @@ def refresh_latest_prices_into(
         repo.set_setting("tiingo_last_refresh_at", now)
         return RefreshResult(fetched_at=now, new_prices_count=0, errors=[])
 
+    # Drop the securities we already hold the latest close for — the request-cost
+    # fix (ADR-049 amendment). A security with no market price at all (only
+    # transaction-seeded prints, or none) has no date here, so it always fetches.
+    target = _close_target(repo, now)
+    have = repo.latest_market_price_dates()
+    due = [s for s in securities if (have.get(s.id) or "") < target]
+    skipped = len(securities) - len(due)
+    if not due:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        repo.set_setting("tiingo_last_refresh_at", now)
+        return RefreshResult(
+            fetched_at=now, new_prices_count=0, errors=[], skipped_count=skipped,
+        )
+
     # symbol (upper) → security ids that use it (a symbol can, rarely, map to
     # more than one mastered security).
     by_symbol: dict[str, list[int]] = {}
-    for s in securities:
+    for s in due:
         by_symbol.setdefault(s.symbol.strip().upper(), []).append(s.id)
 
     client = TiingoClient(api_key)
@@ -359,11 +448,17 @@ def refresh_latest_prices_into(
         return RefreshResult(
             fetched_at=last or None, new_prices_count=0,
             errors=[_record_rate_limit(repo, e.retry_after_seconds)],
+            skipped_count=skipped,
         )
     except PriceFetchError as e:
         return RefreshResult(
             fetched_at=last or None, new_prices_count=0, errors=[str(e)],
+            skipped_count=skipped,
         )
+
+    # What the market's newest close actually turned out to be — the holiday
+    # correction a repeat refresh reads (see _close_target).
+    _record_close_seen(repo, prices, now)
 
     count = 0
     for symbol, (price, on_date) in prices.items():
@@ -381,7 +476,10 @@ def refresh_latest_prices_into(
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     repo.set_setting("tiingo_last_refresh_at", now)
-    return RefreshResult(fetched_at=now, new_prices_count=count, errors=errors)
+    return RefreshResult(
+        fetched_at=now, new_prices_count=count, errors=errors,
+        skipped_count=skipped,
+    )
 
 
 def backfill_missing_history_into(

@@ -198,9 +198,13 @@ class _MarketRefreshRunnable(QRunnable):
                 if self._do_prices:
                     try:
                         r = prices.refresh_latest_prices_into(bg, force=True)
-                        payload["prices"] = (r.new_prices_count, list(r.errors))
+                        payload["prices"] = (
+                            r.new_prices_count, list(r.errors), r.skipped_count,
+                        )
                     except Exception as e:  # noqa: BLE001
-                        payload["prices"] = (None, [f"Could not update prices: {e}"])
+                        payload["prices"] = (
+                            None, [f"Could not update prices: {e}"], 0,
+                        )
                 if self._do_rates:
                     try:
                         r = fx.refresh_latest_into(bg, force=True)
@@ -1224,8 +1228,15 @@ class RegisterWindow(QMainWindow):
         parts: list[str] = []
         errors: list = []
         if payload.get("prices") is not None:
-            n, errs = payload["prices"]
-            parts.append(self._count_phrase(n, "price"))
+            n, errs, already = payload["prices"]
+            # ADR-049 amendment: nothing fetched because every security already
+            # holds the latest close is the *good* outcome (and cost no Tiingo
+            # requests) — don't report it as a bare "0 prices".
+            # (The message is prefixed "Updated ", so keep the phrase a noun.)
+            parts.append(
+                "0 prices (already up to date)" if n == 0 and already
+                else self._count_phrase(n, "price")
+            )
             errors += errs
         if payload.get("rates") is not None:
             n, errs = payload["rates"]
