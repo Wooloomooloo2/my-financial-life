@@ -56,7 +56,9 @@ from mfl_desktop.reports.filters import (
     TYPE_INCOME_OVER_TIME,
     TYPE_SPENDING_OVER_TIME,
 )
-from mfl_desktop.ui.chart_helpers import colour_for, currency_symbol, legend_chip
+from mfl_desktop.ui.chart_helpers import (
+    SERIES_SLOTS, colour_for, currency_symbol, legend_chip,
+)
 from mfl_desktop.ui.page_header import (
     PageHeader,
     report_folder_name,
@@ -147,6 +149,16 @@ _INCOME_DIRECTION = _Direction(
 # collide with a real category id (all positive) or UNCATEGORISED_ID (1).
 REINVESTED_GROUP_ID = -100
 REINVESTED_GROUP_LABEL = "Reinvested Dividends"
+
+# Synthetic group for everything past the palette's eight slots (ADR-166). The
+# series palette has eight identity colours and does not cycle — a 9th series
+# would wear slot 1's teal and read as the same category as the largest one.
+# So the tail folds into a single "Other" bucket instead. Negative, like
+# REINVESTED_GROUP_ID, so it can never collide with a real category id, and
+# guarded in the click handlers the same way: "Other" is not a category and has
+# nothing to drill into.
+OTHER_GROUP_ID = -200
+OTHER_GROUP_LABEL = "Other"
 
 
 def _auto_granularity_for(span_days: int) -> str:
@@ -560,11 +572,29 @@ class SpendingReportWindow(QMainWindow):
         groups_sorted_ids = sorted(
             group_totals.keys(), key=lambda g: -group_totals[g],
         )
+
+        # The palette has eight identity colours and does not cycle (ADR-166),
+        # so anything past the eighth-largest group folds into one "Other"
+        # slice rather than being handed a colour already spoken for. Keep the
+        # top seven and make Other the eighth, so the chart never shows two
+        # different categories in the same teal.
+        if len(groups_sorted_ids) > SERIES_SLOTS:
+            kept = groups_sorted_ids[: SERIES_SLOTS - 1]
+            folded = set(groups_sorted_ids[SERIES_SLOTS - 1:])
+            merged: dict[tuple[int, str], int] = {}
+            for (gid, bucket), val in spending.items():
+                key = (OTHER_GROUP_ID if gid in folded else gid, bucket)
+                merged[key] = merged.get(key, 0) + val
+            spending = merged
+            groups_sorted_ids = kept + [OTHER_GROUP_ID]
+
         groups: list[tuple[int, str]] = [
             (
                 gid,
                 REINVESTED_GROUP_LABEL
                 if gid == REINVESTED_GROUP_ID
+                else OTHER_GROUP_LABEL
+                if gid == OTHER_GROUP_ID
                 else self._categories_by_id[gid].name
                 if gid in self._categories_by_id else f"id={gid}",
             )
@@ -762,7 +792,7 @@ class SpendingReportWindow(QMainWindow):
         # Dividends series (ADR-110), which isn't a real category and has no
         # children — has nothing to drill into; ignore so we don't push a
         # pointless snapshot.
-        if group_id in (UNCATEGORISED_ID, REINVESTED_GROUP_ID):
+        if group_id in (UNCATEGORISED_ID, REINVESTED_GROUP_ID, OTHER_GROUP_ID):
             return
         # When the clicked segment can't be broken down any further — we're
         # already at the leaf rollup, or the category has no children — open
@@ -811,7 +841,7 @@ class SpendingReportWindow(QMainWindow):
         bucket — without drilling first (ADR-114). This is the deterministic
         'show me these transactions' gesture; single-click still drills the
         category rollup."""
-        if group_id in (UNCATEGORISED_ID, REINVESTED_GROUP_ID):
+        if group_id in (UNCATEGORISED_ID, REINVESTED_GROUP_ID, OTHER_GROUP_ID):
             return
         self._open_transactions(group_id, bucket)
 

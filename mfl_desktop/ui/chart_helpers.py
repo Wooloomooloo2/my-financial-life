@@ -4,9 +4,10 @@ After the chart-engine comparison the owner picked the hand-rolled
 paintEvent variant. The Spending Over Time chart and the budget
 burn-down chart share these bits so they look consistent:
 
-- ``GROUP_PALETTE`` + ``colour_for`` — the stable, accessible 12-colour
-  series. Stack segments and chart series both index into this so the
-  same palette runs through every report.
+- ``series_palette`` + ``colour_for`` — the eight-slot categorical series
+  palette, in fixed order, resolved from the theme tokens at paint time
+  (ADR-166). Stack segments and chart series both index into it, so the same
+  palette runs through every report and follows the light/dark theme.
 - ``nice_ticks`` — round-number Y-axis ticks (the d3 1/2/5 heuristic).
 - ``fmt_currency`` — locale-free GBP formatter (owner is UK-only).
 - ``legend_chip`` — swatch + label widget, used by chart legend strips.
@@ -23,27 +24,37 @@ from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
-# Stable stack colours — indexed by position in the caller's group list.
-# Tested at AA contrast against white at 9pt typography.
-GROUP_PALETTE: list[str] = [
-    "#2563eb",  # blue-600
-    "#10b981",  # emerald-500
-    "#f59e0b",  # amber-500
-    "#ef4444",  # red-500
-    "#8b5cf6",  # violet-500
-    "#06b6d4",  # cyan-500
-    "#ec4899",  # pink-500
-    "#84cc16",  # lime-500
-    "#f97316",  # orange-500
-    "#14b8a6",  # teal-500
-    "#a855f7",  # purple-500
-    "#64748b",  # slate-500
-]
+# The categorical series palette has eight slots, in fixed order, and lives in
+# `tokens` so it follows the light/dark theme (ADR-166). It replaced a frozen
+# 12-colour Tailwind list whose docstring claimed to be "tested at AA contrast"
+# — it was not: four of its colours sat below 3:1 on white, and violet-500 vs
+# blue-600 measured ΔE 3.3 under protanopia, i.e. the same colour to a
+# red-blind reader.
+SERIES_SLOTS = 8
+
+
+def series_palette() -> list[str]:
+    """The eight series hexes for the active theme, in slot order."""
+    return [tokens.c(f"series_{i + 1}") for i in range(SERIES_SLOTS)]
 
 
 def colour_for(index: int) -> QColor:
-    """Stable colour at a given series index — wraps the palette."""
-    return QColor(GROUP_PALETTE[index % len(GROUP_PALETTE)])
+    """The colour for series ``index`` — resolved from the active theme.
+
+    Read at *paint* time, not frozen at import, so a light/dark toggle
+    recolours every chart (ADR-076's repaint does the rest).
+
+    ``index`` is the series' position in the caller's list, and that position is
+    its **identity**: slot 3 is the third series whether or not series 1 is
+    filtered out. Colour must never follow rank.
+
+    **Beyond eight series it wraps**, so a 9th series repeats slot 1's teal.
+    That is a known limitation, not a design: the right answer is to fold the
+    tail into an "Other" bucket, which is a per-report data change (see the
+    ADR-166 follow-up). Eight is already more series than any of these charts
+    can be read at.
+    """
+    return QColor(tokens.c(f"series_{index % SERIES_SLOTS + 1}"))
 
 
 # ── theme-aware structural chart colours (ADR-076 round 2) ──

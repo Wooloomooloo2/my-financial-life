@@ -65,6 +65,39 @@ _TOKENS: dict[str, tuple[str, str]] = {
     # tints (cell-background washes — kept subtle so light text reads on dark)
     "today_col":       ("#eff6ff", "#243352"),  # today's month column (blue-50 light)
     "rollover_bg":     ("#fef9c3", "#3f3a18"),  # carried-in rollover cell (amber-100 light)
+
+    # ── categorical series palette (ADR-166) ─────────────────────────────────
+    # The eight chart-series slots, in FIXED order. Identity colours: slot N is
+    # always the Nth series, never reassigned by rank or by how many series a
+    # filter left behind.
+    #
+    # These are not eyeballed. Both columns were produced by iterating against
+    # the dataviz validator (OKLCH lightness band, chroma floor, Machado-2009
+    # CVD separation for protanopia/deuteranopia, and contrast vs the chart
+    # surface) until every check passed, in **all-pairs** mode — the standard
+    # the sunburst and treemap need, where any two slices can end up touching.
+    # The dark column is a *separately validated* set against the dark surface
+    # (#1e293b), not an automatic lightening of the light one: three slots had
+    # to move to stay inside the dark lightness band.
+    #
+    # Slot 1 is the brand teal's *chart-safe* sibling. The accent itself
+    # (#1f6e78) fails the chroma floor (C 0.075 < 0.10) — as a large fill it
+    # reads grey — so the series slot is the same hue at usable chroma.
+    #
+    # Do not "just tweak" one of these. Re-run:
+    #   node scripts/validate_palette.js "<the 8 hexes>" --mode light \
+    #        --surface "#ffffff" --pairs all
+    # Blue (slot 3) and indigo (slot 6) are held apart by *lightness*, not hue —
+    # under deuteranopia they are the same hue, and closing that lightness gap
+    # collapses them (this is exactly the defect the old palette had).
+    "series_1":        ("#0d9488", "#0d9488"),  # teal — brand
+    "series_2":        ("#d99000", "#c88400"),  # amber
+    "series_3":        ("#2a78d6", "#2a78d6"),  # blue
+    "series_4":        ("#008300", "#008300"),  # green
+    "series_5":        ("#e34948", "#e34948"),  # red
+    "series_6":        ("#4a3aa7", "#5f4dbf"),  # indigo
+    "series_7":        ("#dd6699", "#dd6699"),  # pink
+    "series_8":        ("#eb6834", "#e3612e"),  # orange
 }
 
 _THEMES = ("light", "dark")
