@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from mfl_desktop.ui import tokens
 from mfl_desktop.db.repository import Repository
 
 
@@ -64,7 +65,7 @@ class ImportMappingsDialog(QDialog):
 
         self._empty_lbl = QLabel("No mappings yet.")
         self._empty_lbl.setAlignment(Qt.AlignCenter)
-        self._empty_lbl.setStyleSheet("color: #94a3b8;")
+        tokens.themed(self._empty_lbl, "color: {subtle};")
 
         action_row = QHBoxLayout()
         action_row.addStretch(1)

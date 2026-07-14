@@ -141,13 +141,24 @@ class AboutDialog(QDialog):
         self._refresh()
 
     def _refresh(self) -> None:
-        """Re-read and render the current license status."""
+        """Re-read and render the current license status.
+
+        The status line is **rich text**, so its colours live inside an HTML
+        string that ``tokens.themed`` cannot reach — the same blind spot that
+        left the budget's Pool line frozen (ADR-161). They are resolved from the
+        tokens here instead (ADR-167). Resolving at render time is sufficient:
+        the About box is modal, so the theme cannot change while it is open.
+        """
+        ok = tokens.c("positive_strong")
+        warn = tokens.c("warning")
+        bad = tokens.c("negative_strong")
+
         # Store build (ADR-125): the store owns the purchase, so there's no key
         # to enter or buy-link to show — render a simple owned line and hide both
         # action buttons (current_status reports LICENSED with no info here).
         if is_store_build():
             self._state_lbl.setText(
-                "<b style='color:#1a7f37'>Purchased</b> via the App Store — "
+                f"<b style='color:{ok}'>Purchased</b> via the App Store — "
                 "thank you!"
             )
             self._enter_btn.setVisible(False)
@@ -157,7 +168,7 @@ class AboutDialog(QDialog):
         if status.state == STATE_LICENSED and status.info is not None:
             who = status.info.name or status.info.email or "this device"
             body = (
-                f"<b style='color:#1a7f37'>Licensed</b> to {who}"
+                f"<b style='color:{ok}'>Licensed</b> to {who}"
                 f"<br><span>Edition {status.info.edition}.x — thank you!</span>"
             )
             self._enter_btn.setText("Replace license…")
@@ -171,12 +182,12 @@ class AboutDialog(QDialog):
             self._buy_btn.setVisible(True)
         elif status.state in (STATE_WRONG_EDITION, STATE_INVALID):
             body = (
-                f"<b style='color:#b35900'>Action needed</b><br>{status.message}"
+                f"<b style='color:{warn}'>Action needed</b><br>{status.message}"
             )
             self._buy_btn.setVisible(True)
         else:  # expired
             body = (
-                "<b style='color:#b42318'>Your free trial has ended.</b>"
+                f"<b style='color:{bad}'>Your free trial has ended.</b>"
                 "<br>Buy a license to keep using My Financial Life."
             )
             self._buy_btn.setVisible(True)

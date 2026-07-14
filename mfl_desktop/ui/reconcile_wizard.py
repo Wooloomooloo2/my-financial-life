@@ -59,16 +59,21 @@ from mfl_desktop.db.repository import (
 from mfl_desktop import txn_status
 from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
+from mfl_desktop.ui import tokens
 from mfl_desktop.ui.chart_helpers import currency_symbol
 
 
 
-# Tailwind slate / accent hexes, consistent with the rest of the UI.
-_MUTED = "#475569"
-_FAINT = "#94A3B8"
-_INK = "#0F172A"
-_GREEN = "#16A34A"
-_RED = "#DC2626"
+# Colours come from the design tokens (ADR-167). This module froze five
+# light-theme hexes and never joined the ADR-076 token layer, so in dark mode
+# the page title (_INK = #0F172A) was drawn in near-black on the near-black
+# canvas — the wizard's only instruction was *invisible*. Each token's light
+# value equals the hex it replaces, so light mode is unchanged.
+_TOK_INK = "{text}"
+_TOK_MUTED = "{muted_strong}"
+_TOK_FAINT = "{subtle}"
+_TOK_GREEN = "{positive}"
+_TOK_RED = "{negative}"
 
 # Row data roles.
 _ROLE_TXN_ID = Qt.UserRole
@@ -181,7 +186,7 @@ class ReconcileWizard(QDialog):
         title = QLabel(
             "Enter the dates and opening and closing amounts for the statement."
         )
-        title.setStyleSheet(f"font-weight: 600; color: {_INK};")
+        tokens.themed(title, "font-weight: 600; color: " + _TOK_INK + ";")
         title.setWordWrap(True)
         layout.addWidget(title)
 
@@ -203,7 +208,7 @@ class ReconcileWizard(QDialog):
         self._end_balance.setAlignment(Qt.AlignRight)
         self._change_label = QLabel("—")
         self._change_label.setAlignment(Qt.AlignRight)
-        self._change_label.setStyleSheet(f"color: {_MUTED};")
+        tokens.themed(self._change_label, "color: " + _TOK_MUTED + ";")
         bal_form = QFormLayout()
         bal_form.addRow("Starting balance:", self._start_balance)
         bal_form.addRow("Ending balance:", self._end_balance)
@@ -384,7 +389,7 @@ class ReconcileWizard(QDialog):
             "Check off the transactions that appear on your statement until "
             "the Missing value is zero."
         )
-        self._checkoff_title.setStyleSheet(f"font-weight: 600; color: {_INK};")
+        tokens.themed(self._checkoff_title, "font-weight: 600; color: " + _TOK_INK + ";")
         self._checkoff_title.setWordWrap(True)
         layout.addWidget(self._checkoff_title)
 
@@ -397,7 +402,7 @@ class ReconcileWizard(QDialog):
         self._withdrawals_label = QLabel("WITHDRAWALS  —")
         self._deposits_label = QLabel("DEPOSITS  —")
         for lbl in (self._withdrawals_label, self._deposits_label):
-            lbl.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+            tokens.themed(lbl, "color: " + _TOK_MUTED + "; font-size: 11px;")
         sub_box.addWidget(self._withdrawals_label)
         sub_box.addWidget(self._deposits_label)
         strip.addLayout(sub_box)
@@ -407,7 +412,7 @@ class ReconcileWizard(QDialog):
         bal_box = QVBoxLayout()
         bal_box.setSpacing(2)
         self._strip_change = QLabel("—")
-        self._strip_change.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        tokens.themed(self._strip_change, "color: " + _TOK_MUTED + "; font-size: 11px;")
         self._edit_btn = QPushButton("Edit dates / balances…")
         self._edit_btn.setFlat(True)
         self._edit_btn.setStyleSheet("text-align: right;")
@@ -419,12 +424,13 @@ class ReconcileWizard(QDialog):
         missing_box = QVBoxLayout()
         missing_box.setSpacing(0)
         cap = QLabel("MISSING")
-        cap.setStyleSheet(f"color: {_FAINT}; font-size: 10px;")
+        tokens.themed(cap, "color: " + _TOK_FAINT + "; font-size: 10px;")
         cap.setAlignment(Qt.AlignRight)
         self._missing_label = QLabel("—")
         self._missing_label.setAlignment(Qt.AlignRight)
-        self._missing_label.setStyleSheet(
-            f"font-size: 18px; font-weight: 700; color: {_GREEN};"
+        tokens.themed(
+            self._missing_label,
+            "font-size: 18px; font-weight: 700; color: " + _TOK_GREEN + ";",
         )
         missing_box.addWidget(cap)
         missing_box.addWidget(self._missing_label)
@@ -443,7 +449,7 @@ class ReconcileWizard(QDialog):
         # there are any and 'include cleared' is off.
         self._cleared_warning = QLabel("")
         self._cleared_warning.setWordWrap(True)
-        self._cleared_warning.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        tokens.themed(self._cleared_warning, "color: " + _TOK_MUTED + "; font-size: 11px;")
         self._cleared_warning.setVisible(False)
         layout.addWidget(self._cleared_warning)
 
@@ -660,19 +666,21 @@ class ReconcileWizard(QDialog):
         change = self._statement_change()
         if change is None:
             self._missing_label.setText("—")
-            self._missing_label.setStyleSheet(
-                f"font-size: 18px; font-weight: 700; color: {_RED};"
+            tokens.themed(
+                self._missing_label,
+                "font-size: 18px; font-weight: 700; color: " + _TOK_RED + ";",
             )
             return
         missing = change - net
         if missing == 0:
             self._missing_label.setText(f"✓ {_fmt(Decimal('0.00'), self._ccy)}")
-            colour = _GREEN
+            colour = _TOK_GREEN
         else:
             self._missing_label.setText(_fmt(missing, self._ccy))
-            colour = _RED
-        self._missing_label.setStyleSheet(
-            f"font-size: 18px; font-weight: 700; color: {colour};"
+            colour = _TOK_RED
+        tokens.themed(
+            self._missing_label,
+            "font-size: 18px; font-weight: 700; color: " + colour + ";",
         )
 
     def _apply_search(self, text: str) -> None:

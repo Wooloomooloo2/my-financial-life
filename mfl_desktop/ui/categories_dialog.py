@@ -58,12 +58,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from mfl_desktop.ui import tokens
 from mfl_desktop.db.repository import CATEGORY_KINDS, CategoryNode, Repository
 
 # id assigned to the reserved Uncategorised row in 0001_initial.sql.
 UNCATEGORISED_ID = 1
 DEFAULT_NEW_KIND = "expense"
-_ARCHIVED_FG = QColor("#94a3b8")   # slate-400 — muted text for archived rows
+def _archived_fg() -> QColor:
+    """Muted ink for an archived row. Resolved from the token at *use* time, not
+    frozen at import — a QColor constant can't follow a theme toggle (ADR-167).
+    The light value is unchanged (#94a3b8 == the `subtle` token's light step)."""
+    return QColor(tokens.c("subtle"))
 
 
 class CategoriesDialog(QDialog):
@@ -189,7 +194,7 @@ class CategoriesDialog(QDialog):
                 item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
                 if node.archived:
                     for col in range(4):
-                        item.setForeground(col, QBrush(_ARCHIVED_FG))
+                        item.setForeground(col, QBrush(_archived_fg()))
                 if parent_widget is None:
                     self._tree.addTopLevelItem(item)
                 else:

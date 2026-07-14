@@ -114,7 +114,8 @@ class TransferReconcileDialog(QDialog):
         fx_tol = self._repo.get_setting("transfer_fx_tolerance_pct") or "1.0"
         tunables = QLabel(
             f"Window: ±{win_days} days · FX tolerance: ±{fx_tol}% "
-            f"<span style='color:#64748B'>(change in Manage ▸ Currencies)</span>"
+            f"<span style='color:{tokens.c('muted')}'>"
+            f"(change in Manage ▸ Currencies)</span>"
         )
         tunables.setTextFormat(Qt.RichText)
         tokens.themed(tunables, "QLabel { color: {muted_strong}; font-size: 11px; }")

@@ -151,7 +151,7 @@ class TransferDestinationDialog(QDialog):
         # This-side summary — neutral framing, sign carries direction.
         this_html = (
             f"<b>{source_account.name}</b> · {posted_date} · "
-            f"<span style='color:#0F172A'>"
+            f"<span style='color:{tokens.c('text')}'>"
             f"{_fmt_signed(source_signed_display, source_account.currency)}"
             f"</span>"
         )

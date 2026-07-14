@@ -134,6 +134,17 @@ _Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold b
 
 _Sequencing note: P8a is done first — it is the finding with weight, and it is what "go back and polish the early screens" means. P8b is a genuine usability defect, not cosmetics, and is also logged in the defect register below._
 
+### P9 — The dialogs audit (2026-07-14, ADR-167)
+
+**Why this exists:** ADR-161 flagged that the ~47 dialogs had been audited for *button order* (ADR-097) but never for whether they carry the design language. So they were: **55 dialog classes**, statically scanned and **rendered to PNG in both themes** and reviewed as images.
+
+- [x] **The dialogs themselves are fine — ADR-097's audit holds up.** Button order, `QDialogButtonBox`, Esc, default buttons all as described. The `£` literals that a grep flags in eight dialogs are **input parsers** stripping a typed symbol, not hard-coded display — no ADR-159 repeat.
+- [x] **But the dark-mode sweep was never finished — DONE for the broken parts (ADR-167).** ADR-097 also declared the *dark-mode* sweep complete. It was not: **73 frozen light-theme hex literals across 20 modules**. `tokens.themed` styles a widget's *stylesheet*; anything living in an HTML attribute, a `QColor` constant or a module-level style string was never reached. Three were outright breakage, now fixed:
+  - **The reconcile wizard's only instruction line was invisible in dark mode** — `#0F172A` ink on the `#0f172a` canvas, i.e. the background colour. A core workflow, broken since dark mode shipped.
+  - **The transfer dialogs rendered the transaction amount** — the number you're confirming — in near-black rich text, while the prose around it was correctly themed.
+  - **The filter chips** stayed a pale slate pill: a light island on the dark canvas.
+- [ ] **Follow-up: the remaining 60 frozen colours.** Chart *series/semantic* colours (income-green, spend-red, the net-worth family hues, the returns-chart ramp) — **readable in dark but not tuned**, so debt rather than breakage. **Fenced, not fixed:** `tests/test_no_frozen_theme_colours.py` is a ratchet — dialogs are pinned at zero, every other module is listed with its count, and the count may only ever go *down*. Note the **net-worth window's six family colours are a categorical palette that never met the ADR-166 validator**; fold that into this arc.
+
 ### Open non-code owner action (carried from `backlog_notes.txt`)
 - [ ] **SUSA — 7 phantom shares in MS Access - Mark (£1,090), unresolved (ADR-155).** The 2021-01-05 sale of **56** shares runs against only **49** ever bought, so the holdings engine clamped the oversell to zero and a later plug materialised 7 basis-less shares that still show as a holding. Every other oversell in the file was repaired; this one is too large to be rounding, so it means a **purchase of ~7 shares that was never imported**. Owner checked (2026-07-12) and **can find no such transaction on the statements**, so the gap can't be closed from source documents. Whichever repair we eventually pick trades one inaccuracy for another, and that's the owner's call:
   - *Add the 7 shares* (`tools/repair_share_oversells.py --add-shares "MS Access - Mark:SUSA"`) — the position clears and the sale keeps matching the statement's 56 shares, but the added shares carry **no cost basis**, so SUSA's realised gain is overstated by whatever they cost.
@@ -169,6 +180,12 @@ _Sequencing note: P8a is done first — it is the finding with weight, and it is
 ### Open — consistency
 
 - [x] **The currency-symbol map is duplicated — DONE (ADR-165), and this entry badly understated it.** It said "duplicated in `home_view` and `sankey_report_window`. Both are correct today." It was duplicated in **sixteen** modules, and most were **not** correct: they returned *no symbol at all* for a currency outside GBP/USD/EUR/JPY, so a CHF balance printed as a bare `1,234.00` beside sterling — a correctness bug filed as a tidiness one, exactly the mistake §1b was created to stop. All sixteen now delegate to `currency_symbol()`; a source-scan test blocks the next copy.
+
+### Closed — dark mode (from the 2026-07-14 dialogs audit)
+
+- [x] **The reconcile wizard's instruction line was invisible in dark mode — DONE (ADR-167).** `_INK = "#0F172A"` drawn on the `#0f172a` dark canvas: the same colour as the background. Not low-contrast — *invisible*. A core workflow, wrong since dark mode shipped, and no test could see it because no test looks at pixels.
+- [x] **The transfer dialogs rendered the amount in near-black rich text — DONE (ADR-167).** `<span style='color:#0F172A'>` around the transaction amount; the label itself was themed, so the prose read fine and the *number* did not.
+- [x] **The transactions-list filter chips were a frozen light pill — DONE (ADR-167).**
 
 ### Open — usability (from the 2026-07-13 design review)
 

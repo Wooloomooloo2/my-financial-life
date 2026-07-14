@@ -437,16 +437,22 @@ _COLUMN_WIDTHS = {
 }
 
 
-# Chip styling — slate-100 pill with a small × button. Matches the
-# Banktivity-ish chip look.
+# Chip styling — a soft pill with a small × button (the Banktivity-ish look).
+#
+# ADR-167: this was five frozen light-theme hexes, so in dark mode the chips
+# stayed a pale slate pill with near-black text — a light island floating on the
+# dark canvas. It is a *template* now, resolved per theme by tokens.themed.
+# Each token's light value equals the hex it replaces, so light is unchanged.
+# (tokens._format is a regex over {token}, not str.format — literal QSS braces
+# pass through untouched and must NOT be escaped.)
 _CHIP_STYLE = (
-    "QFrame#filterChip { background-color: #e2e8f0; "
-    "border: 1px solid #cbd5e1; border-radius: 12px; }"
+    "QFrame#filterChip { background-color: {border}; "
+    "border: 1px solid {border_strong}; border-radius: 12px; }"
     "QFrame#filterChip QLabel { background: transparent; border: none; "
-    "color: #1e293b; font-size: 12px; }"
+    "color: {heading}; font-size: 12px; }"
     "QFrame#filterChip QPushButton { background: transparent; border: none; "
-    "color: #475569; font-weight: bold; padding: 0 2px; }"
-    "QFrame#filterChip QPushButton:hover { color: #0f172a; }"
+    "color: {muted_strong}; font-weight: bold; padding: 0 2px; }"
+    "QFrame#filterChip QPushButton:hover { color: {text}; }"
 )
 
 
@@ -590,7 +596,7 @@ class TransactionsListWindow(QMainWindow):
         """
         chip = QFrame()
         chip.setObjectName("filterChip")
-        chip.setStyleSheet(_CHIP_STYLE)
+        tokens.themed(chip, _CHIP_STYLE)
         h = QHBoxLayout(chip)
         h.setContentsMargins(10, 4, 10 if on_remove is None else 6, 4)
         h.setSpacing(6)

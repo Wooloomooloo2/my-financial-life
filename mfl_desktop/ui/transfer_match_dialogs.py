@@ -60,7 +60,7 @@ def _source_summary_label(
     payee = source_payee or "—"
     text = (
         f"<b>From {source_account}</b> · {source_date} · "
-        f"<span style='color:#0F172A'>{amt}</span> · {payee}"
+        f"<span style='color:{tokens.c('text')}'>{amt}</span> · {payee}"
     )
     lbl = QLabel(text)
     lbl.setTextFormat(Qt.RichText)
