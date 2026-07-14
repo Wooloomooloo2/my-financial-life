@@ -61,6 +61,7 @@ from mfl_desktop.ui import tokens
 from mfl_desktop.net_worth_history import (
     gather_net_worth_history, period_end_samples, resolve_history_granularity,
 )
+from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.report_filter_dialog_base import GRANULARITY_OPTIONS
 
@@ -79,11 +80,9 @@ _FAMILY_VIEW: list[tuple[str, str, QColor, str]] = [
 _ASSET_COLOR = QColor("#16a34a")   # column header
 _DEBT_COLOR = QColor("#dc2626")
 
-_CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
-
-
 def _symbol(currency: str) -> str:
-    return _CCY_SYMBOLS.get((currency or "").upper(), "")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return currency_symbol(currency) if currency else ""
 
 
 @dataclass(frozen=True)

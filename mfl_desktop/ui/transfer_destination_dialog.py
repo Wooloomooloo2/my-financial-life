@@ -41,14 +41,14 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.chart_helpers import currency_symbol
 
 
-_SYMBOL = {"GBP": "£", "USD": "$", "EUR": "€"}
 
 
 def _fmt_signed(value: Decimal, currency: str) -> str:
     """Display helper — `-$50.00`, `+£12.34`, `EUR 7.50`."""
-    sym = _SYMBOL.get(currency, "")
+    sym = currency_symbol(currency) if currency else ""
     sign = "-" if value < 0 else ("+" if value > 0 else "")
     body = f"{abs(value):,.2f}"
     if sym:

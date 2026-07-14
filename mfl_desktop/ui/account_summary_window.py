@@ -107,11 +107,9 @@ _NON_CASH_FAMILIES = {"investment", "property", "vehicle"}
 # limitation); the holdings panel formats in the account's own currency so the
 # USD figures read correctly. A per-report display-currency selector is a
 # separate backlog item.
-_CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
-
-
 def _sym(currency: str) -> str:
-    return _CURRENCY_SYMBOLS.get((currency or "").upper(), "")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return _ch.currency_symbol(currency) if currency else ""
 
 
 def _month_end_samples(first_iso: str, today: date) -> list[date]:

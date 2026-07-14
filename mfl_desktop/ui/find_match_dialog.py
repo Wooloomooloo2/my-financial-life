@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-_SYM = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
+from mfl_desktop.ui.chart_helpers import currency_symbol
 
 
 class FindMatchDialog(QDialog):
@@ -38,7 +38,7 @@ class FindMatchDialog(QDialog):
         self.setWindowTitle("Find a match")
         self.setModal(True)
         self.resize(680, 460)
-        self._sym = _SYM.get((currency or "").upper(), "")
+        self._sym = currency_symbol(currency) if currency else ""
         self._chosen: Optional[tuple[int, bool]] = None
         self._chosen_label = ""
         self._cands = repo.find_match_candidates(

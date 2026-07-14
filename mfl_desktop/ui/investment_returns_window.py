@@ -57,17 +57,21 @@ from mfl_desktop.ui.investment_returns_filter_dialog import (
 )
 from mfl_desktop.ui.returns_chart import ReturnsChart
 from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
-from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.page_header import (
+    PageHeader,
+    report_folder_name,
+    report_heading,
+)
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter, drilldown_account_scope,
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.report_save import resolve_save_as
+from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop import periods
 from dataclasses import replace
 
-_CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 
 # Role on a security row's first cell carrying its security id for the
 # drill-down (ADR-083) — kept off Qt.UserRole, which _SortItem uses for the
@@ -102,7 +106,8 @@ class _SortItem(QTableWidgetItem):
 
 
 def _sym(currency: Optional[str]) -> str:
-    return _CURRENCY_SYMBOLS.get((currency or "").upper(), "")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return currency_symbol(currency) if currency else ""
 
 
 def _month_end_samples(start: date, end: date) -> list[date]:
@@ -1085,21 +1090,13 @@ class InvestmentReturnsWindow(QMainWindow):
         self.reports_changed.emit()
 
     def _update_name_label(self) -> None:
-        if self._loaded_name is None:
-            self._page_header.set_heading("Untitled", "Investment Returns")
-            self.setWindowTitle("Investment Returns — Untitled")
-            return
-        prefix = ""
-        if self._loaded_folder_id is not None:
-            for fdr in self._repo.list_report_folders():
-                if fdr.id == self._loaded_folder_id:
-                    prefix = f"{fdr.name} / "
-                    break
-        dirty_mark = "*" if self._dirty else ""
-        self._page_header.set_heading(f"{prefix}{self._loaded_name}{dirty_mark}", "Investment Returns")
-        self.setWindowTitle(
-            f"Investment Returns — {prefix}{self._loaded_name}{dirty_mark}"
+        title, subtitle, window_title = report_heading(
+            "Investment Returns", self._loaded_name,
+            folder_name=report_folder_name(self._repo, self._loaded_folder_id),
+            dirty=self._dirty,
         )
+        self._page_header.set_heading(title, subtitle)
+        self.setWindowTitle(window_title)
 
     def _update_save_buttons(self) -> None:
         if self._report_id is None:

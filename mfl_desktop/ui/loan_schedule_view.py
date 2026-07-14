@@ -38,8 +38,9 @@ from mfl_desktop.ui import tokens
 import mfl_desktop.ui.chart_helpers as _ch
 from mfl_desktop.ui.chart_helpers import fmt_currency, nice_ticks
 from mfl_desktop.ui.ui_fonts import set_pt
+from mfl_desktop.ui.chart_helpers import currency_symbol
 
-_CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
+# Currency glyphs: chart_helpers.currency_symbol() is the one definition (ADR-165).
 
 
 class _BalanceChart(QWidget):
@@ -181,7 +182,7 @@ class LoanScheduleWidget(QWidget):
         if loan is None or acct is None:
             self._summary.setText("Not a loan account.")
             return
-        sym = _CCY_SYMBOLS.get(acct.currency, acct.currency + " ")
+        sym = currency_symbol(acct.currency) if acct.currency else ""
         balance = self._repo.loan_current_balance(self._account_id)
         payment = self._repo.effective_payment(loan)
         sched = self._repo.loan_schedule(self._account_id)

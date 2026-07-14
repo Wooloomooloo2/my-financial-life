@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop.db.repository import (
     AccountSummary, FolderSummary, ReportFolderRow, Repository, ReportRow,
 )
@@ -75,12 +76,8 @@ def _header_bg() -> QBrush:
 def _closed_fg() -> QBrush:
     return QBrush(QColor(tokens.c("subtle")))
 
-_CURRENCY_SYMBOLS: dict[str, str] = {
-    "GBP": "£",
-    "USD": "$",
-    "EUR": "€",
-    "JPY": "¥",
-}
+# Currency glyphs come from chart_helpers.currency_symbol() — the one definition
+# (ADR-159/165).
 
 
 class Sidebar(QTreeWidget):
@@ -353,6 +350,17 @@ class Sidebar(QTreeWidget):
         accounts_header.setExpanded(True)
 
         # ── Reports section ──
+        # Only when there is something to put under it (ADR-165). A brand-new
+        # file has no saved reports, and the header was drawn anyway — leaving a
+        # bare "REPORTS" caption dangling at the bottom of the sidebar with
+        # nothing beneath it, which reads as a section that failed to load. A
+        # folder with no reports in it still counts: the folder is content.
+        # (The header doubles as the drag-drop zone anchor — see `_zone_at` —
+        # but with no reports and no folders there is nothing to drop.)
+        if not reports and not report_folders:
+            self.select_all_transactions()
+            return
+
         reports_header = self._make_section_header(
             "REPORTS", "section_reports", with_top_rule=True,
         )
@@ -536,10 +544,17 @@ class Sidebar(QTreeWidget):
 
     @staticmethod
     def _format(amount: Decimal, currency: Optional[str]) -> str:
+        """A balance with its currency marked (ADR-165).
+
+        The old local table returned *no symbol at all* for a currency it didn't
+        know, so a CHF or CAD account rendered as a bare "1,234.00" —
+        indistinguishable from sterling in a column that also holds sterling.
+        ``currency_symbol`` falls back to the code ("CHF 1,234.00"), so a balance
+        is never unlabelled. A row with no currency (a mixed-currency folder
+        total) still gets no symbol, because there isn't one to give.
+        """
         body = f"{abs(amount):,.2f}"
-        symbol = _CURRENCY_SYMBOLS.get(currency) if currency else None
-        if symbol is None:
-            return f"-{body}" if amount < 0 else body
+        symbol = currency_symbol(currency) if currency else ""
         return f"-{symbol}{body}" if amount < 0 else f"{symbol}{body}"
 
     # ── signals / event handling ──

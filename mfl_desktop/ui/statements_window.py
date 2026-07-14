@@ -42,16 +42,16 @@ from PySide6.QtWidgets import (
 from mfl_desktop.db.repository import AccountSummary, Repository, StatementRow
 from mfl_desktop.ui.reconcile_wizard import ReconcileWizard
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.chart_helpers import currency_symbol
 
 
-_SYMBOL = {"GBP": "£", "USD": "$", "EUR": "€"}
 # Status colours are theme tokens resolved live in `_reload_table` (ADR-097
 # P4 dark-mode pass) — `_status_text` returns the token *name*, not a frozen
 # light hex, so the status column is dark-mode-correct on refresh.
 
 
 def _fmt(amount: Decimal, currency: str) -> str:
-    sym = _SYMBOL.get(currency, f"{currency} ")
+    sym = currency_symbol(currency) if currency else ""
     if amount < 0:
         return f"-{sym}{(-amount):,.2f}"
     return f"{sym}{amount:,.2f}"

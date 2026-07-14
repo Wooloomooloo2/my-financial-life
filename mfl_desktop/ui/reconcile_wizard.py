@@ -59,9 +59,9 @@ from mfl_desktop.db.repository import (
 from mfl_desktop import txn_status
 from mfl_desktop.ui.date_widgets import make_date_edit
 from mfl_desktop.ui.transaction_dialog import NewTransactionDialog
+from mfl_desktop.ui.chart_helpers import currency_symbol
 
 
-_SYMBOL = {"GBP": "£", "USD": "$", "EUR": "€"}
 
 # Tailwind slate / accent hexes, consistent with the rest of the UI.
 _MUTED = "#475569"
@@ -78,7 +78,7 @@ _ROLE_AMOUNT = Qt.UserRole + 1
 def _fmt(amount: Decimal, currency: str) -> str:
     """`-£40.00` / `$1,250.00` — minus sits outside the symbol, matching the
     rest of the app."""
-    sym = _SYMBOL.get(currency, f"{currency} ")
+    sym = currency_symbol(currency) if currency else ""
     if amount < 0:
         return f"-{sym}{(-amount):,.2f}"
     return f"{sym}{amount:,.2f}"

@@ -57,7 +57,11 @@ from mfl_desktop.reports.filters import (
     TYPE_SPENDING_OVER_TIME,
 )
 from mfl_desktop.ui.chart_helpers import colour_for, currency_symbol, legend_chip
-from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.page_header import (
+    PageHeader,
+    report_folder_name,
+    report_heading,
+)
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.spending_chart import SpendingChart
 from mfl_desktop.ui.spending_filter_dialog import (
@@ -946,22 +950,13 @@ class SpendingReportWindow(QMainWindow):
         self.reports_changed.emit()
 
     def _update_name_label(self) -> None:
-        label = self._DIRECTION.type_label
-        if self._loaded_name is None:
-            self._page_header.set_heading("Untitled", label)
-            self.setWindowTitle(f"{label} — Untitled")
-            return
-        prefix = ""
-        if self._loaded_folder_id is not None:
-            for f in self._repo.list_report_folders():
-                if f.id == self._loaded_folder_id:
-                    prefix = f"{f.name} / "
-                    break
-        dirty_mark = "*" if self._dirty else ""
-        self._page_header.set_heading(f"{prefix}{self._loaded_name}{dirty_mark}", label)
-        self.setWindowTitle(
-            f"{label} — {prefix}{self._loaded_name}{dirty_mark}"
+        title, subtitle, window_title = report_heading(
+            self._DIRECTION.type_label, self._loaded_name,
+            folder_name=report_folder_name(self._repo, self._loaded_folder_id),
+            dirty=self._dirty,
         )
+        self._page_header.set_heading(title, subtitle)
+        self.setWindowTitle(window_title)
 
     def _update_save_buttons(self) -> None:
         # Bare windows expose a single Save As… verb; the redundant

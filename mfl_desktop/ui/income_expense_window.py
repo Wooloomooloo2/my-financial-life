@@ -47,13 +47,17 @@ from mfl_desktop.reports.income_expense import (
     bucket_bounds, build_buckets, compose_top_level, compute_summary,
     enumerate_buckets,
 )
-from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency
+from mfl_desktop.ui.chart_helpers import colour_for, currency_symbol, fmt_currency
 from mfl_desktop.ui.donut_chart import DonutChart, DonutSegment
 from mfl_desktop.ui.income_expense_chart import IncomeExpenseChart
 from mfl_desktop.ui.income_expense_filter_dialog import (
     IncomeExpenseFilterDialog,
 )
-from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.page_header import (
+    PageHeader,
+    report_folder_name,
+    report_heading,
+)
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter, drilldown_account_scope,
@@ -74,11 +78,9 @@ _GRANULARITY_WORD: dict[str, str] = {
     "week": "week", "month": "month", "quarter": "quarter", "year": "year",
 }
 # Period labels reuse account_summary.PERIOD_LABELS (ADR-082, single source).
-_CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
-
-
 def _symbol_for(currency: str) -> str:
-    return _CCY_SYMBOLS.get((currency or "").upper(), "")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return currency_symbol(currency) if currency else ""
 
 
 def _auto_granularity_for(span_days: int) -> str:
@@ -817,21 +819,13 @@ class IncomeExpenseWindow(QMainWindow):
         self.reports_changed.emit()
 
     def _update_name_label(self) -> None:
-        if self._loaded_name is None:
-            self._page_header.set_heading("Untitled", "Income & Expense")
-            self.setWindowTitle("Income & Expense — Untitled")
-            return
-        prefix = ""
-        if self._loaded_folder_id is not None:
-            for f in self._repo.list_report_folders():
-                if f.id == self._loaded_folder_id:
-                    prefix = f"{f.name} / "
-                    break
-        dirty_mark = "*" if self._dirty else ""
-        self._page_header.set_heading(f"{prefix}{self._loaded_name}{dirty_mark}", "Income & Expense")
-        self.setWindowTitle(
-            f"Income & Expense — {prefix}{self._loaded_name}{dirty_mark}"
+        title, subtitle, window_title = report_heading(
+            "Income & Expense", self._loaded_name,
+            folder_name=report_folder_name(self._repo, self._loaded_folder_id),
+            dirty=self._dirty,
         )
+        self._page_header.set_heading(title, subtitle)
+        self.setWindowTitle(window_title)
 
     def _update_save_buttons(self) -> None:
         if self._report_id is None:

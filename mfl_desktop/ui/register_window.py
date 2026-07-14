@@ -115,6 +115,7 @@ from mfl_desktop.ui.transfer_destination_dialog import (
     TransferDestinationDialog,
     no_other_accounts_message,
 )
+from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop.ui.transfer_match_dialogs import (
     BulkRowAnalysis,
     BulkTransferReviewDialog,
@@ -135,15 +136,10 @@ from mfl_desktop.ui.transfer_match_dialogs import (
 _WINDOW_PRESETS = periods.options_for(periods.REGISTER_PRESETS)
 _DEFAULT_WINDOW_KEY = periods.DEFAULT_REGISTER_KEY
 
-# Mirror of the sidebar's currency-symbol table so the status-bar Net
-# matches the in-app convention. Unknown currencies fall back to no
-# symbol — the signed magnitude is still readable.
-_CURRENCY_SYMBOLS: dict[str, str] = {
-    "GBP": "£",
-    "USD": "$",
-    "EUR": "€",
-    "JPY": "¥",
-}
+# Currency glyphs come from chart_helpers.currency_symbol() — the one definition
+# (ADR-159/165). This module used to carry its own "mirror of the sidebar's
+# table", which is how an unknown currency ended up rendering with *no* symbol
+# at all.
 
 # Per-column default widths, keyed by attribute name so they apply to whichever
 # mode the model is in.
@@ -943,7 +939,7 @@ class RegisterWindow(QMainWindow):
 
     @staticmethod
     def _format_net(amount: Decimal, currency: str) -> str:
-        symbol = _CURRENCY_SYMBOLS.get(currency, "")
+        symbol = currency_symbol(currency) if currency else ""
         body = f"{abs(amount):,.2f}"
         if amount < 0:
             return f"Net: -{symbol}{body}"

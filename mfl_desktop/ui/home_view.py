@@ -35,13 +35,12 @@ from mfl_desktop.home_dashboard import (
     gather_home_data,
 )
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop.ui.net_worth_sparkline import NetWorthSparkline
 
-_CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
-
-
 def _sym(ccy: str) -> str:
-    return _CURRENCY_SYMBOLS.get((ccy or "").upper(), "")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return currency_symbol(ccy) if ccy else ""
 
 
 def _fmt(amount: Decimal, ccy: str, *, decimals: int = 2, signed: bool = False) -> str:

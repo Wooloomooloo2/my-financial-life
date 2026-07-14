@@ -60,12 +60,12 @@ from mfl_desktop.ui.investment_income_filter_dialog import (
     InvestmentIncomeFilterDialog,
 )
 from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter, drilldown_account_scope,
 )
 
-_CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
 _MONTH_ABBR = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -85,7 +85,8 @@ _TABLE_HEADERS = (
 
 
 def _sym(currency: Optional[str]) -> str:
-    return _CURRENCY_SYMBOLS.get((currency or "").upper(), "")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return currency_symbol(currency) if currency else ""
 
 
 def _month_end_samples(start: date, end: date) -> list[date]:

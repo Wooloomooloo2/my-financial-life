@@ -45,17 +45,16 @@ from PySide6.QtWidgets import (
 )
 
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.chart_helpers import currency_symbol
 
 if TYPE_CHECKING:
     from mfl_desktop.import_engine.import_service import (
         ClassifiedTransaction, PendingImport,
     )
 
-_CURRENCY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥"}
-
-
 def _sym(currency: str) -> str:
-    return _CURRENCY_SYMBOLS.get((currency or "").upper(), (currency or "") + " ")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return currency_symbol(currency) if currency else ""
 
 
 class ImportReviewDialog(QDialog):

@@ -13,6 +13,50 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from mfl_desktop.ui import tokens
 
 
+def report_folder_name(repo, folder_id: int | None) -> str | None:
+    """The name of the report folder ``folder_id`` sits in, or None.
+
+    The same four-line scan over ``list_report_folders()`` was inlined in all
+    five report windows; this is the one copy (ADR-164).
+    """
+    if folder_id is None:
+        return None
+    for folder in repo.list_report_folders():
+        if folder.id == folder_id:
+            return folder.name
+    return None
+
+
+def report_heading(
+    type_label: str,
+    loaded_name: str | None,
+    *,
+    folder_name: str | None = None,
+    dirty: bool = False,
+) -> tuple[str, str, str]:
+    """``(title, subtitle, window_title)`` for a report window's header (ADR-164).
+
+    An *unsaved* report used to lead with the word **"Untitled"** — the largest
+    text on the screen — while the thing the report actually *is* ("Spending
+    Over Time") was the small grey subtitle underneath. That is backwards: the
+    report's type is its identity until you give it a name, and "Untitled" is a
+    statement about the *file*, not about what you are looking at.
+
+    So an unsaved report leads with its type and carries its unsaved-ness as a
+    quiet subtitle. A saved one leads with its name — which is the identity the
+    user chose — and keeps the type as the subtitle.
+
+    Five report windows had grown their own copy of this string-building; this
+    is the single definition (the ADR-084 rule: consolidate divergent duplicates
+    of the same thing).
+    """
+    if loaded_name is None:
+        return type_label, "Unsaved report", f"{type_label} — Unsaved"
+    prefix = f"{folder_name} / " if folder_name else ""
+    title = f"{prefix}{loaded_name}{'*' if dirty else ''}"
+    return title, type_label, f"{type_label} — {title}"
+
+
 class PageHeader(QWidget):
     def __init__(self, parent=None, *, show_rule: bool = False) -> None:
         super().__init__(parent)

@@ -41,11 +41,15 @@ from mfl_desktop.db.repository import Repository, ReportRow
 from mfl_desktop.reports.filters import (
     SankeyFilters, TYPE_SANKEY,
 )
-from mfl_desktop.ui.chart_helpers import colour_for, fmt_currency
+from mfl_desktop.ui.chart_helpers import colour_for, currency_symbol, fmt_currency
 from mfl_desktop.ui.custom_period_dialog import CustomPeriodDialog
 from mfl_desktop.ui.sankey_chart import SankeyChart, SankeyNode
 from mfl_desktop.ui.sankey_filter_dialog import SankeyFilterDialog
-from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.page_header import (
+    PageHeader,
+    report_folder_name,
+    report_heading,
+)
 from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter, drilldown_account_scope,
@@ -65,11 +69,9 @@ _OTHER_COLOR = QColor("#cbd5e1")
 _SAVINGS_COLOR = QColor("#16a34a")
 _DEFICIT_COLOR = QColor("#dc2626")
 
-_CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥"}
-
-
 def _symbol_for(currency: str) -> str:
-    return _CCY_SYMBOLS.get((currency or "").upper(), "")
+    """The currency glyph, via the one definition (ADR-165)."""
+    return currency_symbol(currency) if currency else ""
 
 
 class SankeyReportWindow(QMainWindow):
@@ -688,20 +690,13 @@ class SankeyReportWindow(QMainWindow):
         self.reports_changed.emit()
 
     def _update_name_label(self) -> None:
-        prefix = ""
-        if self._loaded_folder_id is not None:
-            for f in self._repo.list_report_folders():
-                if f.id == self._loaded_folder_id:
-                    prefix = f"{f.name} / "
-                    break
-        dirty_mark = "*" if self._dirty else ""
-        title = (
-            f"{prefix}{self._loaded_name}{dirty_mark}"
-            if self._loaded_name is not None
-            else "Untitled"
+        title, subtitle, window_title = report_heading(
+            "Cash Flow", self._loaded_name,
+            folder_name=report_folder_name(self._repo, self._loaded_folder_id),
+            dirty=self._dirty,
         )
-        self._page_header.set_heading(title, "Cash Flow")
-        self.setWindowTitle(f"Cash Flow — {title}")
+        self._page_header.set_heading(title, subtitle)
+        self.setWindowTitle(window_title)
 
     def _update_save_buttons(self) -> None:
         bare = self._report_id is None

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from mfl_desktop.ui.chart_helpers import currency_symbol
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -43,21 +45,19 @@ _FALLBACK_COLOUR = "#64748B"
 # Currency code → symbol for the amount formatter. Codes outside this map
 # render as "EUR 12.34" (code + space + magnitude) so nothing is silently
 # mislabelled.
-_CURRENCY_SYMBOLS: dict[str, str] = {"GBP": "£", "USD": "$", "EUR": "€"}
-
-
 def fmt_amount(value: Decimal, currency: str) -> str:
-    """``£500.00`` / ``$1,000.00`` / fallback ``EUR 12.34``.
+    """``£500.00`` / ``$1,000.00`` / fallback ``CHF 12.34``.
 
     Sign-aware (leading ``-`` on negatives), thousands-grouped, two
     decimals. Used by both transfer surfaces for every amount cell.
+
+    The glyph comes from ``currency_symbol`` (ADR-165) — the local table this
+    used to carry was missing JPY, so a yen transfer chip rendered "JPY 500.00"
+    while the same amount read "¥500.00" everywhere else.
     """
-    sym = _CURRENCY_SYMBOLS.get(currency, "")
     sign = "-" if value < 0 else ""
     body = f"{abs(value):,.2f}"
-    if sym:
-        return f"{sign}{sym}{body}"
-    return f"{sign}{currency} {body}"
+    return f"{sign}{currency_symbol(currency) if currency else ''}{body}"
 
 
 def _chip_qss(colour: str) -> str:
