@@ -147,22 +147,37 @@ _CURRENCY_SYMBOLS: dict[str, str] = {
 
 # Per-column default widths, keyed by attribute name so they apply to whichever
 # mode the model is in.
+#
+# ADR-162: these are sized so that everything *except* Memo fits the viewport,
+# because Memo is the column that flexes (see _MEMO_COLUMN below). The previous
+# set demanded 1,210 px against a 967 px viewport, and since Amount and Balance
+# are the last columns, the 243 px of overflow fell entirely on **them** — the
+# ledger's two headline numbers were the ones you had to scroll to see.
 _COLUMN_WIDTHS = {
-    "posted_date":     110,
-    "account_name":    180,
-    "payee_name":      220,
-    "category_name":   200,
-    "status":          110,
-    "memo":            280,
+    "posted_date":     100,
+    "account_name":    150,
+    "payee_name":      190,
+    "category_name":   170,
+    "status":           90,
+    "memo":            180,   # a starting width only — this column stretches
     "amount":          110,
     "running_balance": 130,
-    # Investment register (ADR-043)
-    "action":          90,
-    "security_symbol": 80,
-    "security_name":   260,
-    "quantity":        100,
-    "price":           100,
+    # Investment register (ADR-043). This mode carries *eleven* columns — the
+    # cash set plus action / symbol / security / quantity / price — and eleven
+    # columns do not fit a 967 px viewport at any honest width. Trimmed so the
+    # grid fits from a viewport of ~1,090 px (a maximised window on any modern
+    # display); below that it still scrolls. See the ADR-162 known limitation.
+    "action":          80,
+    "security_symbol": 70,
+    "security_name":   170,
+    "quantity":         85,
+    "price":            85,
 }
+
+# The one column allowed to give up its width so the others always fit. Memo is
+# free text, empty on most rows, and already elides — so it is the column that
+# can afford to shrink. Everything else keeps a fixed, user-resizable width.
+_MEMO_COLUMN = "memo"
 
 
 class _MarketRefreshSignals(QObject):
@@ -839,8 +854,35 @@ class RegisterWindow(QMainWindow):
         self._update_status()
 
     def _set_default_column_widths(self) -> None:
-        for i, (_, name, _) in enumerate(self._model.COLUMNS):
+        """Width the columns so the money is never the thing that scrolls away.
+
+        Amount and Balance sit at the right-hand end, so *any* overflow lands on
+        them first — and the old fixed widths overflowed by 193–243 px on a
+        default window, which put the ledger's headline numbers behind a
+        horizontal scrollbar (ADR-162). Memo now stretches to absorb the slack:
+        the remaining columns fit, and the numbers stay on screen.
+        """
+        header = self._table.horizontalHeader()
+        names = [name for _, name, _ in self._model.COLUMNS]
+
+        # Order is load-bearing. setColumnWidth is *silently ignored* on a
+        # section still in Stretch mode, so every section must be returned to
+        # Interactive before any width is applied — otherwise, switching between
+        # register modes leaves whichever column previously held the Stretch slot
+        # (Memo sits at a different index in each mode) stuck at its stretched
+        # width, and the grid overflows again. Reset, then size, then stretch.
+        for i in range(len(names)):
+            header.setSectionResizeMode(i, QHeaderView.Interactive)
+        for i, name in enumerate(names):
             self._table.setColumnWidth(i, _COLUMN_WIDTHS.get(name, 120))
+
+        # Memo is the one column allowed to flex: free text, empty on most rows,
+        # already elided. Everything else stays user-resizable (a Stretch section
+        # cannot be dragged), and Amount/Balance keep their width.
+        if _MEMO_COLUMN in names:
+            header.setSectionResizeMode(
+                names.index(_MEMO_COLUMN), QHeaderView.Stretch
+            )
 
     def _on_search_text_changed(self, text: str) -> None:
         # ADR-061: stash the latest text and (re)start the debounce timer; the
