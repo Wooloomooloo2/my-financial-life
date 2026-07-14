@@ -84,7 +84,9 @@ from mfl_desktop.account_summary import (
 )
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.ui.balance_flow_chart import BalanceFlowChart
+from mfl_desktop import account_types
 from mfl_desktop.ui.custom_period_dialog import CustomPeriodDialog
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui.statements_window import StatementsWindow
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow,
@@ -409,10 +411,18 @@ class AccountSummaryWindow(QMainWindow):
         container.setObjectName("summaryRoot")
         tokens.themed(container, "QWidget#summaryRoot { background-color: {canvas}; }")
         v = QVBoxLayout(container)
-        v.setContentsMargins(20, 18, 20, 16)
-        v.setSpacing(12)
+        # The header owns its own padding (ADR-119), so the shell has none; the
+        # body keeps the margins the cards were laid out against.
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
         v.addWidget(self._build_title())
-        v.addWidget(content, stretch=1)
+
+        body = QWidget()
+        body_v = QVBoxLayout(body)
+        body_v.setContentsMargins(20, 6, 20, 16)
+        body_v.setSpacing(12)
+        body_v.addWidget(content, stretch=1)
+        v.addWidget(body, stretch=1)
         self.setCentralWidget(container)
 
         self.reload()
@@ -521,13 +531,26 @@ class AccountSummaryWindow(QMainWindow):
     # ── builders ──
 
     def _build_title(self) -> QWidget:
-        title = QLabel(self._account.name)
-        f = title.font()
-        f.setPointSize(f.pointSize() + 8)
-        f.setBold(True)
-        title.setFont(f)
-        tokens.themed(title, "color: {text};")
-        return title
+        """The shared page header (ADR-119), not a hand-rolled bold label.
+
+        This window predates ``PageHeader`` and grew its own title out of
+        ``pointSize() + 8`` — an off-scale size that ADR-102's type scale
+        exists to prevent, and which read nothing like the title on every
+        other screen. Subtitle mirrors the register's: what the account is,
+        and what currency it is denominated in.
+        """
+        header = PageHeader(show_rule=True)
+        # account.type is a storage value ('investment_std'); account_types owns
+        # the display label ('Investment'). An unknown type is possible on an
+        # old file, so fall back to the raw value rather than raising.
+        try:
+            kind = account_types.by_storage(self._account.type).label
+        except KeyError:
+            kind = (self._account.type or "").replace("_", " ").strip().capitalize()
+        currency = (self._account.currency or "").upper()
+        subtitle = " · ".join(p for p in (kind, currency) if p)
+        header.set_heading(self._account.name, subtitle)
+        return header
 
     def _make_card(self, name: str) -> QFrame:
         """QFrame styled as a card (ADR-034 §2). The objectName scopes

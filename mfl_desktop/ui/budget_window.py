@@ -64,7 +64,9 @@ from mfl_desktop.ui.budget_drilldown_window import BudgetDrillDownWindow
 from mfl_desktop.ui.budget_monthly_view import BudgetMonthlyView
 from mfl_desktop.ui.budget_setup_dialog import BudgetSetupDialog
 from mfl_desktop.ui.goal_dialog import GoalDialog
+from mfl_desktop.ui.page_header import PageHeader
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.chart_helpers import currency_symbol
 
 _MONTH_ABBR = [
     "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -113,8 +115,43 @@ def _fmt(value: Decimal) -> str:
 
 
 def _fmt_month(month: str) -> str:
+    """'Jun 26' — the *column-header* format. Unambiguous only in context: the
+    matrix's twelve columns are all one year, so the reader supplies the
+    century. Do not use it for a date that can be decades out — see
+    ``_fmt_month_long``."""
     y, m = int(month[:4]), int(month[5:7])
     return f"{_MONTH_ABBR[m]} {y % 100:02d}"
+
+
+def _fmt_month_long(month: str) -> str:
+    """'Jun 2049' — a four-digit year, for a date standing on its own.
+
+    A goal's target date is the one place the app prints a month *decades*
+    out, and it was borrowing the column-header format: a 2049 mortgage payoff
+    rendered as "by Jun 49", which reads as 1949 (ADR-161).
+    """
+    y, m = int(month[:4]), int(month[5:7])
+    return f"{_MONTH_ABBR[m]} {y}"
+
+
+def _money(currency: str, value: Decimal) -> str:
+    """'£822.64' / '-£2,387.36' — the symbol, not the ISO code.
+
+    The budget window was the last surface printing money as ``GBP 822.64``;
+    ``currency_symbol`` (ADR-159) is the single definition of the glyph and
+    already falls back to a spaced code for currencies we have no symbol for.
+    The sign goes *outside* the symbol — "-£20", never "£-20".
+    """
+    sign = "-" if value < 0 else ""
+    return f"{sign}{currency_symbol(currency)}{_fmt(abs(value))}"
+
+
+def _muted_label(text: str) -> QLabel:
+    """A quiet inline caption ('Budget:', 'View:') — reads as a field label,
+    not as content."""
+    lbl = QLabel(text)
+    tokens.themed(lbl, "color: {muted};")
+    return lbl
 
 
 # ── flattened row spec ─────────────────────────────────────────────────────
@@ -527,12 +564,15 @@ class _GoalCard(QFrame):
         self._on_edit = on_edit
         self.setFrameShape(QFrame.StyledPanel)
         self.setCursor(Qt.PointingHandCursor)
-        tokens.themed(self, "_GoalCard { border: 1px solid {border}; border-radius: 8px; background: {surface}; } _GoalCard:hover { border-color: {subtle}; }")
-        self.setFixedWidth(208)
+        tokens.themed(self, "_GoalCard { border: 1px solid {border}; border-radius: 10px; background: {surface}; } _GoalCard:hover { border-color: {accent}; }")
+        # Roomier than the original 208×(10,6,10,8): the card packs five lines
+        # plus a progress bar, and at the old size the text ran to the edges and
+        # collided with the neighbouring "+ Goal…" button (ADR-161).
+        self.setFixedWidth(232)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 6, 10, 8)
-        lay.setSpacing(2)
+        lay.setContentsMargins(14, 10, 14, 12)
+        lay.setSpacing(3)
 
         title = QLabel(prog.name)
         tf = title.font()
@@ -563,8 +603,8 @@ class _GoalCard(QFrame):
             colour_token = _GOAL_TOKEN["blue"]
             target_mag = abs(prog.target_amount)
             state = (
-                f"to {prog.currency} {_fmt(target_mag)} "
-                f"by {_fmt_month(prog.target_date[:7])}"
+                f"to {_money(prog.currency, target_mag)} "
+                f"by {_fmt_month_long(prog.target_date[:7])}"
             )
         sub = QLabel(state)
         tokens.themed(sub, "color: {%s};" % colour_token)
@@ -572,7 +612,7 @@ class _GoalCard(QFrame):
 
         if not prog.is_met:
             need = QLabel(
-                f"Need {prog.currency} {_fmt(prog.required_monthly)}/mo"
+                f"Need {_money(prog.currency, prog.required_monthly)}/mo"
             )
             tokens.themed(need, "color: {muted_strong};")  # slate-600
             lay.addWidget(need)
@@ -603,37 +643,73 @@ class BudgetWindow(QMainWindow):
         self._matrix: Optional[bc.BudgetMatrix] = None
         self._drill_wins: list = []
         self._rendering = False
+        # Cached numbers behind the rich-text Pool/Assigned/Unallocated line, so
+        # a theme toggle can re-colour it without a full re-render (_paint_info).
+        self._info_state: Optional[tuple] = None
 
         central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(10, 8, 10, 10)
+        central.setObjectName("budgetRoot")
+        tokens.themed(central, "QWidget#budgetRoot { background-color: {canvas}; }")
+        shell = QVBoxLayout(central)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
 
-        # Header: budget picker + verbs.
-        header = QHBoxLayout()
-        header.addWidget(QLabel("Budget:"))
-        self._picker = QComboBox()
-        self._picker.setMinimumWidth(200)
-        self._picker.currentIndexChanged.connect(self._on_pick_budget)
-        header.addWidget(self._picker)
-        for label, slot in (
-            ("New…", self._on_new),
-            ("Duplicate…", self._on_duplicate),
-            ("Rename…", self._on_rename),
-            ("Delete", self._on_delete),
-            ("Period…", self._on_period),
-            ("Set up…", self._on_setup),
-        ):
-            b = QPushButton(label)
-            b.clicked.connect(slot)
-            header.addWidget(b)
-        header.addStretch(1)
-        # Annual matrix ↔ monthly progress view toggle (R3).
-        header.addWidget(QLabel("View:"))
+        # The shared page header (ADR-119) — this window predated it and opened
+        # straight onto a toolbar with no title at all.
+        self._header = PageHeader(show_rule=True)
+        self._header.set_heading("Budget", "")
+        # The Annual ↔ Monthly toggle (R3) is a page-level mode switch, so it
+        # belongs in the header's action slot, not buried in the verb row.
+        self._header.add_action(_muted_label("View:"))
         self._view = QComboBox()
         self._view.addItem("Annual", 0)
         self._view.addItem("Monthly", 1)
         self._view.currentIndexChanged.connect(self._on_view_changed)
-        header.addWidget(self._view)
+        self._header.add_action(self._view)
+        shell.addWidget(self._header)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(20, 10, 20, 14)
+        root.setSpacing(8)
+        body = QWidget()
+        body.setLayout(root)
+        shell.addWidget(body, stretch=1)
+
+        # Toolbar: the budget picker, the one primary verb, and everything else
+        # behind a single Manage menu (ADR-161). This row used to be six
+        # identical grey buttons — New… Duplicate… Rename… Delete Period…
+        # Set up… — with no hierarchy, which is most of why the screen read as
+        # unfinished. Creating a budget is the call to action; the other five
+        # are occasional management, and Delete is destructive enough that it
+        # should not sit one stray click from Duplicate.
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        header.addWidget(_muted_label("Budget:"))
+        self._picker = QComboBox()
+        self._picker.setMinimumWidth(220)
+        self._picker.currentIndexChanged.connect(self._on_pick_budget)
+        header.addWidget(self._picker)
+
+        new_btn = QPushButton("+  New…")
+        new_btn.setProperty("mflVariant", "primary")
+        new_btn.clicked.connect(self._on_new)
+        header.addWidget(new_btn)
+
+        self._manage_btn = QPushButton("Manage")
+        manage_menu = QMenu(self._manage_btn)
+        for label, slot in (
+            ("Set up…", self._on_setup),
+            ("Period…", self._on_period),
+            ("Duplicate…", self._on_duplicate),
+            ("Rename…", self._on_rename),
+        ):
+            manage_menu.addAction(label, slot)
+        manage_menu.addSeparator()
+        manage_menu.addAction("Delete budget…", self._on_delete)
+        self._manage_btn.setMenu(manage_menu)
+        header.addWidget(self._manage_btn)
+
+        header.addStretch(1)
         root.addLayout(header)
 
         # Soft Unallocated indicator + missing-rate banner.
@@ -678,14 +754,17 @@ class BudgetWindow(QMainWindow):
         root.addWidget(self._stack, stretch=1)
 
         self._empty_label = QLabel(
-            "No budget yet. Click New… to create one, then Set up… to choose "
-            "accounts and categories."
+            "No budget yet. Click “+ New…” to create one, then "
+            "“Manage ▸ Set up…” to choose accounts and categories."
         )
         self._empty_label.setAlignment(Qt.AlignCenter)
         tokens.themed(self._empty_label, "color: {muted};")
         root.addWidget(self._empty_label)
 
         self.setCentralWidget(central)
+        # The info line's colours are baked into HTML, so they can't ride the
+        # stylesheet re-apply — repaint them on a theme toggle instead.
+        tokens.notifier.changed.connect(self._paint_info)
         self._reload_budget_list(select_id=None)
 
     # ── budget list / picker ──
@@ -812,24 +891,47 @@ class BudgetWindow(QMainWindow):
         focus_idx = months.index(today_month) if today_month in months else 0
         assigned = matrix.assigned_by_month[focus_idx]
         unalloc = pool - assigned
-        focus_label = _fmt_month(months[focus_idx])
-        colour = "#b91c1c" if unalloc < 0 else "#15803d"
+        self._info_state = (
+            ccy, pool, assigned, unalloc, _fmt_month(months[focus_idx]),
+            tuple(excluded),
+        )
+        self._paint_info()
+
+        self._header.set_heading(
+            "Budget", f"{budget.name} · {_fmt_month(months[0])} – {_fmt_month(months[-1])}"
+        )
+        self.setWindowTitle(f"Budget — {budget.name}")
+
+    def _paint_info(self) -> None:
+        """Render the Pool / Assigned / Unallocated line from the cached numbers.
+
+        Split out of ``_render`` and hung off ``tokens.notifier.changed``
+        because this label is *rich text*: its colours live inside an HTML
+        string, not a stylesheet, so ``tokens.themed`` can't reach them and the
+        ADR-097 dark-mode sweep missed it — it carried three frozen light-theme
+        hexes. Resolving them here means they follow a live theme toggle, which
+        a one-shot render would not (ADR-161).
+        """
+        if not self._info_state:
+            self._info_label.clear()
+            return
+        ccy, pool, assigned, unalloc, focus_label, excluded = self._info_state
+        colour = tokens.c("negative_strong" if unalloc < 0 else "positive_strong")
         info = (
-            f"Pool: <b>{ccy} {_fmt(pool)}</b> &nbsp;·&nbsp; "
-            f"Assigned ({focus_label}): <b>{_fmt(assigned)}</b> &nbsp;·&nbsp; "
-            f"Unallocated: <b style='color:{colour}'>{_fmt(unalloc)}</b>"
+            f"Pool: <b>{_money(ccy, pool)}</b> &nbsp;·&nbsp; "
+            f"Assigned ({focus_label}): <b>{_money(ccy, assigned)}</b> &nbsp;·&nbsp; "
+            f"Unallocated: <b style='color:{colour}'>{_money(ccy, unalloc)}</b>"
         )
         if excluded:
             # Exclusions carry their reason (a currency with no FX rate to the
             # display currency) — see Repository.compute_perimeter_pool
             # (ADR-058 R4a / ADR-138).
             info += (
-                f" &nbsp;—&nbsp; <span style='color:#b45309'>"
+                f" &nbsp;—&nbsp; <span style='color:{tokens.c('warning')}'>"
                 f"{len(excluded)} account(s) excluded from the pool: "
                 f"{', '.join(excluded)}</span>"
             )
         self._info_label.setText(info)
-        self.setWindowTitle(f"Budget — {budget.name}")
 
     # ── goals (R4b) ──
 

@@ -120,6 +120,18 @@ _Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold b
   - [ ] **Follow-up (optional): auto-offer a compact** when `freelist_count` crosses a threshold (e.g. after a big payee merge or a migration run), gated behind a one-time prompt — so the file self-heals without the owner remembering the button. Deferred deliberately: VACUUM rewrites the whole file + needs temp disk, and the migration-driven slack is largely one-off, so the manual control ships first.
 - [ ] **UI-freeze checkpoint before the manual** — once P7's UI items land, declare the UI steady-state so W2's screenshots don't go stale (owner's explicit sequencing: manual is the *last* task).
 
+### P8 — Design-review round (opened 2026-07-13)
+**Why this exists:** the first design review done by *looking at the app* rather than reading the code. Rendered every main screen out of `mfl_public.mfl` (the ADR-113 harness, `WA_DontShowOnScreen`) and reviewed the images. P4 closed the polish list as *scoped*, but it was scoped from a list, not from the screens — and the screens say something the list never did: **the app does not look like one app.** Home, the register and the report windows carry the design language (teal accent, card surfaces, the ADR-102 type scale, a real dark theme); the windows built earliest do not. Everything below is new (the iconography item in P7 is the only overlap).
+
+- [x] **P8a — Account Summary + Budget are stock, unstyled Qt — DONE (ADR-161).** ⭐ *the headline finding.* Both are native tab bar + default grey push buttons (`New… Duplicate… Rename… Delete…`) + default table grid, with the accent colour nowhere on the screen. They are two of the surfaces a paying user lives in, and they are the two that look unfinished. Carries three smaller defects found in the same shots: Budget prints money as **`Pool: GBP 822.64`** (ISO code, where every other screen uses the symbol — `chart_helpers.currency_symbol()` since ADR-159); the goal card is cramped against the `+ Goal…` button; and a goal target date renders **"by Jun 49"**, which reads as 1949, not 2049.
+- [ ] **P8b — the register scrolls its two most important columns off-screen.** `register_window.py` sets fixed pixel widths per column with `setStretchLastSection(False)`, so **Memo — empty on most rows — holds a wide fixed slot while Amount and Balance fall off the right edge** behind a horizontal scrollbar. A ledger whose money columns need scrolling to see. Memo should be the column that flexes; Amount and Balance should be pinned and never clipped.
+- [ ] **P8c — the chart palette is not the brand's.** The identity is the teal; the stacked bars use saturated primaries (blue/green/orange/red/purple/cyan/pink/lime) that read as a library default and fight the chrome around them. Wants a calibrated categorical palette anchored on the teal, validated in **both** themes — not an eyeballed swap.
+- [ ] **P8d — empty states read as breakage.** On Home, *Top Payees · This Month* and *Top Categories · This Month* both say "No spending yet this month" and the Budget card shows "£0.00 of £2,474.00 budgeted this month" over an empty bar. Three dead cards down one column make a working app look broken. Fall back to the **last complete month**, explicitly labelled.
+- [ ] **P8e — a new report's title is literally "Untitled".** It is the largest text on the screen; the report's actual identity ("Spending Over Time") is the small grey subtitle beneath it. Invert — lead with the type, make unsaved state a quiet badge.
+- [ ] **P8f — the sidebar mixes currencies silently.** `US Brokerage $17,035.62` sits in the same column as the GBP balances with nothing marking it as a different unit — **the same class of confusion ADR-159 just fixed in the reports**, one layer up. Also an empty `REPORTS` section header dangling at the bottom with nothing under it.
+
+_Sequencing note: P8a is done first — it is the finding with weight, and it is what "go back and polish the early screens" means. P8b is a genuine usability defect, not cosmetics, and is also logged in the defect register below._
+
 ### Open non-code owner action (carried from `backlog_notes.txt`)
 - [ ] **SUSA — 7 phantom shares in MS Access - Mark (£1,090), unresolved (ADR-155).** The 2021-01-05 sale of **56** shares runs against only **49** ever bought, so the holdings engine clamped the oversell to zero and a later plug materialised 7 basis-less shares that still show as a holding. Every other oversell in the file was repaired; this one is too large to be rounding, so it means a **purchase of ~7 shares that was never imported**. Owner checked (2026-07-12) and **can find no such transaction on the statements**, so the gap can't be closed from source documents. Whichever repair we eventually pick trades one inaccuracy for another, and that's the owner's call:
   - *Add the 7 shares* (`tools/repair_share_oversells.py --add-shares "MS Access - Mark:SUSA"`) — the position clears and the sale keeps matching the statement's 56 shares, but the added shares carry **no cost basis**, so SUSA's realised gain is overstated by whatever they cost.
@@ -155,6 +167,12 @@ _Brand re-tone (ADR-100): the app accent moved blue-600 → icon teal + a gold b
 ### Open — consistency
 
 - [ ] **The currency-symbol map is duplicated** in `home_view` and `sankey_report_window`. Both are correct today; they should collapse onto `chart_helpers.currency_symbol()` (ADR-159) next time either is touched.
+
+### Open — usability (from the 2026-07-13 design review)
+
+- [ ] **The register clips Amount and Balance** (P8a–f round, item **P8b**). Fixed pixel column widths + `setStretchLastSection(False)` mean Memo — empty on most rows — holds a wide fixed slot while the two money columns scroll off the right edge. Filed as a *defect*, not cosmetics: the ledger's headline numbers are the ones you cannot see.
+- [ ] **The sidebar shows USD and GBP balances in one column with no unit marker** (item **P8f**) — the per-account sibling of the naive folder-sum defect above; fix the two together.
+- [ ] **A goal's target date renders "by Jun 49"** (item **P8a**) — a 2049 target reads as 1949. Two-digit year on a date that is *decades* out, unlike the budget column headers where `Jul 26` is unambiguous in context.
 
 ### Closed recently
 

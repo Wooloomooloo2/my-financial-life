@@ -234,6 +234,36 @@ QTreeWidget#sidebar {{
 QTreeWidget#sidebar::item {{ padding: 6px 4px; }}
 QTreeWidget#sidebar::item:selected {{ background: {t("accent_subtle")}; color: {t("text")}; }}
 
+/* ── Tabs (ADR-161) ────────────────────────────────────────────────────────
+   Nothing styled QTabWidget, so every tabbed surface fell back to Fusion's
+   native tab bar — the single loudest reason Account Summary read as a
+   different app from Home. Flat underline tabs: the strip is quiet, the
+   accent marks the selected one, and the pane is the same card the rest of
+   the app is built from. */
+QTabWidget::pane {{
+    background: {t("surface")};
+    border: 1px solid {t("border")};
+    border-radius: 10px;
+    top: -1px;   /* close the seam between the tab strip and the pane */
+}}
+QTabBar {{ background: transparent; }}
+QTabBar::tab {{
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 7px 14px;
+    margin-right: 2px;
+    color: {t("muted_strong")};
+    font-weight: 500;
+}}
+QTabBar::tab:hover {{ color: {t("text")}; }}
+QTabBar::tab:selected {{
+    color: {t("accent")};
+    border-bottom: 2px solid {t("accent")};
+    font-weight: 600;
+}}
+QTabBar::tab:disabled {{ color: {t("disabled")}; }}
+
 /* Shared dashboard/section card (ADR-075/076) — themed by object name so it
    switches live without per-instance styling. */
 QFrame#homeCard {{
