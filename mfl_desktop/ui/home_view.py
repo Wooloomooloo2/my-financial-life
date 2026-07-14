@@ -692,10 +692,14 @@ class HomeView(QWidget):
         return card
 
     def _top_payees_card(self, data) -> _Card:
-        card = _Card("TOP PAYEES · THIS MONTH", action="Payees →")
+        # The card names the period it actually covers (ADR-163): "THIS MONTH"
+        # normally, or the month it fell back to when this one has no spending.
+        card = _Card(
+            f"TOP PAYEES · {data.spend_period_label.upper()}", action="Payees →"
+        )
         card._weight = len(data.top_payees) + 1
         if not data.top_payees:
-            card.body().addWidget(_muted("No spending yet this month."))
+            card.body().addWidget(_muted("No spending recorded yet."))
         else:
             for p in data.top_payees:
                 card.body().addWidget(
@@ -706,10 +710,13 @@ class HomeView(QWidget):
         return card
 
     def _top_categories_card(self, data) -> _Card:
-        card = _Card("TOP CATEGORIES · THIS MONTH", action="Spending →")
+        card = _Card(
+            f"TOP CATEGORIES · {data.spend_period_label.upper()}",
+            action="Spending →",
+        )
         card._weight = len(data.top_categories) + 1
         if not data.top_categories:
-            card.body().addWidget(_muted("No spending yet this month."))
+            card.body().addWidget(_muted("No spending recorded yet."))
         else:
             for ct in data.top_categories:
                 card.body().addWidget(

@@ -4983,6 +4983,39 @@ class Repository:
             for r in cur
         ]
 
+    def latest_spending_month(self, not_after: str) -> Optional[str]:
+        """The most recent month ('YYYY-MM') on or before ``not_after`` that has
+        any *spending* in it, or None if the file has none (ADR-163).
+
+        Home's Top Payees / Top Categories cards window on the current calendar
+        month. On the 1st — or on any file whose data stops earlier — that window
+        is empty, and the dashboard showed two cards reading "No spending yet
+        this month" with nothing in them. This is the lookup that lets those
+        cards fall back to the last month that *does* have spending.
+
+        One indexed ``MAX``, not a loop of per-month probes: Home is on the hot
+        path (ADR-156/160) and an active file answers this from the first row it
+        touches. Mirrors the report aggregates' definition of spending — an
+        expense-kind category, excluding transfers and portfolio moves — so the
+        month this returns is a month the cards will actually find rows in.
+        """
+        from mfl_desktop.import_engine.qif_actions import (
+            SHARE_IN_ACTIONS, SHARE_OUT_ACTIONS, SPLIT_ACTIONS,
+        )
+        moves = sorted(SHARE_IN_ACTIONS | SHARE_OUT_ACTIONS | SPLIT_ACTIONS)
+        move_ph = ",".join("?" * len(moves))
+        row = self._conn.execute(
+            "SELECT MAX(substr(t.posted_date, 1, 7)) AS m "
+            "FROM txn t "
+            "JOIN category c ON c.id = t.category_id "
+            "WHERE c.kind = 'expense' "
+            "  AND t.transfer_id IS NULL "
+            f"  AND (t.action IS NULL OR lower(t.action) NOT IN ({move_ph})) "
+            "  AND substr(t.posted_date, 1, 7) <= ?",
+            (*moves, not_after),
+        ).fetchone()
+        return row["m"] if row and row["m"] else None
+
     def list_recent_transactions(self, limit: int = 10) -> list[TransactionRow]:
         """The most recent ``limit`` transactions across every account,
         newest first (ADR-075, Home dashboard's Recent activity card).

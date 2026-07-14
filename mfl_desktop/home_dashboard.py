@@ -134,6 +134,11 @@ class HomeData:
     recent: list[RecentTxn] = field(default_factory=list)
     top_payees: list[SpendRow] = field(default_factory=list)
     top_categories: list[SpendRow] = field(default_factory=list)
+    # What period the two spending cards actually cover — "This month" normally,
+    # or a named month ("June 2026") when the current one has no spending and
+    # they fell back to the last one that did (ADR-163). The cards title
+    # themselves from this, so the number on screen always says what it is.
+    spend_period_label: str = "This month"
     # Investment performance is period-scoped and heavy, so it is computed off
     # the fast path in a background thread — see ``compute_investment_performance``
     # (ADR-150 amendment), not carried on HomeData.
@@ -206,9 +211,14 @@ def gather_home_data(repo, today: date, *, recent_n: int = 8, top_n: int = 5) ->
     budget = _safe(_budget_card, repo, today, display_ccy, default=None)
     bills, overdue = _safe(_bills, repo, today, default=([], 0))
     recent = _safe(_recent, repo, recent_n, default=[])
-    top_payees = _safe(_top_payees, repo, month_start, today_iso, display_ccy, top_n, default=[])
+
+    spend_from, spend_to, spend_label = _safe(
+        _spend_window, repo, today,
+        default=(month_start, today_iso, "This month"),
+    )
+    top_payees = _safe(_top_payees, repo, spend_from, spend_to, display_ccy, top_n, default=[])
     top_categories = _safe(
-        _top_categories, repo, month_start, today_iso, display_ccy, top_n, default=[]
+        _top_categories, repo, spend_from, spend_to, display_ccy, top_n, default=[]
     )
 
     return HomeData(
@@ -222,7 +232,37 @@ def gather_home_data(repo, today: date, *, recent_n: int = 8, top_n: int = 5) ->
         recent=recent,
         top_payees=top_payees,
         top_categories=top_categories,
+        spend_period_label=spend_label,
     )
+
+
+def _spend_window(repo, today: date) -> tuple[str, str, str]:
+    """The period the Top Payees / Top Categories cards cover (ADR-163).
+
+    Normally the current calendar month. But the month-to-date window is empty
+    on the 1st of a month, and stays empty on any file whose data stops earlier
+    — and the dashboard's answer to that was two cards reading "No spending yet
+    this month" with nothing under them, which reads as a broken app rather than
+    as a quiet month.
+
+    So: if the current month has no spending, fall back to **the last month that
+    does**, and say which month that is. Falling back silently would be worse
+    than the empty card — a figure labelled "this month" that is really March's
+    is a lie, and the label is what makes this honest rather than merely full.
+    """
+    month_start = today.replace(day=1)
+    this_month = today.strftime("%Y-%m")
+
+    latest = repo.latest_spending_month(not_after=this_month)
+    if latest is None or latest == this_month:
+        # Either there is spending this month, or the file has none anywhere —
+        # in which case an empty "This month" card is the honest answer.
+        return month_start.isoformat(), today.isoformat(), "This month"
+
+    year, month = int(latest[:4]), int(latest[5:7])
+    start = date(year, month, 1)
+    end = date(year + (month == 12), (month % 12) + 1, 1) - timedelta(days=1)
+    return start.isoformat(), end.isoformat(), start.strftime("%B %Y")
 
 
 def compute_net_worth_trend(
