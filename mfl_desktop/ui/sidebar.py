@@ -24,6 +24,7 @@ caller.
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -96,6 +97,15 @@ class Sidebar(QTreeWidget):
     # QSettings key for the remembered balance mode (app-level, ADR-092).
     _BALANCE_MODE_KEY = "sidebar/balance_mode"
 
+    # Per-file `setting` key for remembered group expansion (ADR-168). Unlike the
+    # balance mode (an app-level QSettings preference), this lives *inside* the
+    # .mfl's `setting` table (ADR-092): the folder ids it references are per-file,
+    # so an app-level key would bleed one file's collapse state onto another.
+    # Value is a JSON object mapping a stable group key → expanded bool, storing
+    # only the groups the user has actually toggled so per-kind defaults still
+    # apply.
+    _GROUP_EXPANSION_KEY = "sidebar/group_expansion"
+
     def __init__(
         self,
         accounts: list[AccountSummary],
@@ -118,6 +128,11 @@ class Sidebar(QTreeWidget):
         # incl. future-dated rows) — ADR-131. Remembered app-level; defaults to
         # 'today' so the sidebar shows the actual balance now.
         self._balance_mode = self.saved_balance_mode()
+        # Remembered per-group expansion (ADR-168): read once from this file's
+        # `setting` table (via ``self._repo``, set above) and kept in sync on
+        # every user toggle. Read before ``_populate`` so the first build already
+        # reflects the saved state.
+        self._group_expansion = self._load_group_expansion()
         # ADR-119: objectName binds the flush, airier "navigation panel" QSS in
         # ui/theme.py (borderless, roomier rows) without affecting other trees.
         self.setObjectName("sidebar")
@@ -145,6 +160,13 @@ class Sidebar(QTreeWidget):
         self._populate(accounts, folders, balances, reports or [], report_folders or [])
         self.itemSelectionChanged.connect(self._on_selection_changed)
         self.itemClicked.connect(self._on_item_clicked)
+        # Persist a group's expansion whenever it changes — this fires for every
+        # route (row-body click, disclosure triangle, keyboard), unlike
+        # ``itemClicked``. Connected *after* the initial ``_populate`` so building
+        # the tree doesn't trip it, and ``reload`` blocks signals while it
+        # rebuilds, so only genuine user toggles reach ``_remember_group_expansion``.
+        self.itemExpanded.connect(self._remember_group_expansion)
+        self.itemCollapsed.connect(self._remember_group_expansion)
         # ADR-076: re-apply header/closed colours when the theme switches
         # (these are set on items as brushes, not via QSS, so the global
         # re-style doesn't reach them).
@@ -203,6 +225,79 @@ class Sidebar(QTreeWidget):
         self._balance_mode = mode
         QSettings().setValue(self._BALANCE_MODE_KEY, mode)
         self.balance_mode_changed.emit(mode)
+
+    def set_repo(self, repo: Optional[Repository]) -> None:
+        """Repoint the sidebar at a newly-adopted file's repo (ADR-168 file
+        switch). The register window drives the display data through ``reload``,
+        but the repo-derived state the sidebar owns — the mixed-currency display
+        currency and the remembered per-group expansion — must be refreshed here,
+        or a file switch keeps reading the previous file's settings. Mirrors the
+        Home view's ``set_repo``. Call *before* ``reload`` so the rebuild uses the
+        new file's saved expansion."""
+        self._repo = repo
+        self._display_currency = self._resolve_display_currency()
+        self._group_expansion = self._load_group_expansion()
+
+    # ── group expansion memory (per-file, ADR-168) ──────────────────────────
+
+    @staticmethod
+    def _group_key(item: QTreeWidgetItem) -> Optional[str]:
+        """A stable persistence key for a collapsible group row, or ``None`` for
+        rows whose expansion we don't remember (leaf/selectable rows).
+
+        Folder rows carry a DB-backed id (``Qt.UserRole``) that is stable across
+        restarts; account- and report-folder ids share one integer space, so the
+        kind prefix keeps them from colliding. The singleton rows (the two
+        section headers and the closed-accounts group) key off their kind alone.
+        """
+        kind = item.data(0, KIND_ROLE)
+        if kind in ("folder", "report_folder"):
+            return f"{kind}:{item.data(0, Qt.UserRole)}"
+        if kind in ("section_accounts", "section_reports", "closed_group"):
+            return kind
+        return None
+
+    def _load_group_expansion(self) -> dict[str, bool]:
+        """The remembered ``{group_key: expanded}`` map from this file's
+        ``setting`` table. Empty when repo-less (tests) or nothing saved yet; a
+        corrupt value degrades to empty rather than raising."""
+        if self._repo is None:
+            return {}
+        raw = self._repo.get_setting(self._GROUP_EXPANSION_KEY)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): bool(v) for k, v in data.items()}
+
+    def _expanded_for(self, item: QTreeWidgetItem, *, default: bool) -> bool:
+        """Whether ``item`` should be expanded on build — the user's saved choice
+        if they've toggled this group, else the caller's per-kind default."""
+        key = self._group_key(item)
+        if key is None:
+            return default
+        return self._group_expansion.get(key, default)
+
+    def _remember_group_expansion(self, item: QTreeWidgetItem) -> None:
+        """Record a group's new expansion after the user toggled it, writing the
+        whole map back to this file's ``setting`` table. Best-effort: a failed
+        write must never break navigation, so any error is swallowed."""
+        if self._repo is None:
+            return
+        key = self._group_key(item)
+        if key is None:
+            return
+        self._group_expansion[key] = item.isExpanded()
+        try:
+            self._repo.set_setting(
+                self._GROUP_EXPANSION_KEY, json.dumps(self._group_expansion)
+            )
+        except Exception:
+            pass
 
     def _restyle(self) -> None:
         """Re-apply the token-derived header/closed-row brushes to the live
@@ -317,7 +412,7 @@ class Sidebar(QTreeWidget):
             accounts_header.addChild(folder_item)
             for a in members:
                 folder_item.addChild(self._make_account_item(a, balances))
-            folder_item.setExpanded(True)
+            folder_item.setExpanded(self._expanded_for(folder_item, default=True))
 
         for a in sorted(
             accounts_by_folder.get(None, []),
@@ -345,9 +440,9 @@ class Sidebar(QTreeWidget):
                 closed_group.addChild(
                     self._make_account_item(a, balances, is_closed=True)
                 )
-            closed_group.setExpanded(False)
+            closed_group.setExpanded(self._expanded_for(closed_group, default=False))
 
-        accounts_header.setExpanded(True)
+        accounts_header.setExpanded(self._expanded_for(accounts_header, default=True))
 
         # ── Reports section ──
         # Only when there is something to put under it (ADR-165). A brand-new
@@ -390,7 +485,7 @@ class Sidebar(QTreeWidget):
                 report_item = self._make_report_item(r)
                 folder_item.addChild(report_item)
                 report_item.setFirstColumnSpanned(True)
-            folder_item.setExpanded(True)
+            folder_item.setExpanded(self._expanded_for(folder_item, default=True))
 
         for r in sorted(
             reports_by_folder.get(None, []),
@@ -400,7 +495,7 @@ class Sidebar(QTreeWidget):
             reports_header.addChild(report_item)
             report_item.setFirstColumnSpanned(True)
 
-        reports_header.setExpanded(True)
+        reports_header.setExpanded(self._expanded_for(reports_header, default=True))
 
         # Default selection: the first selectable row (All transactions),
         # unless caller's reload() restored a previous one.

@@ -2872,6 +2872,11 @@ class RegisterWindow(QMainWindow):
         # old — now closed — repo and shows stale data until restart.
         self._home_view.set_repo(new_repo)
         self._home_view.refresh()
+        # The sidebar likewise holds a repo reference for per-file state — the
+        # mixed-currency display currency and the remembered group expansion
+        # (ADR-168). Repoint it before _reload_sidebar so the rebuild reflects
+        # the newly-opened file's collapsed groups, not the previous file's.
+        self._sidebar.set_repo(new_repo)
         # _reload_sidebar pulls fresh data via self._repo (= new_repo) and
         # selects an item; the sidebar's selection_changed signal then drives
         # _show_account / _show_all_transactions which rebuild the model.
@@ -3525,8 +3530,8 @@ class RegisterWindow(QMainWindow):
 
     def _refresh_sidebar_balances(self) -> None:
         """Reload the sidebar after a balance-affecting operation (txn
-        add/delete, import). Preserves account selection; folder
-        expansion is reset (acceptable for v1 — see ADR-015 backlog)."""
+        add/delete, import). Preserves account selection; folder expansion is
+        preserved too, from the file's remembered state (ADR-092)."""
         self._reload_sidebar(self._account.iri if self._account else None)
 
     def _reload_sidebar(self, select_iri: Optional[str]) -> None:
