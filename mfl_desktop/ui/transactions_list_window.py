@@ -402,29 +402,34 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         elif self._payee_id is not None and row.payee_id != self._payee_id:
             return False
         if self._category_descendant_ids is not None:
-            # Split-aware (ADR-051, mirrors the register's base proxy): a split
-            # parent's own category_id is Uncategorised, so also accept the row
-            # when any of its split lines is in the drilled category's subtree —
-            # otherwise a category that exists only on split lines drills to an
-            # empty list even though the report counted those lines.
-            if (
-                row.category_id not in self._category_descendant_ids
-                and self._category_descendant_ids.isdisjoint(row.split_category_ids)
-            ):
+            # Split-aware (ADR-051 / ADR-176): a split transaction has no own
+            # category — its lines carry them, and the parent's stored
+            # category_id is a meaningless placeholder (rendered "—Split—",
+            # in practice Uncategorised). So for a split, match on the *lines*
+            # alone: filter by a line's category and the "—Split—" row appears;
+            # filter by Uncategorised and it appears only when a line is
+            # genuinely uncategorised, not merely because the parent is.
+            # A non-split matches on its own category_id as before.
+            if row.split_count:
+                if self._category_descendant_ids.isdisjoint(row.split_category_ids):
+                    return False
+            elif row.category_id not in self._category_descendant_ids:
                 return False
         if self._kind is not None:
             if row.transfer_id is not None:
                 return False
             if self._kind_cat_ids is not None:
-                # Split-aware (ADR-169), mirroring the category-descendant path
-                # above: the Income & Expense report aggregates split *lines*
-                # (`txn_category_line`), so a split parent categorised
-                # "Uncategorised" still counts when one of its lines is in the
-                # kind's (scoped) category set. Without this a report whose
-                # income lives only on split lines drills to an empty list even
-                # though its bar is non-zero.
-                if (row.category_id not in self._kind_cat_ids
-                        and self._kind_cat_ids.isdisjoint(row.split_category_ids)):
+                # Split-aware (ADR-169 / ADR-176), mirroring the
+                # category-descendant path above: the Income & Expense report
+                # aggregates split *lines* (`txn_category_line`), so a split is
+                # matched on its lines alone — its parent category_id is a
+                # placeholder and must not count, or a scope that happens to
+                # include the parent's Uncategorised placeholder would surface
+                # a split none of whose lines are in scope.
+                if row.split_count:
+                    if self._kind_cat_ids.isdisjoint(row.split_category_ids):
+                        return False
+                elif row.category_id not in self._kind_cat_ids:
                     return False
             # The sign gate is meaningful only on a whole-transaction row, where
             # `amount` *is* the categorised flow. A split parent's total sign

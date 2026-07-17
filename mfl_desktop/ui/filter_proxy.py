@@ -79,13 +79,17 @@ class TransactionFilterProxy(QSortFilterProxyModel):
         elif self._status != "All" and row.status != txn_status.key_for_label(self._status):
             return False
         if self._category_id is not None:
-            # A split parent's own category_id is Uncategorised; match it when
-            # the filtered category is on one of its lines (ADR-051) so
-            # filtering by a split-line category surfaces the "—Split—" row.
-            if (
-                row.category_id != self._category_id
-                and self._category_id not in row.split_category_ids
-            ):
+            # A split transaction has no own category — its lines carry them,
+            # and the parent's stored category_id is a placeholder (ADR-051 /
+            # ADR-176). Match a split on its *lines* alone: filtering by a
+            # line's category surfaces the "—Split—" row, and filtering by
+            # Uncategorised surfaces it only when a line is genuinely
+            # uncategorised — not merely because the split parent is. A
+            # non-split matches on its own category_id.
+            if row.split_count:
+                if self._category_id not in row.split_category_ids:
+                    return False
+            elif row.category_id != self._category_id:
                 return False
         if self._search:
             # ADR-061: the haystack (payee/memo/date/security/both amount forms)
