@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -191,10 +192,21 @@ def _split_setup():
 
 def test_split_row_double_click_opens_split_dialog():
     repo, chk_id, interest, txn_id = _split_setup()
+    # Explicit bounds around the fixture's date. This test used to pass
+    # `custom` with **no** dates, which is the one state `_resolve_period`
+    # calls "shouldn't happen" — it falls back to a *rolling* last-quarter
+    # window. So a fixture pinned to 2026-04-15 sat inside the window on the
+    # day this was written (2026-07-08) and dropped out of it on 2026-07-14,
+    # when 90 days had passed. The test then failed for reasons that had
+    # nothing to do with splits, drills, or double-clicks.
+    #
+    # A date literal measured against a window anchored to `date.today()` is a
+    # time bomb with a printed fuse length. Pin both ends.
     flt = TxnListFilter.for_category(
         account_id=chk_id, account_name="Rental Checking",
         category_id=interest, category_label="Interest Exp",
-        period_key="custom", custom_start=None, custom_end=None,
+        period_key="custom",
+        custom_start=date(2026, 1, 1), custom_end=date(2026, 12, 31),
     )
     win = TransactionsListWindow(repo, flt)
     try:
