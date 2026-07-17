@@ -702,8 +702,15 @@ class BillSchedule:
 @dataclass(frozen=True)
 class BillOccurrence:
     """One expected occurrence of a bill within a month (ADR-094). ``day`` is
-    1-indexed day-of-month; ``amount`` is the positive estimated magnitude."""
-    category_id: int
+    1-indexed day-of-month; ``amount`` is the positive estimated magnitude.
+
+    ``category_id`` is the schedule's own category on the way in, and is
+    rewritten to its **bucket** — the nearest budgeted ancestor, or None when
+    there is none — inside ``compute_burndown`` (ADR-173). It must match how
+    the actuals bucket, or a bill that has already been paid will not be
+    recognised as paid and will be projected a second time.
+    """
+    category_id: Optional[int]
     day: int
     amount: Decimal
 
@@ -808,10 +815,29 @@ def compute_burndown(
     else:
         today_day = (today - start).days + 1
 
-    # A single-category scope only sees its own bills.
+    # Bucket each occurrence to the nearest budgeted ancestor, exactly as the
+    # actuals below are bucketed (ADR-173). A schedule categorised 'Cable and
+    # Internet' under a budgeted 'Bills' must land on Bills — otherwise the
+    # spend it becomes lands on Bills, the occurrence sits on Cable, the
+    # amount-match never sees them as the same thing, and the bill gets counted
+    # once as actual and again as an unpaid projection.
+    bill_occurrences = [
+        replace(
+            o,
+            category_id=nearest_budgeted_ancestor(
+                o.category_id, parent_map, budgeted_ids,
+            ) if o.category_id is not None else None,
+        )
+        for o in bill_occurrences
+    ]
+
+    # A single-category scope only sees its own bills — its whole budgeted
+    # subtree, matching the txn filter below (ADR-170: an exact `==` here would
+    # blind a group to its children's bills).
     if target_category_id is not None:
         bill_occurrences = [
-            o for o in bill_occurrences if o.category_id == target_category_id
+            o for o in bill_occurrences
+            if is_ancestor_or_self(target_category_id, o.category_id, parent_map)
         ]
     bill_cats = {o.category_id for o in bill_occurrences}
     bills_total = sum((o.amount for o in bill_occurrences), _ZERO)

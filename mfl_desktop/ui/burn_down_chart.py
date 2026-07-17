@@ -18,7 +18,9 @@ each transaction; bills step at their due days rather than sloping):
   discretionary remainder spread evenly, reaching zero on the last day.
 - **Projected** — the forward projection: unpaid bills step down at their due
   days, plus the discretionary run-rate. Dashed, and **coloured by the
-  verdict** — green when it lands above zero, red when it crosses.
+  verdict** — green when it lands above zero, red when it crosses. Every
+  scheduled outflow in the budget's perimeter is projected, not only the ones
+  linked to an envelope (ADR-173).
 
 The **wedge between Remaining and Plan is the reading** (this idea is lifted
 from a burn-down the owner shared): green where you are ahead of plan — more
@@ -304,9 +306,27 @@ class BurnDownChart(QWidget):
 
     # ── markers ──
 
+    def _today_pill_rect(self, data, geo) -> Optional[QRectF]:
+        """Where the Today pill sits — shared with ``_paint_end_labels``, which
+        has to keep out of it. The pill hugs the top of the chart, which is
+        exactly where 'Remaining' lands on a scope that has spent nothing yet."""
+        chart, _lo, _hi, x_min, x_span = geo
+        if data.today_day < x_min or data.today_day > data.x_days[-1]:
+            return None
+        x = self._x_to_px(data.today_day, chart, x_min, x_span)
+        font = QFont(self.font())
+        set_pt(font, 8)
+        font.setBold(True)
+        fm = QFontMetrics(font)
+        tw = fm.horizontalAdvance(f"Today · {data.today_day}") + 12
+        th = fm.height() + 2
+        pill_left = min(chart.right() - tw, max(chart.left(), x - tw / 2))
+        return QRectF(pill_left, chart.top() - 4, tw, th)
+
     def _paint_today_marker(self, painter, data, geo) -> None:
         chart, lo, hi, x_min, x_span = geo
-        if data.today_day < x_min or data.today_day > data.x_days[-1]:
+        pill = self._today_pill_rect(data, geo)
+        if pill is None:
             return
         x = self._x_to_px(data.today_day, chart, x_min, x_span)
         pen = QPen(QColor(_ch.chart_accent()))
@@ -321,13 +341,9 @@ class BurnDownChart(QWidget):
         painter.setFont(font)
         fm = QFontMetrics(font)
         text = f"Today · {data.today_day}"
-        tw = fm.horizontalAdvance(text) + 12
-        th = fm.height() + 2
-        pill_left = min(chart.right() - tw, max(chart.left(), x - tw / 2))
-        pill = QRectF(pill_left, chart.top() - 4, tw, th)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor(_ch.chart_accent())))
-        painter.drawRoundedRect(pill, th / 2, th / 2)
+        painter.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
         # `on_accent`, not a literal white: it *is* white in both themes, so
         # this changes no pixel — but a hex here is indistinguishable from the
         # frozen light-theme ones ADR-167 hunts, and the token says out loud
@@ -410,6 +426,12 @@ class BurnDownChart(QWidget):
             painter.drawLine(int(pts[i - 1][0]), int(pts[i - 1][1]),
                              int(pts[i][0]), int(pts[i][1]))
 
+    @staticmethod
+    def _hits(tx, ty, tw, fm, rect: QRectF) -> bool:
+        """Does a text drawn at (tx, ty) baseline overlap ``rect``?"""
+        text_rect = QRectF(tx - 3, ty - fm.ascent() - 1, tw + 6, fm.height())
+        return text_rect.intersects(rect)
+
     def _paint_end_labels(self, painter, data, geo) -> None:
         """Name each line where it ends, instead of in a legend band.
 
@@ -443,6 +465,7 @@ class BurnDownChart(QWidget):
             entries.append((
                 "Plan", data.ideal_x[-1], data.ideal[-1], _ink_plan(),
             ))
+        pill = self._today_pill_rect(data, geo)
         placed: list[tuple[float, float]] = []
         for label, day, value, colour in entries:
             x = self._x_to_px(day, chart, x_min, x_span)
@@ -460,6 +483,12 @@ class BurnDownChart(QWidget):
                 for px, py in placed
             ):
                 ty -= fm.height()
+            # ...and duck under the Today pill rather than through it. A scope
+            # that has spent nothing keeps Remaining pinned to the top of the
+            # chart, which is exactly where the pill lives — so 'Remaining'
+            # printed straight over 'Today · 17'. Below the line is free.
+            if pill is not None and self._hits(tx, ty, tw, fm, pill):
+                ty = y + fm.height() + 2
             placed.append((tx, ty))
             # A surface-coloured plate behind the text: these labels sit at the
             # end of their own line, which means *on* it, and a dashed series

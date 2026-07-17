@@ -9008,18 +9008,41 @@ class Repository:
             self.rollback()
             raise
 
-    def list_bill_schedules_for_budget(self, budget_id: int) -> list[dict]:
-        """The schedule recurrence behind each bill line in a budget (ADR-094) —
-        ``{category_id, cadence, anchor_date, amount, end_date}`` for every line
-        with a live (non-archived) linked schedule. ``amount`` is the schedule's
-        signed estimated amount. Feeds ``bill_occurrences_in_month`` so the
-        burn-down can project + amount-match the bills."""
+    def list_perimeter_schedules(self, budget_id: int) -> list[dict]:
+        """Every active **expense** schedule that will spend from this budget's
+        perimeter — ``{category_id, cadence, anchor_date, amount, end_date}``.
+
+        This is what the burn-down's projection reads (ADR-173). It replaces
+        ``list_bill_schedules_for_budget``, which joined
+        ``budget_line.scheduled_txn_id`` and so only ever returned schedules
+        *explicitly linked* to a line via ADR-094's "Make this a bill…" — a
+        schedule created the ordinary way (Manage ▸ Schedules) was invisible to
+        the projection. A scheduled transaction is a known future outflow
+        whether or not anyone linked it to an envelope.
+
+        Membership is the **perimeter**, not the link: a schedule spends from
+        this budget exactly when its account is in the perimeter, which is the
+        same rule ``list_perimeter_txns`` applies to the actuals it will
+        eventually become. A linked line whose schedule pays from an outside
+        account is correctly *not* projected — its spending never lands in the
+        perimeter either.
+
+        Expense-kind only, matching what the chart plots (its whole-budget
+        scope counts expense outflows and nothing else). ``category_id`` is the
+        schedule's own; ``compute_burndown`` buckets it to the nearest budgeted
+        ancestor, exactly as it buckets the actuals.
+        """
         cur = self._conn.execute(
-            "SELECT bl.category_id, s.cadence, s.anchor_date, "
+            "SELECT s.category_id, s.cadence, s.anchor_date, "
             "       s.estimated_amount, s.end_date "
-            "FROM budget_line bl "
-            "JOIN scheduled_txn s ON s.id = bl.scheduled_txn_id "
-            "WHERE bl.budget_id = ? AND s.archived_at IS NULL",
+            "FROM scheduled_txn s "
+            "JOIN budget_account ba "
+            "  ON ba.account_id = s.account_id AND ba.budget_id = ? "
+            "JOIN category c ON c.id = s.category_id "
+            "WHERE s.archived_at IS NULL "
+            "  AND ba.contribution != 'excluded' "
+            "  AND c.kind = 'expense' "
+            "  AND c.archived_at IS NULL",
             (budget_id,),
         )
         return [

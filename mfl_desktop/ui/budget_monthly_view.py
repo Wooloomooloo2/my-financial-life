@@ -651,7 +651,12 @@ class BudgetMonthlyView(QWidget):
                 anchor_date=d["anchor_date"], amount=d["amount"],
                 end_date=d["end_date"],
             )
-            for d in self._repo.list_bill_schedules_for_budget(self._budget.id)
+            # ADR-173: every scheduled outflow in the perimeter, not only the
+            # ones someone linked to an envelope via "Make this a bill…". A
+            # scheduled transaction is a known future spend either way, and the
+            # link is an envelope-UI concept the projection has no business
+            # depending on.
+            for d in self._repo.list_perimeter_schedules(self._budget.id)
         ]
         occ = bc.bill_occurrences_in_month(bills, month)
         # Bucketing maps are now needed for both scopes (to classify bill vs
