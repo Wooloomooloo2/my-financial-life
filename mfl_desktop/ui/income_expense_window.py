@@ -566,11 +566,16 @@ class IncomeExpenseWindow(QMainWindow):
             self._current_filters.account_ids, lambda i: names.get(i, ""),
         )
         kind_label = "Income" if kind == "income" else "Expense"
+        # Carry the report's category scope into the drill (ADR-169), expanded
+        # to descendants exactly as the chart query does. Empty == all
+        # categories; a scoped report drills into only its own categories.
+        scope = self._expanded_category_ids(self._current_filters.category_ids)
         flt = TxnListFilter.for_kind(
             account_id=account_id, account_name=account_name,
             kind=kind, kind_label=kind_label,
             period_key="custom", custom_start=d_from, custom_end=d_to,
             account_ids=subset, account_ids_label=subset_label,
+            kind_category_ids=tuple(scope) if scope else (),
         )
         win = TransactionsListWindow(self._repo, flt, parent=self)
         win.setAttribute(Qt.WA_DeleteOnClose)

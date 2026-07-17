@@ -127,6 +127,12 @@ class TxnListFilter:
     # matching sign + non-transfer, reconciling with the report's bars.
     kind: Optional[str] = None
     kind_label: str = ""
+    # The report's own category scope for a kind drill (ADR-169), already
+    # expanded to descendants. Empty == the report spans every category of the
+    # kind (the historical behaviour). When non-empty the drill intersects the
+    # kind's categories with this set, so a report scoped to e.g. "Landlord
+    # Expenses" drills into only those categories, not every expense.
+    kind_category_ids: tuple[int, ...] = ()
     # Security drill (ADR-083 — Investment Returns report): when set, match
     # only transactions on that security (its buys / sells / dividends).
     security_id: Optional[int] = None
@@ -209,10 +215,14 @@ class TxnListFilter:
         custom_end: Optional[date] = None,
         account_ids: tuple[int, ...] = (),
         account_ids_label: str = "",
+        kind_category_ids: tuple[int, ...] = (),
     ) -> "TxnListFilter":
         """Drill-down for an Income & Expense bar (ADR-083): every
         ``kind``-category flow (income inflows / expense outflows, transfers
-        excluded) over the period — matches the report's kind-based totals."""
+        excluded) over the period — matches the report's kind-based totals.
+        ``kind_category_ids`` (ADR-169) carries the report's category scope
+        (already expanded to descendants); empty means the report spans all
+        categories of the kind."""
         return cls(
             account_id=account_id, account_name=account_name,
             category_id=None, category_label="",
@@ -220,6 +230,7 @@ class TxnListFilter:
             period_key=period_key, title_label=kind_label,
             custom_start=custom_start, custom_end=custom_end,
             kind=kind, kind_label=kind_label,
+            kind_category_ids=kind_category_ids,
             account_ids=account_ids, account_ids_label=account_ids_label,
         )
 
@@ -258,6 +269,7 @@ class TxnListFilter:
             self.payee_ids,
             self.payee_is_null,
             self.kind,
+            self.kind_category_ids,
             self.security_id,
             self.custom_start.isoformat() if self.custom_start else None,
             self.custom_end.isoformat() if self.custom_end else None,
@@ -350,9 +362,16 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         'expense'; ``category_ids`` is that kind's category id set. A row
         passes only when it's on one of those categories, is non-transfer,
         and its sign matches the kind (income inflows / expense outflows) —
-        the same definition as ``Repository.income_expense_series``."""
+        the same definition as ``Repository.income_expense_series``.
+
+        ``category_ids`` of ``None`` means no category restriction (every
+        category of the kind); an *empty* set means match nothing — a report
+        scope (ADR-169) that intersects to zero categories of the kind must
+        not fall back to showing everything."""
         self._kind = kind
-        self._kind_cat_ids = frozenset(category_ids) if category_ids else None
+        self._kind_cat_ids = (
+            frozenset(category_ids) if category_ids is not None else None
+        )
         self.invalidateRowsFilter()
 
     def set_security_id(self, security_id: Optional[int]) -> None:
@@ -396,13 +415,27 @@ class DrillDownFilterProxy(TransactionFilterProxy):
         if self._kind is not None:
             if row.transfer_id is not None:
                 return False
-            if (self._kind_cat_ids is not None
-                    and row.category_id not in self._kind_cat_ids):
-                return False
-            if self._kind == "income" and row.amount <= 0:
-                return False
-            if self._kind == "expense" and row.amount >= 0:
-                return False
+            if self._kind_cat_ids is not None:
+                # Split-aware (ADR-169), mirroring the category-descendant path
+                # above: the Income & Expense report aggregates split *lines*
+                # (`txn_category_line`), so a split parent categorised
+                # "Uncategorised" still counts when one of its lines is in the
+                # kind's (scoped) category set. Without this a report whose
+                # income lives only on split lines drills to an empty list even
+                # though its bar is non-zero.
+                if (row.category_id not in self._kind_cat_ids
+                        and self._kind_cat_ids.isdisjoint(row.split_category_ids)):
+                    return False
+            # The sign gate is meaningful only on a whole-transaction row, where
+            # `amount` *is* the categorised flow. A split parent's total sign
+            # doesn't reflect the matched line (the report counts the line, not
+            # the parent), so a split that cleared the category gate is kept for
+            # the user to open — again matching how the report counts it.
+            if row.split_count == 0:
+                if self._kind == "income" and row.amount <= 0:
+                    return False
+                if self._kind == "expense" and row.amount >= 0:
+                    return False
         if self._security_id is not None and row.security_id != self._security_id:
             return False
         if self._account_ids is not None and row.account_id not in self._account_ids:
@@ -488,6 +521,12 @@ class TransactionsListWindow(QMainWindow):
         self._payee_label: str = txn_filter.payee_label
         self._kind: Optional[str] = txn_filter.kind
         self._kind_label: str = txn_filter.kind_label
+        # The report's category scope for the kind drill (ADR-169). Empty ==
+        # all categories of the kind.
+        self._kind_category_ids: Optional[set[int]] = (
+            set(txn_filter.kind_category_ids)
+            if txn_filter.kind_category_ids else None
+        )
         self._security_id: Optional[int] = txn_filter.security_id
         self._security_label: str = txn_filter.security_label
         self._period_key: str = txn_filter.period_key
@@ -750,6 +789,12 @@ class TransactionsListWindow(QMainWindow):
             kind_ids = {
                 c.id for c in self._repo.list_categories_flat(kinds=(self._kind,))
             }
+            # Honour the report's own category scope (ADR-169): a report
+            # narrowed to a subset of categories must drill into only those,
+            # not every category of the kind. Intersect so a category of the
+            # other kind lingering in the scope can't leak in.
+            if self._kind_category_ids is not None:
+                kind_ids &= self._kind_category_ids
             self._proxy.set_kind_filter(self._kind, kind_ids)
         else:
             self._proxy.set_kind_filter(None, None)
