@@ -662,6 +662,17 @@ class BurnDownData:
     proj_x: list[int]
     proj: list[Decimal]
     projected_end: Decimal     # where the projection lands at month-end
+    # ADR-172. The chart draws **remaining** (`total_planned − cumulative`),
+    # so these are the two facts it leads with. They live here, not in the
+    # paint code, because they are arithmetic over the series and belong where
+    # the series is built — and where a test can reach them without a Qt event
+    # loop. `projected_end` was already computed here and read by *nothing*:
+    # the chart calculated the answer and made the reader eyeball it.
+    projected_remaining: Decimal = _ZERO   # total_planned − projected_end
+    # The first day the plan is exhausted (remaining ≤ 0) — from the actuals if
+    # it has already happened, else from the projection. None = it doesn't,
+    # this month. This is the reading a rising line cannot give you.
+    runs_out_day: Optional[int] = None
 
 
 def _month_bounds(month: str) -> tuple[date, date, int]:
@@ -916,10 +927,29 @@ def compute_burndown(
         proj[-1] if proj else (actual[-1] if actual else _ZERO)
     )
 
+    # ── The day the plan runs out (ADR-172). ──
+    # Spending *exactly* the plan exhausts it, so the test is `>=`: remaining
+    # hits zero and there is nothing left, which is what "runs out" means. A
+    # non-positive plan has nothing to run out of — every day would qualify,
+    # which is noise, not a warning.
+    runs_out_day: Optional[int] = None
+    if total_planned > _ZERO:
+        for d, v in zip(actual_x, actual):        # already happened
+            if v >= total_planned:
+                runs_out_day = d
+                break
+        if runs_out_day is None:
+            for d, v in zip(proj_x, proj):        # else, projected to
+                if v >= total_planned:
+                    runs_out_day = d
+                    break
+
     return BurnDownData(
         month=month, scope_label=scope_label, period_days=period_days,
         today_day=today_day, total_planned=_round2(total_planned),
         x_days=x_days, actual_x=actual_x, actual=actual,
         ideal_x=x_days, ideal=ideal, proj_x=proj_x, proj=proj,
         projected_end=projected_end,
+        projected_remaining=_round2(total_planned - projected_end),
+        runs_out_day=runs_out_day,
     )

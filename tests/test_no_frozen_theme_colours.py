@@ -46,7 +46,10 @@ _TOKEN_TABLE = "tokens.py"
 _ALLOWED: dict[str, int] = {
     "net_worth_window.py": 11,
     "returns_chart.py": 7,
-    "burn_down_chart.py": 5,
+    # ADR-172 rewrote this chart and converted all five — including the
+    # permanent alarm-red on the actual line, which shouted danger at a reader
+    # who was under budget. Zero, and it stays zero.
+    "burn_down_chart.py": 0,
     "sankey_report_window.py": 5,
     "splash.py": 4,
     "transfer_chips.py": 4,

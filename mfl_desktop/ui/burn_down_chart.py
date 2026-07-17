@@ -1,26 +1,35 @@
-"""Projected burn-down chart for the budget monthly view (ADR-058 R3, ADR-094).
+"""Budget burn-down for the monthly view (ADR-058 R3, ADR-094, ADR-172).
 
-A hand-rolled paintEvent chart (ADR-026) showing one month's spend depletion
-for a scope (the whole budget, or a single category) as a **staircase**
-(ADR-094) — spend holds flat then jumps at each transaction; the ideal +
-projection step at known bill due days rather than sloping diagonally:
+A hand-rolled paintEvent chart (ADR-026) showing **what is left of this
+month's plan**, day by day, for a scope (the whole budget, or one envelope).
+It descends: start at the plan, fall as you spend, and the day it reaches zero
+is the day you run out.
 
-- **Actual** — cumulative outflow magnitude through today, a solid filled
-  step area.
-- **Ideal** — the planned pacing: bills as steps at their due days, the
-  discretionary remainder spread linearly (light grey dashed steps).
-- **Projected** — the forward projection: unpaid bills as steps at their due
-  days + the discretionary run-rate, so an overspending scope keeps climbing
-  and crosses the budget early, while a fully-paid bill goes flat (amber
-  dashed steps).
-- A faint horizontal **Budget** reference at ``total_planned``, plus a vertical
-  **Today** marker.
+Until ADR-172 this was a burn-*up* wearing the name — every series climbed
+toward a ceiling — and it paced against ``available`` (allocation **plus**
+accumulated rollover), which is not a plan you meant to spend. See that ADR.
 
-Same paintEvent idiom as the Spending Over Time chart. Stateless — call
-``set_data(BurnDownData)`` to render.
+Three series, all step functions (ADR-094 — spend holds flat then jumps at
+each transaction; bills step at their due days rather than sloping):
+
+- **Remaining** — the plan less cumulative outflow, through today. A solid
+  line in plain ink: it is a fact, not a judgement, so it carries no colour.
+- **Plan** — the pacing line: bills step down at their due days, the
+  discretionary remainder spread evenly, reaching zero on the last day.
+- **Projected** — the forward projection: unpaid bills step down at their due
+  days, plus the discretionary run-rate. Dashed, and **coloured by the
+  verdict** — green when it lands above zero, red when it crosses.
+
+The **wedge between Remaining and Plan is the reading** (this idea is lifted
+from a burn-down the owner shared): green where you are ahead of plan — more
+left than you meant to have — and red where you are behind. The colour is the
+comparison, so the chart needs no legend to decode two dashed greys.
+
+Stateless — call ``set_data(BurnDownData)`` to render.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -36,25 +45,40 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from mfl_desktop.budget_calc import BurnDownData
+from mfl_desktop.ui import tokens
 from mfl_desktop.ui.chart_helpers import fmt_currency, nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
 from mfl_desktop.ui.ui_fonts import set_pt
 
-# Series colours — local to this chart, not the GROUP_PALETTE.
-_COLOR_ACTUAL = "#dc2626"   # red-600 — spend
-_COLOR_IDEAL = "#6b7280"    # slate-500 — ideal pacing
-_COLOR_PROJECT = "#f59e0b"  # amber-500 — forward projection
-_COLOR_BUDGET = "#94a3b8"   # slate-400 — budget reference line
+
+# Series inks, resolved at paint time so they follow a live theme toggle
+# (ADR-076). These were five frozen light-theme hexes — the whole of this
+# module's ADR-167 ratchet allowance — including a permanent alarm-red for the
+# actual line, which shouted danger at a reader who was comfortably under
+# budget. Colour now means something: red is *over*, and only over (ADR-172).
+def _ink_remaining() -> QColor:  return QColor(_ch.chart_ink())
+def _ink_plan() -> QColor:       return QColor(tokens.c("subtle"))
+def _ink_good() -> QColor:       return QColor(tokens.c("positive_strong"))
+def _ink_bad() -> QColor:        return QColor(tokens.c("negative_strong"))
+
+
+def _alpha(colour: QColor, a: int) -> QColor:
+    out = QColor(colour)
+    out.setAlpha(a)
+    return out
 
 
 class BurnDownChart(QWidget):
     """Stateless widget — call ``set_data(BurnDownData)`` to render."""
 
-    _MARGIN_TOP = 18
+    _MARGIN_TOP = 20
     _MARGIN_RIGHT = 14
     _MARGIN_LEFT = 62           # room for "£10,000"
     _AXIS_LABEL_BAND = 18       # x-axis day labels
-    _LEGEND_BAND = 22           # swatches + labels
+    _MARGIN_BOTTOM = 8
+    # No legend band (ADR-172): the wedge's colour is the comparison, and the
+    # three series are direct-labelled at their ends. That is 22px of chart
+    # back, and one less decode step.
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -68,6 +92,18 @@ class BurnDownChart(QWidget):
         self._data = data
         self.update()
 
+    # ── remaining ──
+
+    def _rem(self, data: BurnDownData, cumulative) -> float:
+        """The burn-down value for a cumulative-spend figure.
+
+        ``compute_burndown`` produces **cumulative spend** — that is what the
+        bills staircase and the run-rate naturally build, and it stays the one
+        representation of the series. 'Remaining' is a pure function of it, so
+        it is derived here in the view rather than duplicated in the model.
+        """
+        return float(data.total_planned) - float(cumulative)
+
     # ── painting ──
 
     def paintEvent(self, event) -> None:  # noqa: N802 — Qt override
@@ -77,29 +113,33 @@ class BurnDownChart(QWidget):
         painter.fillRect(self.rect(), QColor(_ch.chart_surface()))
 
         data = self._data
-        if data is None or not data.x_days:
-            self._paint_empty(painter, "No spending to chart this month")
+        if data is None or not data.x_days or data.total_planned <= 0:
+            self._paint_empty(painter, "Nothing budgeted to burn down")
             painter.end()
             return
 
-        chart_rect, legend_rect = self._compute_rects()
-        ymax, ystep = self._compute_y_axis(data)
+        chart = self._compute_rect()
+        lo, hi, step = self._compute_y_axis(data)
         x_min = data.x_days[0]
         x_max = data.x_days[-1]
         x_span = max(1, x_max - x_min)
+        geo = (chart, lo, hi, x_min, x_span)
 
-        self._paint_gridlines(painter, chart_rect, ymax, ystep)
-        self._paint_y_labels(painter, chart_rect, ymax, ystep)
-        self._paint_x_labels(painter, chart_rect, data, x_min, x_span)
-        self._paint_budget_line(painter, chart_rect, data, ymax)
-        self._paint_today_marker(painter, chart_rect, data, x_min, x_span)
-        self._paint_series(painter, chart_rect, data, ymax, x_min, x_span)
-        self._paint_legend(painter, legend_rect)
-        self._paint_axis_baseline(painter, chart_rect)
+        self._paint_gridlines(painter, chart, lo, hi, step)
+        self._paint_y_labels(painter, chart, lo, hi, step)
+        self._paint_x_labels(painter, chart, data, x_min, x_span)
+        self._paint_wedges(painter, data, geo)
+        self._paint_zero_line(painter, chart, lo, hi)
+        self._paint_today_marker(painter, data, geo)
+        self._paint_series(painter, data, geo)
+        self._paint_end_labels(painter, data, geo)
+        # Last, so it wins any overlap: when the plan has run out, that is the
+        # most important thing on the chart.
+        self._paint_runs_out(painter, data, geo)
         painter.end()
 
     def _paint_empty(self, painter: QPainter, msg: str) -> None:
-        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         font = QFont(painter.font())
         set_pt(font, 10)
         painter.setFont(font)
@@ -107,62 +147,72 @@ class BurnDownChart(QWidget):
 
     # ── geometry / axis ──
 
-    def _compute_rects(self) -> tuple[QRectF, QRectF]:
+    def _compute_rect(self) -> QRectF:
         w, h = self.width(), self.height()
-        legend_top = h - self._LEGEND_BAND
-        chart_bottom = legend_top - self._AXIS_LABEL_BAND
-        chart = QRectF(
+        chart_bottom = h - self._AXIS_LABEL_BAND - self._MARGIN_BOTTOM
+        return QRectF(
             self._MARGIN_LEFT, self._MARGIN_TOP,
             max(1, w - self._MARGIN_LEFT - self._MARGIN_RIGHT),
             max(1, chart_bottom - self._MARGIN_TOP),
         )
-        legend = QRectF(
-            self._MARGIN_LEFT, legend_top,
-            max(1, w - self._MARGIN_LEFT - self._MARGIN_RIGHT),
-            self._LEGEND_BAND,
-        )
-        return chart, legend
 
-    def _compute_y_axis(self, data: BurnDownData) -> tuple[float, float]:
-        # Include the projection peak so an over-budget line stays on-chart.
-        peak = max(
-            [float(data.total_planned)]
-            + [float(v) for v in data.actual]
-            + [float(v) for v in data.proj]
-            + [1.0]
+    def _compute_y_axis(self, data: BurnDownData) -> tuple[float, float, float]:
+        """(lo, hi, step). The axis runs from the plan at the top down to zero
+        — or **below** zero when spending has overshot it, because an overspend
+        is exactly what the reader needs to see and clamping at zero would hide
+        the one thing the chart exists to warn about."""
+        values = (
+            [self._rem(data, v) for v in data.actual]
+            + [self._rem(data, v) for v in data.proj]
+            + [0.0]
         )
-        return nice_ticks(peak * 1.10, target_count=4)
+        lo_raw = min(values)
+        hi_raw = float(data.total_planned)
+        _axis_max, step = nice_ticks(max(hi_raw - lo_raw, 1.0), target_count=4)
+        lo = math.floor(lo_raw / step) * step
+        hi = math.ceil(hi_raw / step) * step
+        if hi <= lo:
+            hi = lo + step
+        return lo, hi, step
 
     def _x_to_px(self, x_day, chart, x_min, x_span) -> float:
         return chart.left() + ((x_day - x_min) / x_span) * chart.width()
 
-    def _y_to_px(self, y_val, chart, ymax) -> float:
-        if ymax <= 0:
+    def _y_to_px(self, y_val, chart, lo, hi) -> float:
+        span = hi - lo
+        if span <= 0:
             return chart.bottom()
-        return chart.bottom() - (y_val / ymax) * chart.height()
+        return chart.bottom() - ((y_val - lo) / span) * chart.height()
 
     # ── paint sub-routines ──
 
-    def _paint_gridlines(self, painter, chart, ymax, step) -> None:
-        pen = QPen(QColor(QColor(_ch.chart_grid())))
+    def _paint_gridlines(self, painter, chart, lo, hi, step) -> None:
+        pen = QPen(QColor(_ch.chart_grid()))
         pen.setWidth(1)
         painter.setPen(pen)
-        n = int(round(ymax / step)) if step > 0 else 0
-        for i in range(n + 1):
-            y = self._y_to_px(i * step, chart, ymax)
+        for v in self._ticks(lo, hi, step):
+            y = self._y_to_px(v, chart, lo, hi)
             painter.drawLine(int(chart.left()), int(y),
                              int(chart.right()), int(y))
 
-    def _paint_y_labels(self, painter, chart, ymax, step) -> None:
+    def _ticks(self, lo, hi, step) -> list:
+        if step <= 0:
+            return [lo]
+        out, v, guard = [], lo, 0
+        while v <= hi + step / 2 and guard < 64:
+            out.append(round(v, 6))
+            v += step
+            guard += 1
+        return out
+
+    def _paint_y_labels(self, painter, chart, lo, hi, step) -> None:
         font = QFont(painter.font())
         set_pt(font, 8)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
-        n = int(round(ymax / step)) if step > 0 else 0
-        for i in range(n + 1):
-            v = i * step
-            y = self._y_to_px(v, chart, ymax)
+        for v in self._ticks(lo, hi, step):
+            y = self._y_to_px(v, chart, lo, hi)
             label = fmt_currency(v)
             tw = fm.horizontalAdvance(label)
             painter.drawText(int(chart.left() - tw - 8),
@@ -172,7 +222,7 @@ class BurnDownChart(QWidget):
         font = QFont(painter.font())
         set_pt(font, 8)
         painter.setFont(font)
-        painter.setPen(QPen(QColor(QColor(_ch.chart_axis_ink()))))
+        painter.setPen(QPen(QColor(_ch.chart_axis_ink())))
         fm = QFontMetrics(font)
         n = len(data.x_days)
         step = max(1, (n - 1) // 6)
@@ -187,22 +237,75 @@ class BurnDownChart(QWidget):
             painter.drawText(int(x - tw / 2),
                              int(chart.bottom() + fm.ascent() + 4), label)
 
-    def _paint_budget_line(self, painter, chart, data, ymax) -> None:
-        if data.total_planned <= 0:
-            return
-        y = self._y_to_px(float(data.total_planned), chart, ymax)
-        pen = QPen(QColor(_COLOR_BUDGET))
+    def _paint_zero_line(self, painter, chart, lo, hi) -> None:
+        """Zero is the floor — the plan exhausted. Only worth emphasising when
+        the axis actually reaches it as an interior line (an overspend); at the
+        very bottom it is just the baseline."""
+        y = self._y_to_px(0.0, chart, lo, hi)
+        pen = QPen(QColor(_ch.chart_axis_ink()))
         pen.setWidth(1)
-        pen.setStyle(Qt.DashLine)
         painter.setPen(pen)
         painter.drawLine(int(chart.left()), int(y), int(chart.right()), int(y))
-        font = QFont(painter.font())
-        set_pt(font, 8)
-        painter.setFont(font)
-        painter.setPen(QPen(QColor(_COLOR_BUDGET)))
-        painter.drawText(int(chart.left() + 4), int(y - 3), "Budget")
 
-    def _paint_today_marker(self, painter, chart, data, x_min, x_span) -> None:
+    # ── the wedge (the reading) ──
+
+    def _paint_wedges(self, painter, data, geo) -> None:
+        """Shade between Remaining and Plan: green where more is left than
+        planned, red where less.
+
+        This is the chart's whole comparison, done in colour rather than by
+        asking the reader to hold two dashed lines apart. The projection's
+        wedge is fainter — it is a forecast, not a fact.
+        """
+        self._wedge(painter, data, geo, data.actual_x, data.actual, alpha=52)
+        self._wedge(painter, data, geo, data.proj_x, data.proj, alpha=26)
+
+    def _wedge(self, painter, data, geo, xs, ys, *, alpha) -> None:
+        if len(xs) < 2:
+            return
+        chart, lo, hi, x_min, x_span = geo
+        ideal = {d: v for d, v in zip(data.ideal_x, data.ideal)}
+        # Walk the series, splitting into runs of the same sign so each run can
+        # be filled with its own colour. A run ends when the series crosses the
+        # plan; the crossing itself is approximated at the sample boundary,
+        # which at one sample per day is under a pixel of error.
+        run: list[tuple[float, float, float]] = []   # (x_px, y_series, y_plan)
+        sign: Optional[bool] = None
+        for d, v in zip(xs, ys):
+            if d not in ideal:
+                continue
+            rv = self._rem(data, v)
+            pv = self._rem(data, ideal[d])
+            ahead = rv >= pv
+            if sign is None:
+                sign = ahead
+            if ahead != sign and run:
+                self._fill_run(painter, run, sign)
+                run = [run[-1]]
+                sign = ahead
+            run.append((
+                self._x_to_px(d, chart, x_min, x_span),
+                self._y_to_px(rv, chart, lo, hi),
+                self._y_to_px(pv, chart, lo, hi),
+            ))
+        if run and sign is not None:
+            self._fill_run(painter, run, sign, alpha=alpha)
+
+    def _fill_run(self, painter, run, ahead: bool, *, alpha: int = 52) -> None:
+        if len(run) < 2:
+            return
+        colour = _ink_good() if ahead else _ink_bad()
+        poly = QPolygonF([QPointF(x, y) for x, y, _p in run])
+        for x, _y, p in reversed(run):
+            poly.append(QPointF(x, p))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(_alpha(colour, alpha)))
+        painter.drawPolygon(poly)
+
+    # ── markers ──
+
+    def _paint_today_marker(self, painter, data, geo) -> None:
+        chart, lo, hi, x_min, x_span = geo
         if data.today_day < x_min or data.today_day > data.x_days[-1]:
             return
         x = self._x_to_px(data.today_day, chart, x_min, x_span)
@@ -225,46 +328,77 @@ class BurnDownChart(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor(_ch.chart_accent())))
         painter.drawRoundedRect(pill, th / 2, th / 2)
-        painter.setPen(QPen(QColor("#ffffff")))
+        # `on_accent`, not a literal white: it *is* white in both themes, so
+        # this changes no pixel — but a hex here is indistinguishable from the
+        # frozen light-theme ones ADR-167 hunts, and the token says out loud
+        # that the choice was deliberate.
+        painter.setPen(QPen(QColor(tokens.c("on_accent"))))
         painter.drawText(int(pill.left() + 6),
                          int(pill.top() + fm.ascent() + 1), text)
 
-    def _paint_series(self, painter, chart, data, ymax, x_min, x_span) -> None:
-        # All three series are STEP functions (ADR-094): spend holds flat then
-        # jumps at each transaction; the ideal + projection step at bill due
-        # days. Ideal + projection are light dashed guides behind; the actual is
-        # a solid filled staircase on top.
-        self._step_line(painter, data.ideal_x, data.ideal, chart, ymax,
-                        x_min, x_span, colour=QColor(_COLOR_IDEAL),
-                        width=1, style=Qt.DashLine)
-        self._step_line(painter, data.proj_x, data.proj, chart, ymax,
-                        x_min, x_span, colour=QColor(_COLOR_PROJECT),
-                        width=2, style=Qt.DashLine)
-        self._step_fill(painter, data.actual_x, data.actual, chart, ymax,
-                        x_min, x_span)
-        self._step_line(painter, data.actual_x, data.actual, chart, ymax,
-                        x_min, x_span, colour=QColor(_COLOR_ACTUAL),
-                        width=3, style=Qt.SolidLine)
+    def _paint_runs_out(self, painter, data, geo) -> None:
+        """Mark the day the plan hits zero — the reading a rising line could
+        never give. Nothing to mark when it doesn't."""
+        chart, lo, hi, x_min, x_span = geo
+        day = data.runs_out_day
+        if day is None or day < x_min or day > data.x_days[-1]:
+            return
+        x = self._x_to_px(day, chart, x_min, x_span)
+        y = self._y_to_px(0.0, chart, lo, hi)
+        colour = _ink_bad()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(colour))
+        painter.drawEllipse(QPointF(x, y), 3.5, 3.5)
 
-    def _step_pts(self, xs, ys, chart, ymax, x_min, x_span) -> list:
-        """Pixel points tracing a staircase through (xs, ys): hold each value
-        flat to the next x, then jump vertically — so a cumulative-spend series
+        font = QFont(painter.font())
+        set_pt(font, 8)
+        font.setBold(True)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        text = f"Runs out · {day}"
+        tw = fm.horizontalAdvance(text)
+        tx = min(chart.right() - tw, max(chart.left(), x - tw / 2))
+        ty = y - 9
+        plate = QRectF(tx - 3, ty - fm.ascent() - 1, tw + 6, fm.height())
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(_alpha(QColor(_ch.chart_surface()), 225)))
+        painter.drawRect(plate)
+        painter.setPen(QPen(colour))
+        painter.drawText(int(tx), int(ty), text)
+
+    # ── series ──
+
+    def _paint_series(self, painter, data, geo) -> None:
+        verdict = (
+            _ink_bad() if data.runs_out_day is not None else _ink_good()
+        )
+        self._step_line(painter, data, geo, data.ideal_x, data.ideal,
+                        colour=_ink_plan(), width=1, style=Qt.SolidLine)
+        self._step_line(painter, data, geo, data.proj_x, data.proj,
+                        colour=verdict, width=2, style=Qt.DashLine)
+        self._step_line(painter, data, geo, data.actual_x, data.actual,
+                        colour=_ink_remaining(), width=3, style=Qt.SolidLine)
+
+    def _step_pts(self, data, geo, xs, ys) -> list:
+        """Pixel points tracing a staircase through (xs, ys) in *remaining*
+        terms: hold each value flat to the next day, then drop — so the series
         reads as discrete steps rather than a diagonal."""
+        chart, lo, hi, x_min, x_span = geo
         if not xs:
             return []
         pts = [(self._x_to_px(xs[0], chart, x_min, x_span),
-                self._y_to_px(float(ys[0]), chart, ymax))]
+                self._y_to_px(self._rem(data, ys[0]), chart, lo, hi))]
         for i in range(1, len(xs)):
             x = self._x_to_px(xs[i], chart, x_min, x_span)
-            y_prev = self._y_to_px(float(ys[i - 1]), chart, ymax)
-            y = self._y_to_px(float(ys[i]), chart, ymax)
+            y_prev = self._y_to_px(self._rem(data, ys[i - 1]), chart, lo, hi)
+            y = self._y_to_px(self._rem(data, ys[i]), chart, lo, hi)
             pts.append((x, y_prev))   # horizontal hold
-            pts.append((x, y))        # vertical jump
+            pts.append((x, y))        # vertical drop
         return pts
 
-    def _step_line(self, painter, xs, ys, chart, ymax, x_min, x_span,
+    def _step_line(self, painter, data, geo, xs, ys,
                    *, colour, width, style) -> None:
-        pts = self._step_pts(xs, ys, chart, ymax, x_min, x_span)
+        pts = self._step_pts(data, geo, xs, ys)
         if len(pts) < 2:
             return
         pen = QPen(colour)
@@ -276,47 +410,63 @@ class BurnDownChart(QWidget):
             painter.drawLine(int(pts[i - 1][0]), int(pts[i - 1][1]),
                              int(pts[i][0]), int(pts[i][1]))
 
-    def _step_fill(self, painter, xs, ys, chart, ymax, x_min, x_span) -> None:
-        pts = self._step_pts(xs, ys, chart, ymax, x_min, x_span)
-        if len(pts) < 2:
-            return
-        base_y = chart.bottom()
-        poly = QPolygonF([QPointF(x, y) for x, y in pts])
-        poly.append(QPointF(pts[-1][0], base_y))
-        poly.append(QPointF(pts[0][0], base_y))
-        fill = QColor(_COLOR_ACTUAL)
-        fill.setAlpha(38)           # soft translucent area under the staircase
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(fill))
-        painter.drawPolygon(poly)
+    def _paint_end_labels(self, painter, data, geo) -> None:
+        """Name each line where it ends, instead of in a legend band.
 
-    def _paint_legend(self, painter, legend) -> None:
+        Three dashed styles and a swatch strip made the reader look away from
+        the data to decode it. A label at the line's own end is read in place —
+        and the wedge already says which is which.
+        """
+        chart, lo, hi, x_min, x_span = geo
         font = QFont(painter.font())
         set_pt(font, 8)
         painter.setFont(font)
         fm = QFontMetrics(font)
-        entries = [
-            ("Actual", QColor(_COLOR_ACTUAL), Qt.SolidLine),
-            ("Ideal", QColor(_COLOR_IDEAL), Qt.DashLine),
-            ("Projected", QColor(_COLOR_PROJECT), Qt.DashLine),
-        ]
-        x = legend.left()
-        y_text = legend.top() + (legend.height() - fm.height()) / 2 + fm.ascent()
-        y_line = legend.top() + legend.height() / 2
-        for label, colour, style in entries:
-            pen = QPen(colour)
-            pen.setWidth(2)
-            pen.setStyle(style)
-            painter.setPen(pen)
-            painter.drawLine(int(x), int(y_line), int(x + 18), int(y_line))
-            x += 24
-            painter.setPen(QPen(QColor(_ch.chart_ink())))
-            painter.drawText(int(x), int(y_text), label)
-            x += fm.horizontalAdvance(label) + 18
-
-    def _paint_axis_baseline(self, painter, chart) -> None:
-        pen = QPen(QColor(QColor(_ch.chart_axis_ink())))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.drawLine(int(chart.left()), int(chart.bottom()),
-                         int(chart.right()), int(chart.bottom()))
+        verdict = (
+            _ink_bad() if data.runs_out_day is not None else _ink_good()
+        )
+        entries = []
+        # 'Remaining' steps aside when the plan has run out: the runs-out
+        # marker lands in the same neighbourhood (the line's end, at the zero
+        # crossing) and is the more important of the two. The solid line is
+        # still identified by elimination — the other two are labelled.
+        if data.actual_x and data.runs_out_day is None:
+            entries.append((
+                "Remaining", data.actual_x[-1], data.actual[-1],
+                _ink_remaining(),
+            ))
+        if data.proj_x:
+            entries.append((
+                "Projected", data.proj_x[-1], data.proj[-1], verdict,
+            ))
+        if data.ideal_x:
+            entries.append((
+                "Plan", data.ideal_x[-1], data.ideal[-1], _ink_plan(),
+            ))
+        placed: list[tuple[float, float]] = []
+        for label, day, value, colour in entries:
+            x = self._x_to_px(day, chart, x_min, x_span)
+            y = self._y_to_px(self._rem(data, value), chart, lo, hi)
+            tw = fm.horizontalAdvance(label)
+            tx = min(chart.right() - tw - 2, x - tw - 6)
+            tx = max(chart.left() + 2, tx)
+            ty = y - 6
+            # Nudge apart rather than overprint: the projection and the plan
+            # both converge on zero at month end, so their labels want the same
+            # pixel. Only against labels in the same horizontal neighbourhood —
+            # 'Remaining' ends mid-month and never competes with them.
+            while any(
+                abs(ty - py) < fm.height() and abs(tx - px) < tw + 8
+                for px, py in placed
+            ):
+                ty -= fm.height()
+            placed.append((tx, ty))
+            # A surface-coloured plate behind the text: these labels sit at the
+            # end of their own line, which means *on* it, and a dashed series
+            # running through a word makes both unreadable.
+            plate = QRectF(tx - 3, ty - fm.ascent() - 1, tw + 6, fm.height())
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(_alpha(QColor(_ch.chart_surface()), 215)))
+            painter.drawRect(plate)
+            painter.setPen(QPen(colour))
+            painter.drawText(int(tx), int(ty), label)

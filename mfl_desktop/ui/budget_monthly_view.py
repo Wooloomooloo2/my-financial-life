@@ -168,6 +168,28 @@ def _size_remainder(label: QLabel) -> None:
     label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
 
+def _pacing_target(cell) -> Decimal:
+    """What the burn-down paces against: **this month's allocation** (ADR-172).
+
+    Not ``available``. Available is allocation *plus accumulated rollover*, and
+    pacing against it is why the chart never worked: on a real budget six
+    months of unspent surplus had inflated it to **5.4× the month's plan**, so
+    the pacing line insisted you should have spent £10,909 by the 17th of a
+    month you had assigned £3,673 to — and the budget line, setting the y-axis,
+    squashed the actual spending into the bottom 7% of the chart.
+
+    A rollover surplus is a **buffer, not a target**: you don't aim to spend
+    it, so it has no business in the pacing. It is still money you can reach —
+    the row above says so (``£1,460.00 of £19,892.89``, ADR-171) and the
+    verdict caption names it — but the chart's question is "am I pacing this
+    month's plan", and the plan is the allocation.
+
+    Symmetrically, a carried-in *deficit* does not lower the target either. The
+    plan is the plan; the debt is reported on the row, where ADR-171 put it.
+    """
+    return cell.allocation if cell is not None else _ZERO
+
+
 def _budget_tooltip(cell, ccy: str) -> str:
     """The click-to-edit hint, plus the carry reconciliation when there is one.
 
@@ -316,7 +338,8 @@ class BudgetMonthlyView(QWidget):
         sel.addStretch(1)
         root.addLayout(sel)
 
-        # Burn-down block.
+        # Burn-down block. The chart now genuinely burns *down* (ADR-172), so
+        # the label finally describes the picture instead of contradicting it.
         from mfl_desktop.ui.burn_down_chart import BurnDownChart
         scope_row = QHBoxLayout()
         scope_row.addWidget(QLabel("Burn-down:"))
@@ -324,6 +347,14 @@ class BudgetMonthlyView(QWidget):
         self._scope.setMinimumWidth(200)
         self._scope.currentIndexChanged.connect(self._on_scope_changed)
         scope_row.addWidget(self._scope)
+        scope_row.addSpacing(16)
+        # The verdict — the chart's headline, in words (ADR-164's principle:
+        # lead with what it says, not with a shape to interpret). It lives in
+        # this row rather than inside the paint so it costs no chart height and
+        # rides the token layer like any other label.
+        self._verdict = QLabel("")
+        self._verdict.setTextFormat(Qt.RichText)
+        scope_row.addWidget(self._verdict)
         scope_row.addStretch(1)
         root.addLayout(scope_row)
         self._chart = BurnDownChart()
@@ -635,18 +666,20 @@ class BudgetMonthlyView(QWidget):
             exp = next(
                 (s for s in self._matrix.sections if s.kind == "expense"), None
             )
-            total = exp.subtotal[mi].available if exp else _ZERO
+            cell = exp.subtotal[mi] if exp else None
             data = bc.compute_burndown(
-                perimeter_txns=ptxns, month=month, total_planned=total,
+                perimeter_txns=ptxns, month=month,
+                total_planned=_pacing_target(cell),
                 parent_map=parent_map, budgeted_ids=budgeted_ids,
                 kind_map=kind_map, scope_label="Whole budget",
                 bill_occurrences=occ,
             )
         else:
             row = self._expense_row(self._scope_cat)
-            total = row.cells[mi].available if row else _ZERO
+            cell = row.cells[mi] if row else None
             data = bc.compute_burndown(
-                perimeter_txns=ptxns, month=month, total_planned=total,
+                perimeter_txns=ptxns, month=month,
+                total_planned=_pacing_target(cell),
                 target_category_id=self._scope_cat,
                 parent_map=parent_map,
                 budgeted_ids=budgeted_ids, kind_map=kind_map,
@@ -654,6 +687,63 @@ class BudgetMonthlyView(QWidget):
                 bill_occurrences=occ,
             )
         self._chart.set_data(data)
+        self._paint_verdict(data, cell)
+
+    def _paint_verdict(self, data, cell) -> None:
+        """The chart's headline — the answer, stated (ADR-172).
+
+        ``projected_remaining`` and ``runs_out_day`` were the two things the
+        reader was being asked to derive by eye from where a dashed line
+        stopped. A chart that has computed the answer should say it.
+        """
+        ccy = self._matrix.display_ccy or ""
+        if data is None or data.total_planned <= 0:
+            self._verdict.clear()
+            return
+        left = data.projected_remaining
+        if data.runs_out_day is not None:
+            day = data.runs_out_day
+            when = (
+                "already" if day <= data.today_day
+                else f"on {day} {_MONTH_ABBR[int(self._month[5:7])][:3]}"
+            )
+            text = (
+                f"Over budget {when} &nbsp;·&nbsp; "
+                f"{_money(ccy, abs(left))} over by month end"
+                if left < 0 else
+                f"Runs out {when} &nbsp;·&nbsp; the plan is fully spent"
+            )
+            colour = _bad_ink()
+        else:
+            text = (
+                f"On track &nbsp;·&nbsp; {_money(ccy, left)} left on "
+                f"{data.period_days} "
+                f"{_MONTH_ABBR[int(self._month[5:7])][:3]}"
+            )
+            colour = _good_ink()
+        # The buffer, if there is one. It is deliberately *not* the pacing
+        # target (ADR-172) — you don't aim to spend a rollover surplus — but
+        # it is the difference between "over budget" and "over budget with
+        # nothing behind it", so it is worth a word.
+        #
+        # Measured as available − allocation, not from ``carry_in``: a section
+        # subtotal sums its rows' *available* but hard-codes its own carry_in
+        # to zero (compute_matrix step 4), so reading carry_in finds nothing on
+        # the whole-budget scope — where the buffer is largest and most worth
+        # saying. The subtraction is the definition anyway: the buffer is the
+        # gap between what you can spend and what you planned to.
+        note = ""
+        buffer = (
+            cell.available - cell.allocation if cell is not None else _ZERO
+        )
+        if buffer > 0:
+            note = (
+                f" &nbsp;<span style='color:{_muted_ink()}'>"
+                f"(+{_money(ccy, buffer)} rolled over if needed)</span>"
+            )
+        self._verdict.setText(
+            f"<b style='color:{colour}'>{text}</b>{note}"
+        )
 
     def _expense_row(self, category_id: int) -> Optional[bc.MatrixRow]:
         for s in self._matrix.sections:
