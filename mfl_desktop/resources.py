@@ -61,10 +61,17 @@ def app_pixmap(size: int = 64):
 
 def brand_mark(size: int = 28):
     """A transparent-background MFL hexagon mark at ``size`` px, for the brand
-    chrome *inside* the UI (sidebar header, About). Distinct from ``app_pixmap``
-    — which derives from the dock/taskbar icon set whose PNGs carry a flat light
-    background that would show as a box on dark surfaces. Falls back to
-    ``app_pixmap`` if the dedicated transparent asset is missing."""
+    chrome *inside* the UI (sidebar header, About).
+
+    Since ADR-174 the dock/taskbar set is transparent too, so this is no longer
+    the *only* box-free source — the reason ADR-117 gave for it ("app_pixmap
+    derives from the icon set whose PNGs carry a flat light background that
+    would show as a box on dark surfaces") is now obsolete, and the two assets
+    are the same art. It is kept as a seam, not a workaround: the packaged icon
+    answers to Apple's and Microsoft's icon conventions and may one day grow a
+    platform-shaped backing, while this mark answers only to our own chrome.
+    Collapsing them would let a future dock-icon decision silently redraw the
+    sidebar. Falls back to ``app_pixmap`` if the dedicated asset is missing."""
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QPixmap
     p = asset_path("icons", "mfl_mark.png")
