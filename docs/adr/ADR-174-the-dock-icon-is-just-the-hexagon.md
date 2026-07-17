@@ -1,6 +1,6 @@
 # ADR-174 — The dock icon is just the hexagon
 
-**Date:** 2026-07-17
+**Date:** 2026-07-17 (amended 2026-07-17 — see *Amendment*)
 **Status:** Implemented
 **Related:** ADR-117 (the knockout tool, and the scoping decision this reverses). ADR-101 (the app icon from the MFL hexagon badge). ADR-167 (the ratchet — the model for a guard that stops a fixed asset regressing).
 
@@ -31,7 +31,9 @@ Two separate artefacts feed the dock, and both were boxed:
 
 Four things worth recording, three of which came from measuring rather than reasoning:
 
-**1. Knock out each size independently; do not downscale a transparent master.** This reads backwards — a clean 1024 master ought to produce cleaner children — and it is wrong, because **Pillow's `resize` does not premultiply alpha**. The background colour still sitting in the RGB of alpha-0 pixels bleeds back into the edges on downscale. Measured: downscaling left light fringe pixels at 32px where a direct knockout left **none**. The existing sizes are plain LANCZOS downscales with no hand-tuning to preserve (checked), so nothing is lost by re-knocking each.
+**1. Knock out each size independently; do not downscale a transparent master.** ~~This reads backwards — a clean 1024 master ought to produce cleaner children — and it is wrong, because **Pillow's `resize` does not premultiply alpha**. The background colour still sitting in the RGB of alpha-0 pixels bleeds back into the edges on downscale. Measured: downscaling left light fringe pixels at 32px where a direct knockout left **none**.~~ The existing sizes are plain LANCZOS downscales with no hand-tuning to preserve (checked), so nothing is lost by re-deriving each.
+
+> **Superseded the same day — see the Amendment.** The measurement was real but it was the wrong comparison: a *premultiplied* downscale neither bleeds nor loses the anti-aliasing that a per-size knockout throws away. The rule below is now inverted — the 1024 is the master and every smaller size is derived from it.
 
 **2. The geometry already matches Apple's guidance, so nothing is re-inset.** The artwork occupies **78.3%** of the canvas (`bbox=(111, 52, 913, 975)` of 1024, ~111px margins) against the HIG's ~80%. A full-bleed hexagon would have loomed over its dock neighbours; this one doesn't, so removing the wash is the whole change.
 
@@ -63,3 +65,48 @@ The tool is **idempotent** — verified byte-identical on a second run. `knockou
 All five applicable guards were confirmed to **fail against the pre-fix art** (restored from git into a scratch tree with `resources._root` repointed at it) — `mfl_icon_16.png corner (0,0) is opaque #e8edee — the white box is back`.
 
 Full suite 410 passed, 0 failed. No schema change.
+
+---
+
+## Amendment — 2026-07-17: `mfl.ico` too, and a correction
+
+The owner took the loose end above: *"Yes do the .ico too"*. Doing it forced a size the PNG set doesn't have, and that in turn exposed a mistake in the original decision.
+
+### `mfl.ico` is rebuilt
+
+`packaging/mfl.spec` (the `.exe`) and `installer.iss` (the installer) both point at it, and it carried the same wash — all six frames alpha 255. It is now rebuilt from the same master, keeping its existing shape: **16/32/48/64/128/256, 32-bit PNG frames**, exactly what the file already contained.
+
+**48 is the interesting size.** Windows uses it (Large Icons, alt-tab) and the PNG set has none — it exists *only* because the `.ico` asks for it. Forced to derive a size, the "knock out each size independently" rule below had nothing to knock out, which is what prompted looking at it again.
+
+Every frame is **pre-built and handed to Pillow via `append_images`**. Its ICO writer uses a provided image verbatim when one matches a requested size and only falls back to its own `thumbnail()` — a naive, fringing resize — when none does. Supplying all six means its resampler never runs. (Its own trap: it skips any size larger than the image `save` is called on, so the largest frame must go first.)
+
+### Correction: decision 1 above was wrong
+
+> **1. Knock out each size independently; do not downscale a transparent master.**
+
+**That measurement was sound and the conclusion doesn't follow, because it was the wrong comparison.** A *naive* `resize` does bleed — `knockout` zeroes alpha but leaves the wash in the RGB, so a plain resize averages invisible wash-coloured pixels back into their neighbours. The fix for that is not to avoid downscaling; it is to **premultiply** first, so a fully transparent pixel contributes nothing. I never tested the premultiplied version, and "downscaling bleeds" went into an ADR as if it were a property of downscaling.
+
+It cost something real. `knockout` produces **binary** alpha — 0 or 255, nothing between — so knocking out each size independently gives **no anti-aliasing on the outer edge**. Irrelevant at 1024; at 16px it is a chunky, stair-stepped cutout with light blocks around the rim, which is what ADR-174 shipped this morning. Measured, premultiplied, from the master:
+
+| | 16px | 32px | 48px |
+|---|---|---|---|
+| partial-alpha (anti-aliased) pixels | **108** | **256** | **385** |
+| wash-fringe pixels | **0** | **0** | **0** |
+
+Against **0 partial-alpha** for a per-size knockout. Premultiplied downscale wins on both axes at once — the smooth edge *and* no fringe.
+
+So the rule inverts: **the 1024 is knocked out as the master, and every smaller size is derived from it by an alpha-correct `downscale`.** The 1024 keeps its hard edge, where a one-pixel step is a sub-pixel irrelevance and no dock renders it anyway.
+
+`mfl_mark.png` is regenerated the same way, so the in-UI mark gets the same improvement — it has carried ADR-117's hard edge since ADR-117.
+
+### Consequences of the amendment
+
+- **The Windows inconsistency this ADR created is closed.** Taskbar (shared PNG set) and packaged `.exe`/installer (`mfl.ico`) now agree.
+- **Every icon in the app got better edges**, not just the new ones — the sidebar/About/splash mark included.
+- Still **idempotent**, re-verified byte-identical across all five artefacts (`knockout` reads RGB, which survives an alpha-zeroing pass; the downscales are deterministic).
+- The tool now needs Pillow for `.ico` as well as the PNGs; only `.icns` is macOS-gated.
+- The un-premultiply is a plain Python per-pixel loop (no numpy in this project). It runs over ~700k pixels across the size set and takes a few seconds — fine for a tool nobody runs in a loop.
+
+Two tests added (9/9 total): **the `.ico` frames are transparent** — including an explicit assert that the **48px frame still exists**, since it is the one size with no PNG behind it and therefore the one a future rebuild would silently drop — and **small icons are anti-aliased**, which is the guard that would have caught the hard edge this morning. Both confirmed failing against the pre-amendment state: the first against the boxed `.ico`, the second **against ADR-174's own output** (`mfl_icon_16.png has no partial alpha — the edge is a hard cutout, not anti-aliased`).
+
+Full suite 412 passed, 0 failed.

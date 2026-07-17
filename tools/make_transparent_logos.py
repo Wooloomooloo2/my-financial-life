@@ -20,16 +20,21 @@ needs macOS's ``iconutil`` and is skipped elsewhere with a warning):
 
     python3 tools/make_transparent_logos.py
 
+The 1024 is the master: it is knocked out directly, and every smaller size is
+derived from it by an alpha-correct ``downscale`` so the edges are properly
+anti-aliased (a raw knockout has binary alpha — fine at 1024, a chunky cutout
+at 16). See ``downscale`` for why not a plain ``resize``.
+
 Outputs (committed assets):
   - assets/icons/garelochsoft_logo.png   (overwritten, transparent)
   - assets/icons/mfl_icon_{16..1024}.png (overwritten, transparent — ADR-174)
-  - assets/icons/mfl.icns                (rebuilt from the above — ADR-174)
-  - assets/icons/mfl_mark.png            (transparent, from mfl_icon_512)
+  - assets/icons/mfl.icns                (rebuilt — ADR-174, needs macOS)
+  - assets/icons/mfl.ico                 (rebuilt — ADR-174 amendment)
+  - assets/icons/mfl_mark.png            (transparent, the 512 under a name)
 
 Idempotent: ``knockout`` flood-fills over the *RGB* channels, which survive an
-alpha-zeroed pass unchanged, so re-running finds the same region and is a no-op.
-
-``mfl.ico`` (Windows) is **not** rebuilt here — see ADR-174.
+alpha-zeroed pass unchanged, so re-running finds the same region; the downscales
+are deterministic. Verified byte-identical on a second run.
 """
 from __future__ import annotations
 
@@ -39,14 +44,21 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 ICONS = ROOT / "assets" / "icons"
 
 # The committed PNG size set, which `resources.app_icon()` loads into a
-# multi-resolution QIcon (the dock icon when running from source).
+# multi-resolution QIcon (the dock icon when running from source). 1024 is the
+# master — knocked out directly; the rest are derived from it.
+_MASTER = 1024
 _ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
+
+# The Windows .ico frame set (ADR-174 amendment). Note **48** — Windows uses it
+# (Large Icons, alt-tab) and the PNG set has no 48, so it is derived for the
+# .ico only and never written to disk as a PNG.
+_ICO_SIZES = (16, 32, 48, 64, 128, 256)
 
 # macOS .iconset slot -> the source size that fills it. `iconutil` requires
 # these exact names; an @2x slot is simply the next size up.
@@ -86,6 +98,78 @@ def knockout(src: Path) -> Image.Image:
     return im
 
 
+def downscale(im: Image.Image, size: int) -> Image.Image:
+    """Alpha-correct downscale: premultiply → resize → un-premultiply.
+
+    **Why not just `im.resize(...)`.** `knockout` zeroes a pixel's *alpha* and
+    leaves its RGB alone, so every transparent pixel still carries the flat
+    wash in its colour channels. A plain resize averages those invisible
+    wash-coloured pixels into their visible neighbours and paints a light
+    fringe back around the edge — the very thing being removed. Premultiplying
+    first weights each pixel's colour by its coverage, so a fully transparent
+    pixel contributes nothing.
+
+    **And why downscale at all**, when ADR-174 originally knocked out each size
+    independently: `knockout` produces a **binary** alpha (0 or 255), so a
+    per-size knockout has *no anti-aliasing* on the outer edge. At 1024 that is
+    a sub-pixel irrelevance; at 16 it is a visibly chunky, stair-stepped cutout
+    with light blocks around the rim. Downscaling the master resolves the hard
+    edge into real coverage values — 108 partial-alpha pixels at 16px, against
+    zero for a direct knockout — and, done premultiplied, with no fringe.
+
+    ADR-174 measured a *naive* downscale, found the fringe, and concluded
+    "knock out each size independently". Right conclusion for the comparison it
+    ran; the wrong comparison. See the amendment.
+    """
+    r, g, b, a = im.split()
+    pm = Image.merge("RGBA", (
+        ImageChops.multiply(r, a),
+        ImageChops.multiply(g, a),
+        ImageChops.multiply(b, a),
+        a,
+    )).resize((size, size), Image.LANCZOS)
+
+    out = Image.new("RGBA", (size, size))
+    src, dst = pm.load(), out.load()
+    for y in range(size):
+        for x in range(size):
+            pr, pg, pb, pa = src[x, y]
+            if pa == 0:
+                # Colourless *and* invisible: leave nothing for a later naive
+                # resize (or a careless editor) to drag back into the edges.
+                dst[x, y] = (0, 0, 0, 0)
+            else:
+                dst[x, y] = (
+                    min(255, pr * 255 // pa),
+                    min(255, pg * 255 // pa),
+                    min(255, pb * 255 // pa),
+                    pa,
+                )
+    return out
+
+
+def build_ico(dest: Path, master: Image.Image) -> None:
+    """Rebuild the Windows ``.ico`` from the transparent master (ADR-174
+    amendment). Frames: 16/32/48/64/128/256, 32-bit PNG — matching what the
+    file already contained.
+
+    Every frame is **pre-built and handed over via ``append_images``**. Pillow's
+    ICO writer uses a provided image verbatim when one matches the requested
+    size, and only falls back to its own ``thumbnail()`` — a naive, fringing
+    resize — when none does. Supplying all six means its resampler never runs.
+    The largest frame must be the one ``save`` is called on: the writer skips
+    any size larger than *that* image.
+    """
+    frames = {size: downscale(master, size) for size in _ICO_SIZES}
+    biggest = max(_ICO_SIZES)
+    rest = [frames[s] for s in sorted(_ICO_SIZES) if s != biggest]
+    frames[biggest].save(
+        dest, format="ICO",
+        sizes=[(s, s) for s in sorted(_ICO_SIZES)],
+        append_images=rest,
+    )
+
+
 def build_icns(dest: Path) -> bool:
     """Rebuild the macOS ``.icns`` from the (already transparent) PNG set.
 
@@ -94,12 +178,8 @@ def build_icns(dest: Path) -> bool:
     icon is not the place to find out that a hand-rolled writer got a header
     field wrong.
 
-    Each size is knocked out **independently** rather than downscaled from a
-    transparent master. That reads backwards — a clean master ought to give
-    cleaner children — but Pillow's ``resize`` does not premultiply alpha, so
-    downscaling bleeds the background colour still sitting in the RGB of
-    transparent pixels back into the edges. Measured: downscaling left light
-    fringe pixels at 32px where a direct knockout left none.
+    Reads the committed PNG set, so it inherits whatever ``main`` wrote —
+    ``downscale``'s anti-aliased edges included.
 
     Returns False (with a warning) off macOS, where ``iconutil`` doesn't exist.
     """
@@ -137,17 +217,27 @@ def build_icns(dest: Path) -> bool:
 def main() -> int:
     knockout(ICONS / "garelochsoft_logo.png").save(ICONS / "garelochsoft_logo.png")
 
-    # The dock/taskbar set (ADR-174). In place, and idempotent.
+    # The dock/taskbar set (ADR-174). Knock out the 1024 master, then derive
+    # every smaller size from it so they all carry real anti-aliased edges.
+    # In place, and idempotent: re-knocking an already-transparent master is a
+    # no-op (the flood-fill reads RGB, which an alpha-zeroing pass leaves
+    # alone) and the downscales are deterministic.
+    master = knockout(ICONS / f"mfl_icon_{_MASTER}.png")
+    master.save(ICONS / f"mfl_icon_{_MASTER}.png")
     for size in _ICON_SIZES:
-        p = ICONS / f"mfl_icon_{size}.png"
-        knockout(p).save(p)
-    print(f"Knocked out mfl_icon_*.png ({len(_ICON_SIZES)} sizes)")
+        if size == _MASTER:
+            continue
+        downscale(master, size).save(ICONS / f"mfl_icon_{size}.png")
+    print(f"Wrote transparent mfl_icon_*.png ({len(_ICON_SIZES)} sizes)")
 
-    # The in-UI mark rides off the (now transparent) 512.
-    knockout(ICONS / "mfl_icon_512.png").save(ICONS / "mfl_mark.png")
+    # The in-UI mark is the 512 under another name (ADR-117). Kept as a
+    # separate asset on purpose — see `resources.brand_mark`.
+    downscale(master, 512).save(ICONS / "mfl_mark.png")
 
     if build_icns(ICONS / "mfl.icns"):
         print("Rebuilt mfl.icns from the transparent set")
+    build_ico(ICONS / "mfl.ico", master)
+    print("Rebuilt mfl.ico from the transparent set")
     print("Wrote transparent garelochsoft_logo.png + mfl_mark.png")
     return 0
 

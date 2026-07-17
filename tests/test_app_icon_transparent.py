@@ -158,6 +158,60 @@ def test_the_in_ui_mark_and_the_app_pixmap_agree() -> None:
         assert pm.toImage().pixelColor(0, 0).alpha() == 0
 
 
+def test_the_ico_frames_are_transparent() -> None:
+    """The Windows .exe + installer icon (``packaging/mfl.spec``,
+    ``installer.iss``). ADR-174 shipped without this and left the Windows
+    packaged icon boxed while its taskbar icon — from the shared PNG set — was
+    already clean; the amendment closed it.
+
+    Qt's ico reader returns the largest frame, so the per-frame check goes
+    through Pillow when it is available (the tool's own dependency) and falls
+    back to the single-frame check when it isn't.
+    """
+    ico = asset_path("icons", "mfl.ico")
+    assert ico.exists()
+    img = QImage(str(ico))
+    assert not img.isNull(), "Qt could not read mfl.ico"
+    assert img.pixelColor(0, 0).alpha() == 0, "mfl.ico has an opaque corner"
+
+    try:
+        from PIL import Image as _PILImage
+    except ModuleNotFoundError:
+        return
+    im = _PILImage.open(ico)
+    sizes = sorted(im.info["sizes"])
+    # 48 is Windows-only (Large Icons, alt-tab) and has no PNG in the set —
+    # it exists solely because the .ico asks for it, so it is the one most
+    # likely to be quietly dropped by a future rebuild.
+    assert (48, 48) in sizes, f"the .ico lost its 48px frame: {sizes}"
+    for s in sizes:
+        im.size = s
+        frame = im.convert("RGBA")
+        assert frame.getpixel((0, 0))[3] == 0, (
+            f"mfl.ico {s[0]}px frame has an opaque corner"
+        )
+
+
+def test_small_icons_are_anti_aliased() -> None:
+    """`knockout` alone yields **binary** alpha — a hard, stair-stepped cutout
+    with light blocks around the rim, which is what ADR-174 first shipped. The
+    sizes are derived from the master by an alpha-correct downscale precisely
+    to get real coverage values at the edge, so partial alpha is the evidence
+    that the downscale ran and wasn't replaced by a per-size knockout."""
+    for size in (16, 32, 64):
+        img = QImage(str(asset_path("icons", f"mfl_icon_{size}.png")))
+        w, h = img.width(), img.height()
+        partial = sum(
+            1
+            for y in range(h) for x in range(w)
+            if 0 < img.pixelColor(x, y).alpha() < 255
+        )
+        assert partial > 0, (
+            f"mfl_icon_{size}.png has no partial alpha — the edge is a hard "
+            f"cutout, not anti-aliased"
+        )
+
+
 def test_the_icns_slots_are_transparent() -> None:
     """The dock icon of the *packaged* .app. Read via Qt's icns plugin, which
     gives the largest representation; `iconutil` is used to check every slot
