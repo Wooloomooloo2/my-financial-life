@@ -189,7 +189,14 @@ class SankeyReportWindow(QMainWindow):
         self._period_combo = QComboBox()
         for label, key in periods.options_for(periods.SANKEY_PRESETS):
             self._period_combo.addItem(label + ("…" if key == "custom" else ""), key)
-        self._period_combo.currentIndexChanged.connect(self._on_period_changed)
+        # `activated`, not `currentIndexChanged` (ADR-175): the "Custom…" item
+        # opens a dialog, and a saved report loads with the combo *already* on
+        # Custom — so re-picking it to edit the range is a no-change selection
+        # that `currentIndexChanged` never emits, leaving the range
+        # uneditable. `activated` fires on every user pick, the current item
+        # included, and (unlike `currentIndexChanged`) never on the
+        # programmatic `setCurrentIndex` in `_sync_controls_from_filters`.
+        self._period_combo.activated.connect(self._on_period_changed)
         row.addWidget(QLabel("Timeframe:"))
         row.addWidget(self._period_combo)
 
@@ -351,7 +358,17 @@ class SankeyReportWindow(QMainWindow):
     def _on_period_changed(self, *_a) -> None:
         key = self._period_combo.currentData()
         if key == "custom":
-            d_from, d_to = self._resolve_bounds()
+            # Always open the editor, even when the report is already on custom
+            # — re-editing a saved custom range is the whole point (ADR-175).
+            # Seed it from the *stored* custom range when there is one, so the
+            # dialog opens on the dates being edited rather than on the preset
+            # bounds `_resolve_bounds` would compute.
+            f = self._current_filters
+            if f.period_key == "custom" and f.custom_start and f.custom_end:
+                d_from = date.fromisoformat(f.custom_start)
+                d_to = date.fromisoformat(f.custom_end)
+            else:
+                d_from, d_to = self._resolve_bounds()
             dlg = CustomPeriodDialog(initial_from=d_from, initial_to=d_to, parent=self)
             if dlg.exec() != QDialog.Accepted:
                 # Revert the combo to the prior selection.
@@ -362,6 +379,11 @@ class SankeyReportWindow(QMainWindow):
                 period_key="custom",
                 custom_start=s.isoformat(), custom_end=e.isoformat(),
             )
+        elif key == self._current_filters.period_key:
+            # A no-change re-pick of the current preset. `activated` fires for
+            # it (`currentIndexChanged` did not), so guard here rather than mark
+            # a report dirty and re-render for a selection that changed nothing.
+            return
         else:
             self._current_filters = self._with(period_key=key)
         self._mark_dirty()
