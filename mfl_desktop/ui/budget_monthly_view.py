@@ -16,7 +16,12 @@ Layout (top-down):
   `BurnDownChart` showing Actual vs Ideal vs the forward Projection.
 - **Envelope list** — scrollable, grouped Income / Expenses / Transfers; each
   budgeted line is a `spent / available` bar (green → amber → red), with the
-  ↻ glyph on rolling lines and a muted Unbudgeted row per section.
+  ↻ glyph on rolling lines and a muted Unbudgeted row per section. Rows carry
+  the category tree (ADR-170): a group header rolls its subtree up and
+  collapses on click, children indent under it, and 'Everything else' holds
+  what no budgeted child claimed. The collapse set is owned by the enclosing
+  `BudgetWindow` and shared with the annual matrix, so a group collapsed on
+  one view is collapsed on both.
 """
 from __future__ import annotations
 
@@ -61,6 +66,10 @@ _MUTED = "#64748b"     # slate-500
 _GREEN_TXT = "#15803d"
 _RED_TXT = "#b91c1c"
 _ZERO = Decimal("0.00")
+
+# One tree level of indent in the envelope list (ADR-170) — matches the annual
+# matrix's step so the two views read as the same tree.
+_INDENT = "    "
 
 
 def _month_label(month: str) -> str:
@@ -149,11 +158,18 @@ class BudgetMonthlyView(QWidget):
     """Single-month progress view. Driven by ``set_data(budget, matrix)`` from
     the owning window; edits + drills route back via the two callbacks."""
 
-    def __init__(self, repo: Repository, *, edit_cb, drill_cb, parent=None):
+    def __init__(
+        self, repo: Repository, *, edit_cb, drill_cb, collapse_cb, parent=None,
+    ):
         super().__init__(parent)
         self._repo = repo
         self._edit_cb = edit_cb       # (line_id, month, Decimal) -> bool
         self._drill_cb = drill_cb     # (mode, target_cat, kind, month, label)
+        # ADR-170: ``collapse_cb(key)`` flips + persists a collapse key in the
+        # owning window, which then pushes the new set back via set_collapsed —
+        # so a group collapsed on the annual matrix is collapsed here too.
+        self._collapse_cb = collapse_cb
+        self._collapsed: set[str] = set()
         self._budget = None
         self._matrix: Optional[bc.BudgetMatrix] = None
         self._month: Optional[str] = None
@@ -213,7 +229,19 @@ class BudgetMonthlyView(QWidget):
 
     # ── data ──
 
-    def set_data(self, budget, matrix: bc.BudgetMatrix) -> None:
+    def set_collapsed(self, collapsed: set[str]) -> None:
+        """Adopt the window's collapse set and redraw (ADR-170) — the path for
+        a toggle made on the *annual* matrix, where the data hasn't changed."""
+        self._collapsed = set(collapsed)
+        if self._matrix is not None:
+            self._render_month()
+
+    def set_data(
+        self, budget, matrix: bc.BudgetMatrix,
+        collapsed: Optional[set[str]] = None,
+    ) -> None:
+        if collapsed is not None:
+            self._collapsed = set(collapsed)
         self._budget = budget
         self._matrix = matrix
         months = matrix.months
@@ -236,8 +264,16 @@ class BudgetMonthlyView(QWidget):
             if section.kind != "expense":
                 continue
             for row in section.rows:
+                # ADR-170: a group and its 'Everything else' share a
+                # category_id, so listing both would put the same envelope in
+                # the combo twice. Skip the residual and keep the header —
+                # scoping a burn-down to a whole group is the useful one.
+                if row.row_kind == "residual":
+                    continue
                 if not row.is_unbudgeted and row.category_id is not None:
-                    self._scope.addItem(row.label, row.category_id)
+                    self._scope.addItem(
+                        f"{_INDENT * row.depth}{row.label}", row.category_id,
+                    )
         idx = 0
         if prev is not None:
             found = self._scope.findData(prev)
@@ -291,20 +327,32 @@ class BudgetMonthlyView(QWidget):
             # repeat them as envelope bars here.
             if section.kind == "goals":
                 continue
-            self._list_lay.addWidget(self._section_header(section.title))
-            for row in section.rows:
+            skey = bc.section_key(section.kind)
+            self._list_lay.addWidget(self._section_header(section, skey))
+            if skey in self._collapsed:
+                continue
+            for row in bc.visible_rows(section.rows, self._collapsed):
                 self._list_lay.addWidget(self._envelope_row(row, mi))
-            if len(section.rows) >= 2:
+            # Count top-level rows: a lone group's header already rolls its
+            # children up, so a subtotal beneath it would restate it (ADR-170).
+            if sum(1 for r in section.rows if r.depth == 0) >= 2:
                 self._list_lay.addWidget(self._subtotal_row(section, mi))
         self._list_lay.addStretch(1)
 
-    def _section_header(self, title: str) -> QWidget:
-        lbl = QLabel(title.upper())
+    def _section_header(self, section, key: str) -> QWidget:
+        """A clickable section header — click anywhere to collapse (ADR-170).
+        Unlike the annual matrix's header row this carries no editable cells,
+        so the whole strip is a safe click target."""
+        collapsed = key in self._collapsed
+        lbl = _ClickLabel(
+            f"{'▸' if collapsed else '▾'}  {section.title.upper()}"
+        )
         f = QFont()
         f.setBold(True)
         set_pt(f, 9)
         lbl.setFont(f)
         tokens.themed(lbl, "color:{muted_strong}; background:{surface_alt}; padding:4px 6px;")
+        lbl.clicked.connect(lambda k=key: self._collapse_cb(k))
         return lbl
 
     def _envelope_row(self, row: bc.MatrixRow, mi: int) -> QWidget:
@@ -314,15 +362,29 @@ class BudgetMonthlyView(QWidget):
         lay.setContentsMargins(6, 1, 6, 1)
         lay.setSpacing(8)
 
-        # Name (+ ↻ for rolling lines).
+        # Name (+ ↻ for rolling lines). ADR-170: indent by tree depth, and a
+        # group header gets a chevron and clicks to collapse.
         label = row.label
-        if not row.is_unbudgeted and row.rollover == "accumulate":
+        if row.is_editable and row.rollover == "accumulate":
             label += "  ↻"
-        name = QLabel(label)
+        gkey = bc.row_group_key(row)
+        if gkey is not None:
+            chevron = "▸" if gkey in self._collapsed else "▾"
+            name = _ClickLabel(f"{_INDENT * row.depth}{chevron}  {label}")
+            name.setToolTip(
+                "The total for this group — its own ‘Everything else’ plus "
+                "every budgeted line beneath it. Click to collapse."
+            )
+            name.clicked.connect(lambda k=gkey: self._collapse_cb(k))
+            gf = QFont()
+            gf.setBold(True)
+            name.setFont(gf)
+        else:
+            name = QLabel(f"{_INDENT * row.depth}{label}")
         name.setMinimumWidth(190)
         name.setMaximumWidth(190)
         name.setWordWrap(False)
-        if row.is_unbudgeted:
+        if row.is_unbudgeted or row.row_kind == "residual":
             name.setStyleSheet(f"color:{_MUTED};")
         lay.addWidget(name)
 
@@ -357,14 +419,27 @@ class BudgetMonthlyView(QWidget):
         avail_txt = _fmt(available)
         if carry != 0:
             avail_txt += f" ({carry:+,.2f})"
-        amt = _ClickLabel(f"{_fmt(actual)} / {avail_txt}")
+        text = f"{_fmt(actual)} / {avail_txt}"
+        if row.is_editable:
+            amt = _ClickLabel(text)
+            amt.setToolTip("Click to edit this month's budget")
+            amt.clicked.connect(
+                lambda lid=row.line_id, lbl=row.label, cur=cell.allocation:
+                self._edit_line(lid, lbl, cur)
+            )
+        else:
+            # A group's roll-up is a sum with no line to write to — offering a
+            # click-to-edit here would promise an edit that cannot land.
+            amt = QLabel(text)
+            amt.setToolTip(
+                "A group total — edit the lines beneath it, or its "
+                "‘Everything else’ line."
+            )
+            gf = QFont()
+            gf.setBold(True)
+            amt.setFont(gf)
         amt.setMinimumWidth(160)
         amt.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        amt.setToolTip("Click to edit this month's budget")
-        amt.clicked.connect(
-            lambda lid=row.line_id, lbl=row.label, cur=cell.allocation:
-            self._edit_line(lid, lbl, cur)
-        )
         lay.addWidget(amt)
 
         diff = cell.diff
@@ -492,6 +567,13 @@ class BudgetMonthlyView(QWidget):
             self._drill_cb(
                 "unbudgeted", None, row.kind, self._month,
                 f"Unbudgeted {row.kind}",
+            )
+        elif row.is_group:
+            # Match the bar: a group's fill is its whole subtree, so the drill
+            # must cover the subtree too, not just the residual (ADR-170).
+            self._drill_cb(
+                "group", row.category_id, row.kind, self._month,
+                f"{row.label} — all",
             )
         else:
             self._drill_cb(

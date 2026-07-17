@@ -12,6 +12,13 @@ A non-modal main window opened from Budget ▸ Open…. Layout (top-down):
   and a subtotal. **Budget cells are editable** (principle 10): committing a
   value offers copy-forward (just this month / this + later / all months) per
   ADR-058 D1, then writes atomically and reloads.
+- **The tree (ADR-170):** a budgeted category with budgeted descendants renders
+  as a **group** — a roll-up header (own residual + every descendant, never
+  editable), its children indented beneath, and the parent's own line labelled
+  **'Everything else'** when it still holds money or spending. Sections and
+  groups collapse by clicking their label; the set is persisted per budget in
+  the file's `setting` table and shared with the monthly view. A collapsed
+  group still shows its full roll-up, so collapsing costs no information.
 
 **Per-line controls (R2):** a ↻ glyph in the label marks a line whose unspent
 budget rolls forward, and right-clicking a line opens a menu to toggle that
@@ -25,6 +32,7 @@ of budget truth.
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -80,6 +88,12 @@ _ROLE_LABELS = {
 }
 
 _ROLLOVER_GLYPH = "↻"   # marks a line whose unspent budget carries forward
+
+# One tree level of indent in the label column (ADR-170). Spaces, not a
+# delegate: the label column is plain text in a QTableView, and the whole point
+# is a *slight* step — enough to read the nesting, not enough to shove a
+# three-deep line off the column.
+_INDENT = "    "
 
 # Row kinds in the flattened model.
 _SECTION = "section"
@@ -158,13 +172,21 @@ def _muted_label(text: str) -> QLabel:
 
 
 class _Row:
-    __slots__ = ("kind", "section_idx", "matrix_row", "metric")
+    __slots__ = ("kind", "section_idx", "matrix_row", "metric", "collapse_key")
 
-    def __init__(self, kind, section_idx, matrix_row=None, metric=None):
+    def __init__(
+        self, kind, section_idx, matrix_row=None, metric=None,
+        collapse_key=None,
+    ):
         self.kind = kind
         self.section_idx = section_idx
         self.matrix_row = matrix_row   # bc.MatrixRow or bc.MatrixSection
         self.metric = metric           # 'budget' | 'actual' | 'diff'
+        # ADR-170: set on rows that toggle a collapse — a section header or a
+        # group's Budget row. None on everything else.
+        self.collapse_key = collapse_key
+
+
 
 
 class BudgetMatrixModel(QAbstractTableModel):
@@ -175,36 +197,32 @@ class BudgetMatrixModel(QAbstractTableModel):
     one routes through ``edit_cb(line_id, month, amount) -> bool``.
     """
 
-    def __init__(self, matrix: bc.BudgetMatrix, edit_cb) -> None:
+    def __init__(self, matrix: bc.BudgetMatrix, edit_cb, collapse_cb) -> None:
         super().__init__()
         self._m = matrix
         self._edit_cb = edit_cb
+        # ADR-170: ``collapse_cb(key) -> None`` asks the window to flip and
+        # persist a collapse key. The window owns the state (it has the budget
+        # id and the repo); the model only renders it.
+        self._collapse_cb = collapse_cb
         self._rows: list[_Row] = []
         self._today_col: Optional[int] = None
-        self._collapsed: set[int] = set()      # collapsed section indices
+        self._collapsed: set[str] = set()   # collapse keys, from the window
         self._net_budget: list[Decimal] = []
         self._net_actual: list[Decimal] = []
         self._rebuild_rows()
 
-    def set_matrix(self, matrix: bc.BudgetMatrix) -> None:
+    def set_matrix(
+        self, matrix: bc.BudgetMatrix, collapsed: set[str],
+    ) -> None:
         """Replace the model's data **in place** (one persistent model, reset
         around the swap). Reusing the model rather than ``setModel`` with a
         fresh one avoids orphaning an open inline editor — which Qt flags as
         'commitData called with an editor that does not belong to this view'
-        and which, mid-event-handler on macOS, can tear the window down.
-        Collapse state is preserved across the refresh."""
+        and which, mid-event-handler on macOS, can tear the window down."""
         self.beginResetModel()
         self._m = matrix
-        self._rebuild_rows()
-        self.endResetModel()
-
-    def toggle_section(self, section_idx: int) -> None:
-        """Expand/collapse a section (Income / Expenses / Transfers)."""
-        self.beginResetModel()
-        if section_idx in self._collapsed:
-            self._collapsed.discard(section_idx)
-        else:
-            self._collapsed.add(section_idx)
+        self._collapsed = set(collapsed)
         self._rebuild_rows()
         self.endResetModel()
 
@@ -228,23 +246,34 @@ class BudgetMatrixModel(QAbstractTableModel):
         self._net_budget, self._net_actual = nb, na
 
     def _rebuild_rows(self) -> None:
-        self._collapsed = {
-            si for si in self._collapsed if si < len(self._m.sections)
-        }
         self._compute_net()
         self._rows = []
         for si, section in enumerate(self._m.sections):
-            self._rows.append(_Row(_SECTION, si, section))
-            if si in self._collapsed:
+            skey = bc.section_key(section.kind)
+            self._rows.append(_Row(_SECTION, si, section, collapse_key=skey))
+            if skey in self._collapsed:
                 continue
-            for mr in section.rows:
+            for mr in bc.visible_rows(section.rows, self._collapsed):
+                gkey = bc.row_group_key(mr)
                 for metric in ("budget", "actual", "diff"):
-                    self._rows.append(_Row(_METRIC, si, mr, metric))
+                    self._rows.append(_Row(
+                        _METRIC, si, mr, metric,
+                        # Only the Budget row carries the chevron / click
+                        # target — the Actual and Diff rows beneath it are
+                        # continuations of the same line.
+                        collapse_key=gkey if metric == "budget" else None,
+                    ))
             # The subtotal is only meaningful when more than one row feeds it.
             # A section with a single row (e.g. only an Unbudgeted row, or one
             # budgeted line) would just duplicate that row and read as
             # double-counting — so skip it.
-            if len(section.rows) >= 2:
+            #
+            # ADR-170 counts *top-level* rows, not all rows: a section holding
+            # one group with four children has five rows, but the group header
+            # already rolls all of them up, so a subtotal beneath it would
+            # restate the identical figure — exactly the duplication this rule
+            # exists to prevent.
+            if sum(1 for r in section.rows if r.depth == 0) >= 2:
                 for metric in ("budget", "actual", "diff"):
                     self._rows.append(_Row(_SUBTOTAL, si, section, metric))
         # Bottom line: Net across all sections, per month + the Total column.
@@ -375,19 +404,44 @@ class BudgetMatrixModel(QAbstractTableModel):
                     return {"budget": f"{mr.title} — Budget",
                             "actual": "  Actual",
                             "diff": "  Diff"}[metric]
+                # ADR-170: indent by tree depth. The Actual / Diff rows are
+                # continuations of their Budget row, so they indent with it —
+                # otherwise a nested line's own metrics would read as belonging
+                # to whatever sits at the outer level.
+                pad = _INDENT * mr.depth
                 if metric == "budget":
+                    label = mr.label
                     # A ↻ marks a line whose unspent budget rolls forward, so
                     # the policy is readable at a glance (toggle via right-click).
-                    if not mr.is_unbudgeted and mr.rollover == "accumulate":
-                        return f"{mr.label}  {_ROLLOVER_GLYPH}"
-                    return mr.label
-                return "  Actual" if metric == "actual" else "  Diff"
-            if (
-                role == Qt.ToolTipRole
-                and metric == "budget"
-                and not is_summary
-                and not mr.is_unbudgeted
-            ):
+                    # Only on rows that *own* a policy: a group header is a
+                    # roll-up of lines that each carry their own, so a glyph
+                    # there would claim a policy the header doesn't have.
+                    if mr.is_editable and mr.rollover == "accumulate":
+                        label = f"{label}  {_ROLLOVER_GLYPH}"
+                    if mr.is_group:
+                        chevron = (
+                            "▸ " if row.collapse_key in self._collapsed
+                            else "▾ "
+                        )
+                        return f"{pad}{chevron}{label}"
+                    return f"{pad}{label}"
+                sub_pad = pad + "  "
+                return sub_pad + ("Actual" if metric == "actual" else "Diff")
+            if role == Qt.ToolTipRole and metric == "budget" and not is_summary:
+                if mr.is_group:
+                    return (
+                        "The total for this group — its own ‘Everything else’ "
+                        "plus every budgeted line beneath it.\nClick to "
+                        "collapse; the total stays visible either way."
+                    )
+                if mr.row_kind == "residual":
+                    return (
+                        "Spending under this group that no budgeted line "
+                        "below it claims.\nBudget it here, or add lines to "
+                        "itemise it further."
+                    )
+                if mr.is_unbudgeted:
+                    return None
                 if mr.rollover == "accumulate":
                     return (
                         "Unspent budget rolls over to the next month (↻).\n"
@@ -403,8 +457,16 @@ class BudgetMatrixModel(QAbstractTableModel):
                 return _subtotal_bg()
             if role == Qt.FontRole and (is_summary or metric == "budget"):
                 f = QFont()
-                f.setBold(metric == "budget" and not mr.is_unbudgeted
-                          if not is_summary else True)
+                if is_summary:
+                    f.setBold(True)
+                else:
+                    # Bold marks a line you can plan against, or a group's
+                    # roll-up. 'Everything else' is a remainder — it reads
+                    # quieter than the lines it is left over from.
+                    f.setBold(
+                        mr.is_group
+                        or (mr.is_editable and mr.row_kind != "residual")
+                    )
                 return f
             return None
 
@@ -488,7 +550,10 @@ class BudgetMatrixModel(QAbstractTableModel):
         return (
             row.kind == _METRIC
             and row.metric == "budget"
-            and not row.matrix_row.is_unbudgeted
+            # ADR-170: leaves and 'Everything else' hold a real stored
+            # allocation; a group header is a computed roll-up — typing into it
+            # would have no line to write to. Unbudgeted has no line either.
+            and row.matrix_row.is_editable
             and row.matrix_row.kind != "goals"   # goal amounts are computed
             and 1 <= col <= len(self._m.months)   # months only — not Total
         )
@@ -643,6 +708,9 @@ class BudgetWindow(QMainWindow):
         self._matrix: Optional[bc.BudgetMatrix] = None
         self._drill_wins: list = []
         self._rendering = False
+        # ADR-170: collapsed section / group keys for the current budget,
+        # loaded per-budget from the file's setting table.
+        self._collapsed: set[str] = set()
         # Cached numbers behind the rich-text Pool/Assigned/Unallocated line, so
         # a theme toggle can re-colour it without a full re-render (_paint_info).
         self._info_state: Optional[tuple] = None
@@ -744,6 +812,7 @@ class BudgetWindow(QMainWindow):
         # route back through this window so there's a single path for each.
         self._monthly = BudgetMonthlyView(
             self._repo, edit_cb=self._on_edit_allocation, drill_cb=self._drill,
+            collapse_cb=self._toggle_collapse,
         )
 
         # The annual matrix (page 0) and monthly view (page 1) share the
@@ -792,6 +861,8 @@ class BudgetWindow(QMainWindow):
     def _on_pick_budget(self) -> None:
         bid = self._picker.currentData()
         self._budget = self._repo.get_budget(bid) if bid is not None else None
+        # Collapse state is per-budget, so it reloads with the budget (ADR-170).
+        self._collapsed = self._load_collapsed()
         self._render()
 
     def _on_view_changed(self) -> None:
@@ -870,9 +941,19 @@ class BudgetWindow(QMainWindow):
         if isinstance(model, BudgetMatrixModel):
             # Update the existing model in place — no model swap under any open
             # editor (see BudgetMatrixModel.set_matrix).
-            model.set_matrix(matrix)
+            #
+            # A reset clears the current index, so every edit (and every
+            # WindowActivate refresh) dropped the reader's place in the grid —
+            # see _restore_current_cell (ADR-170).
+            cur = self._table.currentIndex()
+            cur_rc = (cur.row(), cur.column()) if cur.isValid() else None
+            model.set_matrix(matrix, self._collapsed)
+            self._restore_current_cell(cur_rc)
         else:
-            model = BudgetMatrixModel(matrix, self._on_edit_allocation)
+            model = BudgetMatrixModel(
+                matrix, self._on_edit_allocation, self._toggle_collapse,
+            )
+            model.set_matrix(matrix, self._collapsed)
             self._table.setModel(model)
         self._table.setColumnWidth(0, 240)
         for c in range(1, model.columnCount()):
@@ -882,7 +963,9 @@ class BudgetWindow(QMainWindow):
 
         # Feed the same matrix to the monthly view (R3) so both pages stay in
         # lock-step off one computation — the single source of budget truth.
-        self._monthly.set_data(budget, matrix)
+        # The collapse set rides along so the rebuild this triggers already has
+        # it (ADR-170) — the two views share one set.
+        self._monthly.set_data(budget, matrix, self._collapsed)
 
         # Pay-down / savings goals strip (R4b).
         self._render_goals(budget, today)
@@ -901,6 +984,42 @@ class BudgetWindow(QMainWindow):
             "Budget", f"{budget.name} · {_fmt_month(months[0])} – {_fmt_month(months[-1])}"
         )
         self.setWindowTitle(f"Budget — {budget.name}")
+
+    def _restore_current_cell(self, cur_rc) -> None:
+        """Put the cursor back on the cell the reader was working in (ADR-170).
+
+        ``beginResetModel`` **clears the current index**, and `_render` runs
+        after every edit and every WindowActivate. So committing a budget
+        amount dropped the selection: the cell you just typed into stopped
+        being current, the highlight vanished, and arrowing or tabbing on to
+        the next month restarted from nowhere. Re-find your place by eye, every
+        single edit.
+
+        Restoring the index also brings the cell back into view (Qt scrolls to
+        the current index), which is what makes this read as 'the screen kept
+        my place'. The scrollbar itself needs no help — a QTableView holds its
+        value across a reset; it is only the cursor that is lost.
+
+        Re-applied on the next event-loop turn as well: the view re-lays-out
+        its geometry in a queued pass after the reset, and doing it once more
+        afterwards outlives that — the same singleShot(0) idiom the activate
+        refresh already uses.
+        """
+        if cur_rc is None:
+            return
+
+        def apply() -> None:
+            model = self._table.model()
+            if model is None:
+                return
+            row, col = cur_rc
+            # A refresh can shorten the table (a line removed, a group
+            # collapsed, a residual zeroed away) — don't restore off the end.
+            if row < model.rowCount() and col < model.columnCount():
+                self._table.setCurrentIndex(model.index(row, col))
+
+        apply()
+        QTimer.singleShot(0, apply)
 
     def _paint_info(self) -> None:
         """Render the Pool / Assigned / Unallocated line from the cached numbers.
@@ -1152,16 +1271,86 @@ class BudgetWindow(QMainWindow):
     # ── drill-down (double-click an Actual) ──
 
     def _on_cell_clicked(self, index) -> None:
-        """Single-click a section header → expand/collapse that section."""
+        """Single-click a section header or a group's Budget row → collapse it.
+
+        ADR-170: only the label column toggles. On a section header the whole
+        row is inert, but a group's Budget row has *editable month cells* — a
+        click there is the start of an edit, and collapsing the row out from
+        under it would be hostile.
+        """
         model = self._table.model()
         if not isinstance(model, BudgetMatrixModel) or not index.isValid():
             return
         row = model._rows[index.row()]
-        if (
-            row.kind == _SECTION
-            and 0 <= row.section_idx < len(model._m.sections)
-        ):
-            model.toggle_section(row.section_idx)
+        if row.collapse_key is None:
+            return
+        if row.kind == _METRIC and index.column() != 0:
+            return
+        self._toggle_collapse(row.collapse_key)
+
+    # ── collapse state (ADR-170) ──
+
+    def _collapse_setting_key(self) -> str:
+        return "budget/collapsed"
+
+    def _load_collapsed(self) -> set[str]:
+        """The remembered collapse keys for the current budget.
+
+        Per-file (the ``setting`` table, ADR-092) rather than app-level
+        QSettings, for the same reason ADR-168 gave: the keys embed *this
+        file's* ids, so sharing them across files would collapse unrelated
+        groups. Keyed by budget id within the map — two budgets over the same
+        categories are two different views and collapse independently.
+
+        Unlike ADR-168's sidebar, a bare **set of collapsed keys** is right
+        here: every group and section defaults to expanded, so there is no
+        per-kind default for an explicit bool to protect.
+        """
+        if self._budget is None:
+            return set()
+        try:
+            raw = self._repo.get_setting(self._collapse_setting_key())
+            if not raw:
+                return set()
+            return set(json.loads(raw).get(str(self._budget.id), []))
+        except Exception:  # noqa: BLE001
+            # Corrupt or hand-edited setting must never break the screen —
+            # everything simply shows expanded.
+            return set()
+
+    def _save_collapsed(self) -> None:
+        """Best-effort persist — a failed write must never break the toggle."""
+        if self._budget is None:
+            return
+        try:
+            raw = self._repo.get_setting(self._collapse_setting_key())
+            data = json.loads(raw) if raw else {}
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:  # noqa: BLE001
+            data = {}
+        if self._collapsed:
+            data[str(self._budget.id)] = sorted(self._collapsed)
+        else:
+            data.pop(str(self._budget.id), None)
+        try:
+            self._repo.set_setting(
+                self._collapse_setting_key(), json.dumps(data),
+            )
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
+    def _toggle_collapse(self, key: str) -> None:
+        if key in self._collapsed:
+            self._collapsed.discard(key)
+        else:
+            self._collapsed.add(key)
+        self._save_collapsed()
+        model = self._table.model()
+        if isinstance(model, BudgetMatrixModel):
+            model.set_matrix(self._matrix, self._collapsed)
+        self._monthly.set_collapsed(self._collapsed)
 
     def _on_cell_double_clicked(self, index) -> None:
         """Double-click an Actual cell → the transactions behind it (ADR-058).
@@ -1190,6 +1379,12 @@ class BudgetWindow(QMainWindow):
             if mr.is_unbudgeted:
                 self._drill("unbudgeted", None, mr.kind, month,
                             f"Unbudgeted {mr.kind}")
+            elif mr.is_group:
+                # A group's Actual is its whole subtree, so its drill must be
+                # too — 'line' would show only the residual and contradict the
+                # number just double-clicked (ADR-170).
+                self._drill("group", mr.category_id, mr.kind, month,
+                            f"{mr.label} — all")
             else:
                 self._drill("line", mr.category_id, mr.kind, month, mr.label)
 
@@ -1216,6 +1411,13 @@ class BudgetWindow(QMainWindow):
             )
             if mode == "line":
                 keep = bucket == target_cat
+            elif mode == "group":
+                # The group's roll-up: every txn whose bucket is the group's
+                # category or a budgeted category beneath it — the exact set
+                # `_rollup_cells` summed (ADR-170).
+                keep = bucket is not None and bc.is_ancestor_or_self(
+                    target_cat, bucket, parent_map,
+                )
             elif mode == "unbudgeted":
                 keep = bucket is None and kind_map.get(t.category_id) == section_kind
             else:  # section — everything in this kind, this month
@@ -1261,6 +1463,25 @@ class BudgetWindow(QMainWindow):
         mr = row.matrix_row  # bc.MatrixRow
         line_id = mr.line_id
         menu = QMenu(self)
+
+        if mr.is_group:
+            # A group header is a roll-up over several lines, each with its own
+            # rollover and role — there is no single policy to toggle here, and
+            # silently applying one to the parent's own line would be a lie.
+            # Removing the parent line is still meaningful (its children stay,
+            # promoted to the top of the section), so that alone is offered.
+            drop = QAction("Remove this group’s own line from budget", menu)
+            drop.setToolTip(
+                "Removes the group’s ‘Everything else’ line. Its budgeted "
+                "children stay in the budget."
+            )
+            drop.triggered.connect(
+                lambda _c=False, lid=line_id, lbl=mr.label:
+                self._remove_line(lid, lbl)
+            )
+            menu.addAction(drop)
+            menu.exec(self._table.viewport().mapToGlobal(pos))
+            return
 
         roll = QAction("Rolls over unspent", menu)
         roll.setCheckable(True)

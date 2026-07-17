@@ -30,7 +30,7 @@ matrix (positive = under budget / surplus, negative = over).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
@@ -65,10 +65,39 @@ class MonthCell:
     diff: Decimal        # available - actual
 
 
+# Row kinds within a section (ADR-170). A budgeted category whose subtree
+# contains other budgeted categories renders as a *group*: a roll-up header,
+# its budgeted children indented beneath, and — when it still holds money or
+# spending of its own — a `residual` row carrying the parent's own line.
+_LEAF = "leaf"              # a budgeted line with no budgeted descendants
+_GROUP = "group"            # roll-up header: own residual + all descendants
+_RESIDUAL = "residual"      # 'Everything else' — the group's own line
+_UNBUDGETED = "unbudgeted"  # a section's synthetic off-plan row
+
+
 @dataclass(frozen=True)
 class MatrixRow:
     """One row of the matrix — a budgeted envelope, or a section's synthetic
     'Unbudgeted' row (``is_unbudgeted=True``, ``line_id``/``category_id`` None).
+
+    ADR-170: rows carry their place in the category tree. ``depth`` is the
+    indent level (0 = top of its section) and ``row_kind`` says what the row
+    *is*:
+
+    - ``leaf`` — a budgeted line with no budgeted descendants. Its cells are
+      its own; it is editable. This is what every row was before ADR-170.
+    - ``group`` — the roll-up header for a budgeted category that has budgeted
+      descendants. Its cells are **the sum of its own residual and every
+      budgeted descendant**, so a collapsed group still tells the whole truth.
+      Not editable: it is a sum, not a stored allocation.
+    - ``residual`` — 'Everything else': a group's *own* line, carrying the
+      spending that no budgeted child claimed. Same ``line_id`` as its group
+      header, and editable — this is where the parent's allocation actually
+      lives. Emitted only when it holds a non-zero allocation or actual.
+    - ``unbudgeted`` — the section's synthetic off-plan row.
+
+    A ``group`` and its ``residual`` share a ``line_id`` and ``category_id`` by
+    design: they are two views of one budget line — the whole and the remainder.
     """
     line_id: Optional[int]
     category_id: Optional[int]
@@ -82,6 +111,24 @@ class MatrixRow:
     actual_total: Decimal
     # ADR-094: the linked schedule when this line is a bill (else None).
     scheduled_txn_id: Optional[int] = None
+    # ADR-170: position in the category tree.
+    depth: int = 0
+    row_kind: str = _LEAF
+    # The category's own parent name ('' if top-level), kept so a row nested
+    # under an *unbudgeted* parent can still disambiguate itself — see
+    # ``_labelled``.
+    parent_name: str = ""
+
+    @property
+    def is_group(self) -> bool:
+        """A roll-up header — collapsible, and never editable."""
+        return self.row_kind == _GROUP
+
+    @property
+    def is_editable(self) -> bool:
+        """Only a real stored allocation can be typed into: leaves and the
+        residual line. A group header is a sum; Unbudgeted has no line."""
+        return self.row_kind in (_LEAF, _RESIDUAL) and self.line_id is not None
 
 
 @dataclass(frozen=True)
@@ -131,6 +178,27 @@ def nearest_budgeted_ancestor(
     return None
 
 
+def is_ancestor_or_self(
+    ancestor_id: int,
+    category_id: Optional[int],
+    parent_map: dict[int, Optional[int]],
+) -> bool:
+    """True when ``category_id`` is ``ancestor_id`` or sits below it.
+
+    The drill-down's counterpart to :func:`nearest_budgeted_ancestor`: a group
+    row's roll-up covers every txn whose *bucket* is the group's category or a
+    budgeted category beneath it, and this is the containment test (ADR-170).
+    """
+    current: Optional[int] = category_id
+    seen: set[int] = set()
+    while current is not None and current not in seen:
+        if current == ancestor_id:
+            return True
+        seen.add(current)
+        current = parent_map.get(current)
+    return False
+
+
 def _round2(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
@@ -153,6 +221,195 @@ class GoalPlan:
     label: str
     planned: dict        # 'YYYY-MM' -> Decimal required payment that month
     actual: dict         # 'YYYY-MM' -> Decimal actually paid that month
+
+
+# ── Hierarchy (ADR-170) ────────────────────────────────────────────────────
+
+
+def _rollup_cells(rows: list[MatrixRow], n: int, kind: str) -> list[MonthCell]:
+    """Sum a group's own residual + every budgeted descendant, per month.
+
+    Summing is sound precisely *because* bucketing sends each txn to exactly
+    one budgeted ancestor: a parent line only ever holds what no budgeted child
+    claimed, so parent + descendants double-counts nothing. This is the same
+    reasoning that already made section subtotals correct.
+
+    ``carry_in`` is summed for display (the group's rollover is the aggregate
+    of its parts), but the group is never itself a rollover *line* — carry is
+    computed and carried on the underlying leaves/residual, not here.
+    """
+    out: list[MonthCell] = []
+    for mi in range(n):
+        alloc = sum((r.cells[mi].allocation for r in rows), _ZERO)
+        actual = sum((r.cells[mi].actual for r in rows), _ZERO)
+        carry = sum((r.cells[mi].carry_in for r in rows), _ZERO)
+        available = sum((r.cells[mi].available for r in rows), _ZERO)
+        out.append(MonthCell(
+            month=rows[0].cells[mi].month,
+            allocation=_round2(alloc), actual=_round2(actual),
+            carry_in=_round2(carry), available=_round2(available),
+            diff=_favourable_diff(kind, available, actual),
+        ))
+    return out
+
+
+def _labelled(row: MatrixRow, depth: int) -> str:
+    """A row's display label for its depth (ADR-170).
+
+    Indentation replaces the parenthetical: nested under Bills, a row reads
+    'Cable and Internet', because its position already says '(Bills)'. But a
+    line whose parent is *not* budgeted has no group to sit under and lands at
+    depth 0 — there the suffix is the only thing distinguishing 'Insurance
+    (Car)' from 'Insurance (Home)', so it stays.
+    """
+    if depth == 0 and row.parent_name:
+        return f"{row.label} ({row.parent_name})"
+    return row.label
+
+
+def _arrange_hierarchy(
+    rows: list[MatrixRow],
+    parent_map: dict[int, Optional[int]],
+    budgeted_ids: set[int],
+    n: int,
+) -> list[MatrixRow]:
+    """Turn a section's flat budgeted rows into an indented, rolled-up tree.
+
+    Each line's group parent is the nearest budgeted ancestor **of its
+    category's parent** (excluding itself). A line with budgeted descendants
+    becomes a ``group`` header whose cells roll its subtree up; the line's own
+    figures move to a ``residual`` row ('Everything else') emitted only when
+    they are non-zero — the anti-clutter rule. A line with no budgeted
+    descendants stays a plain editable ``leaf``, exactly as before ADR-170.
+
+    Returns a pre-order (depth-first) list ready to render top to bottom.
+    """
+    by_cat: dict[int, MatrixRow] = {
+        r.category_id: r for r in rows
+        if not r.is_unbudgeted and r.category_id is not None
+    }
+    children: dict[Optional[int], list[int]] = {}
+    for cat in by_cat:
+        parent = nearest_budgeted_ancestor(
+            parent_map.get(cat), parent_map, budgeted_ids,
+        ) if parent_map.get(cat) is not None else None
+        # A budgeted ancestor outside this section (kinds shouldn't mix, but a
+        # miscategorised tree could) is treated as top-level here.
+        if parent is not None and parent not in by_cat:
+            parent = None
+        children.setdefault(parent, []).append(cat)
+
+    def own_subtree(cat: int) -> list[MatrixRow]:
+        """The *own* (unarranged) rows of ``cat`` and everything beneath it —
+        one row per real budget line, each counted exactly once.
+
+        The roll-up must be built from these, never from the arranged rows: an
+        arranged subtree contains its own group headers *and* the descendants
+        those headers already rolled up, so summing it double-counts every
+        level below the first. Same trap as the section subtotal.
+        """
+        out = [by_cat[cat]]
+        for kid in children.get(cat, []):
+            out.extend(own_subtree(kid))
+        return out
+
+    def emit(cat: int, depth: int) -> list[MatrixRow]:
+        own = by_cat[cat]
+        kids = sorted(children.get(cat, []), key=lambda c: by_cat[c].label)
+        if not kids:
+            # No budgeted descendants — a plain leaf, untouched by ADR-170.
+            return [_with(
+                own, depth=depth, row_kind=_LEAF,
+                label=_labelled(own, depth),
+            )]
+
+        arranged: list[MatrixRow] = []
+        for kid in kids:
+            arranged.extend(emit(kid, depth + 1))
+        # 'Everything else' — the parent's own line, honestly labelled. Shown
+        # only when it holds money or spending; itemise a group to the penny
+        # and the row simply disappears.
+        residual = None
+        if own.alloc_total != 0 or own.actual_total != 0:
+            residual = _with(
+                own, depth=depth + 1, row_kind=_RESIDUAL,
+                label="Everything else",
+            )
+        # `own_subtree` includes `own` itself, so a hidden (all-zero) residual
+        # is still counted — the header never depends on the residual showing.
+        flat = own_subtree(cat)
+        header = _with(
+            own, depth=depth, row_kind=_GROUP,
+            label=_labelled(own, depth),
+            cells=_rollup_cells(flat, n, own.kind),
+            alloc_total=_round2(sum((r.alloc_total for r in flat), _ZERO)),
+            actual_total=_round2(sum((r.actual_total for r in flat), _ZERO)),
+        )
+        # Children first, remainder last: 'Everything else' reads as what is
+        # left over after the itemised lines, not as a peer among them.
+        return [header] + arranged + ([residual] if residual else [])
+
+    out: list[MatrixRow] = []
+    for cat in sorted(children.get(None, []), key=lambda c: by_cat[c].label):
+        out.extend(emit(cat, 0))
+    # The synthetic Unbudgeted row (if any) always trails its section.
+    out.extend(r for r in rows if r.is_unbudgeted)
+    return out
+
+
+def _with(row: MatrixRow, **changes) -> MatrixRow:
+    """``dataclasses.replace`` for a frozen MatrixRow."""
+    return replace(row, **changes)
+
+
+# ── Collapse keys + filtering (ADR-170) ────────────────────────────────────
+#
+# Both budget surfaces (the annual matrix and the monthly view) render the same
+# tree and share one collapse set, so the key vocabulary and the filter live
+# here — beside the hierarchy they describe, and reachable from both without
+# either view importing the other. Pure string/list work; still no Qt.
+
+
+def section_key(kind: str) -> str:
+    """The collapse key for a section. Keyed by *kind*, not by list index: an
+    index shifts when a whole kind empties out, which would silently move a
+    remembered collapse onto a different section."""
+    return f"section:{kind}"
+
+
+def group_key(category_id: int) -> str:
+    """The collapse key for a group header — its category id."""
+    return f"group:{category_id}"
+
+
+def row_group_key(row: MatrixRow) -> Optional[str]:
+    """``row``'s collapse key if it is a group header, else None."""
+    if row.is_group and row.category_id is not None:
+        return group_key(row.category_id)
+    return None
+
+
+def visible_rows(rows: list[MatrixRow], collapsed: set[str]) -> list[MatrixRow]:
+    """``rows`` with every collapsed group's subtree dropped.
+
+    A section's rows are pre-order with a ``depth`` each, so a collapsed
+    group's descendants are exactly the rows following it until depth returns
+    to the group's own level. Nested collapses need no special handling — an
+    outer collapse swallows the inner one, and the inner key is simply
+    remembered for when the outer reopens.
+    """
+    out: list[MatrixRow] = []
+    hide_below: Optional[int] = None
+    for row in rows:
+        if hide_below is not None:
+            if row.depth > hide_below:
+                continue
+            hide_below = None
+        out.append(row)
+        key = row_group_key(row)
+        if key is not None and key in collapsed:
+            hide_below = row.depth
+    return out
 
 
 # ── Main entry point ───────────────────────────────────────────────────────
@@ -231,16 +488,15 @@ def compute_matrix(
                 assigned_by_month[mi] += alloc
             # Carry the surplus/deficit forward only for accumulate lines.
             carry_in = raw_surplus if ln.rollover == "accumulate" else _ZERO
-        label = (
-            f"{ln.category_name} ({ln.category_parent_name})"
-            if ln.category_parent_name else ln.category_name
-        )
+        # The bare category name; `_arrange_hierarchy` re-adds the '(Parent)'
+        # suffix only where indentation can't convey it (ADR-170).
         rows_by_kind.setdefault(ln.category_kind, []).append(MatrixRow(
-            line_id=ln.id, category_id=ln.category_id, label=label,
+            line_id=ln.id, category_id=ln.category_id, label=ln.category_name,
             kind=ln.category_kind, role=ln.role, rollover=ln.rollover,
             is_unbudgeted=False, cells=cells,
             alloc_total=_round2(alloc_total), actual_total=_round2(actual_total),
             scheduled_txn_id=getattr(ln, "scheduled_txn_id", None),
+            parent_name=ln.category_parent_name,
         ))
 
     # ── 3. Unbudgeted rows — one per section, only if there's activity. ──
@@ -283,18 +539,22 @@ def compute_matrix(
         ))
 
     # ── 4. Sections with per-month subtotals. ──
+    # The subtotal sums the **flat** rows — one row per real budget line —
+    # *before* the hierarchy is arranged. Summing the arranged rows instead
+    # would count every group header twice: once as the header's roll-up and
+    # again as the descendants it rolled up (ADR-170).
     sections: list[MatrixSection] = []
     for kind in _SECTION_ORDER:
-        rows = rows_by_kind[kind]
-        if not rows:
+        flat = rows_by_kind[kind]
+        if not flat:
             continue
         subtotal: list[MonthCell] = []
         sec_alloc_total = _ZERO
         sec_actual_total = _ZERO
         for mi, m in enumerate(months):
-            alloc = sum((r.cells[mi].allocation for r in rows), _ZERO)
-            actual = sum((r.cells[mi].actual for r in rows), _ZERO)
-            available = sum((r.cells[mi].available for r in rows), _ZERO)
+            alloc = sum((r.cells[mi].allocation for r in flat), _ZERO)
+            actual = sum((r.cells[mi].actual for r in flat), _ZERO)
+            available = sum((r.cells[mi].available for r in flat), _ZERO)
             subtotal.append(MonthCell(
                 month=m, allocation=_round2(alloc), actual=_round2(actual),
                 carry_in=_ZERO, available=_round2(available),
@@ -303,7 +563,8 @@ def compute_matrix(
             sec_alloc_total += alloc
             sec_actual_total += actual
         sections.append(MatrixSection(
-            kind=kind, title=_SECTION_TITLE[kind], rows=rows,
+            kind=kind, title=_SECTION_TITLE[kind],
+            rows=_arrange_hierarchy(flat, parent_map, budgeted_ids, n),
             subtotal=subtotal,
             alloc_total=_round2(sec_alloc_total),
             actual_total=_round2(sec_actual_total),
@@ -559,7 +820,17 @@ def compute_burndown(
         if target_category_id is None:
             if kind_map.get(txn.category_id, "expense") != "expense":
                 continue
-        elif bucket != target_category_id:
+        elif not is_ancestor_or_self(target_category_id, bucket, parent_map):
+            # ADR-170: scope covers the target's whole budgeted subtree, so a
+            # group's burn-down matches the group's *available* — the roll-up
+            # it is plotted against. An exact `bucket == target` test would
+            # chart only the residual's spending against the whole group's
+            # budget, and the line would never reach the floor.
+            #
+            # This is exactly equivalent to the old test for a leaf: a leaf has
+            # no budgeted descendants by definition, so nothing can bucket
+            # below it. Only groups — which could not be scoped before — see a
+            # difference.
             continue
         day_idx = (date.fromisoformat(txn.posted_date) - start).days + 1
         if day_idx < 1 or day_idx > period_days:
