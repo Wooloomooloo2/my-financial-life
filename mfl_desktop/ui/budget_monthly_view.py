@@ -29,7 +29,9 @@ from decimal import Decimal
 from typing import Optional
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtGui import (
+    QBrush, QColor, QFont, QFontMetrics, QPainter, QPen,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -46,6 +48,7 @@ from PySide6.QtWidgets import (
 from mfl_desktop import budget_calc as bc
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui import tokens
+from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop.ui.ui_fonts import set_pt
 
 _MONTH_ABBR = [
@@ -62,9 +65,16 @@ def _under() -> QColor:       return QColor(tokens.c("positive"))         # comf
 def _over_income() -> QColor: return QColor(tokens.c("positive_strong"))  # income beat its target (good)
 def _track() -> QColor:       return QColor(tokens.c("border"))           # empty track
 def _muted_fill() -> QColor:  return QColor(tokens.c("border_strong"))    # muted/unbudgeted bar fill
-_MUTED = "#64748b"     # slate-500
-_GREEN_TXT = "#15803d"
-_RED_TXT = "#b91c1c"
+
+# Text inks. Resolved at render-time from the tokens, not frozen as module
+# constants: this view used to carry `_MUTED`/`_GREEN_TXT`/`_RED_TXT` as three
+# light-theme hexes — the last three on ADR-167's ratchet for this module — so
+# in dark mode its remainder text was a light-theme green on the dark canvas
+# (ADR-171). Each token's light value equals the hex it replaced.
+def _muted_ink() -> str:      return tokens.c("muted")
+def _good_ink() -> str:       return tokens.c("positive_strong")
+def _bad_ink() -> str:        return tokens.c("negative_strong")
+
 _ZERO = Decimal("0.00")
 
 # One tree level of indent in the envelope list (ADR-170) — matches the annual
@@ -78,6 +88,109 @@ def _month_label(month: str) -> str:
 
 def _fmt(value: Decimal) -> str:
     return f"{value:,.2f}"
+
+
+def _money(ccy: str, value: Decimal) -> str:
+    """'£822.64' / '-£2,387.36' — the glyph, not the ISO code (ADR-171).
+
+    This view was the last surface printing money as ``GBP 822.64``. It escaped
+    ADR-159 and ADR-165 because it has no private currency table to find: it
+    simply printed ``f"{ccy} {amount}"``, which is the same defect with nothing
+    to grep for. ``currency_symbol`` is the app's one definition of the glyph
+    and already falls back to a spaced code for a currency we have no symbol
+    for. The sign goes *outside* — "-£20", never "£-20".
+    """
+    sign = "-" if value < 0 else ""
+    return f"{sign}{currency_symbol(ccy)}{_fmt(abs(value))}"
+
+
+def _remainder(kind: str, diff: Decimal, ccy: str) -> tuple[str, str]:
+    """(text, ink) for a row's headline remainder — ``diff`` is ADR-058's
+    favourable-signed diff, so positive is always good (ADR-171).
+
+    The old view printed a bare signed number (``+7,553.13``) and left the
+    reader to decode what its sign meant *for this kind of row* — and got it
+    wrong for income, where under-earning showed as an alarming red deficit
+    when it is simply the month not being over yet. Saying the word removes
+    both problems: an expense has money **left** or is **over**; income is
+    **above plan** or has some **to go**.
+    """
+    money = _money(ccy, abs(diff))
+    if kind == "income":
+        if diff >= 0:
+            return f"{money} above plan", _good_ink()
+        # Not red: earning less than planned part-way through a month is the
+        # normal state of every month, not an error.
+        return f"{money} to go", _muted_ink()
+    if diff < 0:
+        return f"{money} over", _bad_ink()
+    return f"{money} left", _good_ink()
+
+
+# The three right-hand columns. Fixed widths so every row's numbers land on the
+# same axis and the eye can run straight down them — the old 190/160/78 split
+# predates both the tree indent (which eats into the name) and the currency
+# glyph (which widens every amount), and clipped both (ADR-171).
+_NAME_W = 248
+_AMOUNT_W = 190
+_REMAINDER_W = 126
+
+
+def _bold() -> QFont:
+    f = QFont()
+    f.setBold(True)
+    return f
+
+
+def _size_name(label: QLabel) -> None:
+    """Fix the name column and elide what won't fit, keeping the full text in
+    the tooltip. A QLabel *clips* by default — 'Digital Subscriptions' simply
+    vanished mid-word with nothing to say it had — and an indented tree makes
+    the long names longer still."""
+    label.setFixedWidth(_NAME_W)
+    label.setWordWrap(False)
+    full = label.text()
+    metrics = QFontMetrics(label.font())
+    elided = metrics.elidedText(full, Qt.ElideRight, _NAME_W - 4)
+    if elided != full:
+        label.setText(elided)
+        if not label.toolTip():
+            label.setToolTip(full.strip())
+
+
+def _size_amount(label: QLabel) -> None:
+    label.setFixedWidth(_AMOUNT_W)
+    label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+
+def _size_remainder(label: QLabel) -> None:
+    label.setFixedWidth(_REMAINDER_W)
+    label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+
+def _budget_tooltip(cell, ccy: str) -> str:
+    """The click-to-edit hint, plus the carry reconciliation when there is one.
+
+    The carry used to be printed inline as `(+6,571.13)`, which made the row's
+    headline four numbers deep and still didn't explain itself. Here it has
+    room to say what it means — the same move ADR-124 made when the annual
+    grid's inline carry annotation was overflowing its column.
+    """
+    base = "Click to edit this month's budget"
+    carry = cell.carry_in
+    if carry == 0:
+        return base
+    if carry > 0:
+        return (
+            f"Budgeted {_money(ccy, cell.allocation)} + "
+            f"{_money(ccy, carry)} rolled over = "
+            f"{_money(ccy, cell.available)} available this month.\n{base}"
+        )
+    return (
+        f"Budgeted {_money(ccy, cell.allocation)} − "
+        f"{_money(ccy, abs(carry))} overspend carried in = "
+        f"{_money(ccy, cell.available)} available this month.\n{base}"
+    )
 
 
 class _ClickLabel(QLabel):
@@ -306,15 +419,20 @@ class BudgetMonthlyView(QWidget):
         self._prev.setEnabled(i > 0)
         self._next.setEnabled(i < len(months) - 1)
 
+        # Money reads as '£5,000.00', not 'GBP 5,000.00' (ADR-171), and the
+        # colour is resolved now rather than frozen — this is rich text, so its
+        # ink lives in the HTML where `tokens.themed` cannot reach it (the same
+        # trap ADR-161 found in the annual window's identical line).
         ccy = self._matrix.display_ccy or ""
         pool = self._matrix.pool
         assigned = self._matrix.assigned_by_month[i]
         unalloc = pool - assigned
-        colour = _RED_TXT if unalloc < 0 else _GREEN_TXT
+        colour = _bad_ink() if unalloc < 0 else _good_ink()
         self._unalloc.setText(
-            f"Pool: <b>{ccy} {_fmt(pool)}</b> &nbsp;·&nbsp; "
-            f"Assigned: <b>{_fmt(assigned)}</b> &nbsp;·&nbsp; "
-            f"Unallocated: <b style='color:{colour}'>{_fmt(unalloc)}</b>"
+            f"Pool: <b>{_money(ccy, pool)}</b> &nbsp;·&nbsp; "
+            f"Assigned: <b>{_money(ccy, assigned)}</b> &nbsp;·&nbsp; "
+            f"Unallocated: <b style='color:{colour}'>"
+            f"{_money(ccy, unalloc)}</b>"
         )
 
         self._rebuild_rows(i)
@@ -381,11 +499,9 @@ class BudgetMonthlyView(QWidget):
             name.setFont(gf)
         else:
             name = QLabel(f"{_INDENT * row.depth}{label}")
-        name.setMinimumWidth(190)
-        name.setMaximumWidth(190)
-        name.setWordWrap(False)
+        _size_name(name)
         if row.is_unbudgeted or row.row_kind == "residual":
-            name.setStyleSheet(f"color:{_MUTED};")
+            name.setStyleSheet(f"color:{_muted_ink()};")
         lay.addWidget(name)
 
         bar = _Bar()
@@ -394,14 +510,14 @@ class BudgetMonthlyView(QWidget):
         )
         lay.addWidget(bar, stretch=1)
 
+        ccy = self._matrix.display_ccy or ""
         if row.is_unbudgeted:
             bar.set_fill(1.0, over=False, muted=True)
-            amt = QLabel(f"{_fmt(cell.actual)} spent")
-            amt.setStyleSheet(f"color:{_MUTED};")
-            amt.setMinimumWidth(150)
-            amt.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            amt = QLabel(f"{_money(ccy, cell.actual)} spent")
+            amt.setStyleSheet(f"color:{_muted_ink()};")
+            _size_amount(amt)
             lay.addWidget(amt)
-            lay.addSpacing(86)
+            lay.addSpacing(_REMAINDER_W + 8)
             return w
 
         available = cell.available
@@ -415,14 +531,23 @@ class BudgetMonthlyView(QWidget):
         )
         bar.set_fill(frac, over=over, income=(row.kind == "income"))
 
-        carry = cell.carry_in
-        avail_txt = _fmt(available)
-        if carry != 0:
-            avail_txt += f" ({carry:+,.2f})"
-        text = f"{_fmt(actual)} / {avail_txt}"
+        # The headline pair. Two numbers, not four: the old row printed
+        # `spent / available (carry)` *and* a signed diff column — where the
+        # diff is just available − spent, and the carry annotation restated
+        # what the diff already said. Carry moves to the tooltip, exactly as
+        # ADR-124 did for the annual grid's Budget cell (ADR-171).
+        #
+        # A non-positive `available` gets different words. Rollover carries an
+        # overspend *backwards* into next month, so available goes negative and
+        # `32.99 / -158.63` is not a sentence — there is no budget to be "of".
+        # Say what is true instead: what was spent, and by how much it is over.
+        if available > 0:
+            text = f"{_money(ccy, actual)} of {_money(ccy, available)}"
+        else:
+            text = f"{_money(ccy, actual)} spent"
         if row.is_editable:
             amt = _ClickLabel(text)
-            amt.setToolTip("Click to edit this month's budget")
+            amt.setToolTip(_budget_tooltip(cell, ccy))
             amt.clicked.connect(
                 lambda lid=row.line_id, lbl=row.label, cur=cell.allocation:
                 self._edit_line(lid, lbl, cur)
@@ -435,54 +560,43 @@ class BudgetMonthlyView(QWidget):
                 "A group total — edit the lines beneath it, or its "
                 "‘Everything else’ line."
             )
-            gf = QFont()
-            gf.setBold(True)
-            amt.setFont(gf)
-        amt.setMinimumWidth(160)
-        amt.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            amt.setFont(_bold())
+        _size_amount(amt)
         lay.addWidget(amt)
 
-        diff = cell.diff
-        dtxt = f"+{_fmt(diff)}" if diff > 0 else _fmt(diff)
+        dtxt, ink = _remainder(row.kind, cell.diff, ccy)
         dl = QLabel(dtxt)
-        dl.setMinimumWidth(78)
-        dl.setMaximumWidth(78)
-        dl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        if diff < 0:
-            dl.setStyleSheet(f"color:{_RED_TXT};")
-        elif diff > 0:
-            dl.setStyleSheet(f"color:{_GREEN_TXT};")
+        dl.setStyleSheet(f"color:{ink};")
+        if row.is_group:
+            dl.setFont(_bold())
+        _size_remainder(dl)
         lay.addWidget(dl)
         return w
 
     def _subtotal_row(self, section: bc.MatrixSection, mi: int) -> QWidget:
         cell = section.subtotal[mi]
+        ccy = self._matrix.display_ccy or ""
         w = QWidget()
         lay = QHBoxLayout(w)
         lay.setContentsMargins(6, 2, 6, 2)
         lay.setSpacing(8)
+        tokens.themed(w, "border-top: 1px solid {border};")
         name = QLabel(f"{section.title} — total")
-        f = QFont()
-        f.setBold(True)
-        name.setFont(f)
-        name.setMinimumWidth(190)
+        name.setFont(_bold())
+        _size_name(name)
         lay.addWidget(name)
         lay.addStretch(1)
-        amt = QLabel(f"{_fmt(cell.actual)} / {_fmt(cell.available)}")
-        amt.setFont(f)
-        amt.setMinimumWidth(160)
-        amt.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        amt = QLabel(
+            f"{_money(ccy, cell.actual)} of {_money(ccy, cell.available)}"
+        )
+        amt.setFont(_bold())
+        _size_amount(amt)
         lay.addWidget(amt)
-        dtxt = f"+{_fmt(cell.diff)}" if cell.diff > 0 else _fmt(cell.diff)
+        dtxt, ink = _remainder(section.kind, cell.diff, ccy)
         dl = QLabel(dtxt)
-        dl.setFont(f)
-        dl.setMinimumWidth(78)
-        dl.setMaximumWidth(78)
-        dl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        if cell.diff < 0:
-            dl.setStyleSheet(f"color:{_RED_TXT};")
-        elif cell.diff > 0:
-            dl.setStyleSheet(f"color:{_GREEN_TXT};")
+        dl.setFont(_bold())
+        dl.setStyleSheet(f"color:{ink};")
+        _size_remainder(dl)
         lay.addWidget(dl)
         return w
 
@@ -582,8 +696,19 @@ class BudgetMonthlyView(QWidget):
 
 
 def _clear_layout(layout) -> None:
+    """Empty a layout, *and* detach its widgets from the visible tree now.
+
+    ``deleteLater`` alone is not enough. Taking a widget out of a layout does
+    not unparent it — it stays a child of the list and keeps painting at its
+    old geometry until the deferred delete is processed, so a rebuild draws the
+    new rows *underneath the old ones* and the bottom of the list renders as
+    overlapping text. ``setParent(None)`` removes it from the tree on the spot;
+    ``deleteLater`` then frees it safely (never ``del``/immediate destruction —
+    this can run from a signal handler on the very widget being cleared).
+    """
     while layout.count():
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            w.setParent(None)
             w.deleteLater()

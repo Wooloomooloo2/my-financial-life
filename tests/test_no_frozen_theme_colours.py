@@ -50,7 +50,9 @@ _ALLOWED: dict[str, int] = {
     "sankey_report_window.py": 5,
     "splash.py": 4,
     "transfer_chips.py": 4,
-    "budget_monthly_view.py": 3,
+    # ADR-171 converted this view's last three (`_MUTED` / `_GREEN_TXT` /
+    # `_RED_TXT`) while redesigning its rows. Zero, and it stays zero.
+    "budget_monthly_view.py": 0,
     "proportional_bar.py": 3,
     "value_chart.py": 3,
     "balance_flow_chart.py": 2,

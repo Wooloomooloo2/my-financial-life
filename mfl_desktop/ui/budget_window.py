@@ -868,6 +868,22 @@ class BudgetWindow(QMainWindow):
     def _on_view_changed(self) -> None:
         """Flip between the annual matrix and the monthly progress view."""
         self._stack.setCurrentIndex(self._view.currentData() or 0)
+        self._sync_info_visibility()
+
+    def _sync_info_visibility(self) -> None:
+        """Only one Pool / Assigned / Unallocated line on screen (ADR-171).
+
+        Both pages carry one, and on the Monthly page they were drawn a
+        centimetre apart: the window's (fixed to *today's* month) and the
+        monthly view's own (following its month selector). Two lines showing
+        the same three labels with different numbers is worse than either —
+        it reads as a contradiction until you work out that one of them is
+        pinned to a month you aren't looking at.
+
+        The monthly view's is the right one there — it is beside the selector
+        it tracks — so the window's steps aside for it.
+        """
+        self._info_label.setVisible(self._stack.currentIndex() == 0)
 
     # ── render ──
 
@@ -979,6 +995,7 @@ class BudgetWindow(QMainWindow):
             tuple(excluded),
         )
         self._paint_info()
+        self._sync_info_visibility()
 
         self._header.set_heading(
             "Budget", f"{budget.name} · {_fmt_month(months[0])} – {_fmt_month(months[-1])}"
@@ -1147,10 +1164,14 @@ class BudgetWindow(QMainWindow):
         self._goals_layout.addStretch(1)
 
     def _clear_goals_bar(self) -> None:
+        # setParent(None) before deleteLater: taking a widget out of a layout
+        # doesn't unparent it, so without this the old goal cards keep painting
+        # over the new ones until the deferred delete lands (ADR-171).
         while self._goals_layout.count():
             item = self._goals_layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.setParent(None)
                 w.deleteLater()
 
     def _goal_candidate_accounts(self, budget: Budget) -> list[AccountSummary]:
