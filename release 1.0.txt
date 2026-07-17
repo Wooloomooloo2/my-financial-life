@@ -1,0 +1,397 @@
+===============================================================================
+MY FINANCIAL LIFE — RELEASE 1.0 DOCUMENTATION RECONCILIATION
+===============================================================================
+Generated: 2026-07-17
+Scope: cross-check of ADRs (001–176), CLAUDE_CONTEXT.md, README.md,
+       docs/RELEASE_1.0_BACKLOG.md, docs/backlog_notes.txt, docs/WEBSITE_BRIEF.md,
+       docs/schema.sql, docs/adr/README.md, requirements*.txt, and repo hygiene.
+Purpose: a single pre-ship punch list — discrepancies, missed backlog items,
+       wish-list items, tidy-up, and the real 1.0 ship gate.
+
+-------------------------------------------------------------------------------
+GROUND TRUTH (verified on disk 2026-07-17)
+-------------------------------------------------------------------------------
+- ADR files: 175 total. Numbered ADR-001 … ADR-176, with ADR-107 ABSENT.
+    Newest are ADR-168 … ADR-176, all dated 2026-07-17, all "Implemented".
+- Migrations: 35 total, 0001_… … 0035_budget_funding_mode.sql.
+- UI modules: 104 files under mfl_desktop/ui/.
+- Runtime deps (requirements-desktop.txt): PySide6, cryptography, ofxtools,
+    certifi, + pyobjc-framework-Cocoa (macOS only). i.e. 4 cross-platform deps,
+    not "two".
+- Packaging: scaffold + CI shipped (packaging/mfl.spec, build_macos.sh,
+    build_windows.ps1, build_mas.sh, installer.iss; .github/workflows/build.yml).
+- Feed providers on disk: enablebanking, gocardless, plaid, simplefin, ofx_direct.
+
+Headline: the CODE is effectively 1.0-complete. Every remaining item in the 1.0
+Definition-of-Done gate is business/legal/website/signing/QA — ZERO engineering
+feature items remain in the gate. The biggest risk to "we're shipping" is NOT the
+app; it is (a) stale developer-facing docs and (b) the external/commercial
+workstreams (company, legal docs, website, code-signing, store/MoR, QA matrix).
+
+
+===============================================================================
+SECTION A — CRITICAL DISCREPANCIES (fix before tagging 1.0)
+===============================================================================
+
+A1. ADR-107 is referenced but NO ADR-107 FILE EXISTS.
+    - CLAUDE_CONTEXT.md describes ADR-107 in full twice (status header ~line 7,
+      and status bullet ~line 56: "Save & New polish + investment parity").
+    - docs/adr/ has no ADR-107-*.md; the ADR index cleanly skips 106 -> 108.
+    - So a decision that was written up and shipped has no ADR of record.
+    - FIX (pick one, then make all docs agree):
+        (a) Create docs/adr/ADR-107-save-and-new-polish-and-investment-parity.md
+            from the CLAUDE_CONTEXT description (RECOMMENDED — the work shipped
+            and deserves a record; every other doc already assumes 107 exists as
+            a number), OR
+        (b) Renumber/absorb: fold the note into ADR-105 and strip the "ADR-107"
+            references from CLAUDE_CONTEXT.
+    - Note: the ADR index (docs/adr/README.md) does NOT reference ADR-107, so
+      only CLAUDE_CONTEXT needs reconciling once the file question is settled.
+
+A2. CLAUDE_CONTEXT.md is ~16 ADRs / 4 days stale — the primary dev context doc.
+    - "Last updated: 2026-07-13"; newest ADR is 176 (2026-07-17).
+    - The "## Architecture Decision Records" table tops out at ADR-160. It does
+      NOT contain rows for ADR-161 … ADR-176 (the Account-Summary/Budget design
+      pass, palette, dialogs audit, budget category-tree, burn-down, icons, etc.).
+    - Its own header count is wrong: claims the index is "156/156, verified" and
+      "45 ADRs are recorded only in the canonical index." Actual is 175 files.
+    - INTERNAL CONTRADICTION: the Known-pitfalls section cites ADR-162/165/166/167
+      — newer than the table's own top row (160) — so the file disagrees with
+      itself about how current it is.
+    - FIX: bump "Last updated" to 2026-07-17; extend the status lead + ADR table
+      through ADR-176; correct the "156/45" counts (or delete the numeric claim
+      and just say "docs/adr/README.md is authoritative").
+
+A3. README.md advertises stale counts and understated capability to the public.
+    (README is the repo's public face — these are the most visible errors.)
+    - "156 and counting" ADRs (line ~202)  -> actual 175.
+    - "75 architecture decision records" (project-structure comment, line ~187)
+      -> actual 175.
+    - "migrations (0001–0025)" (line ~172)  -> actual 0001–0035.
+    - "~70 PySide6 widgets" (line ~176)     -> actual 104 modules in ui/.
+    - "Only two third-party runtime dependencies (PySide6, ofxtools)" (line ~56)
+      -> actual 4 (adds cryptography for ADR-079 licensing + bank-feed crypto,
+      and certifi for ADR-126 TLS). This CONTRADICTS README's own lines 110/134,
+      which correctly list "PySide6, cryptography, ofxtools, certifi."
+    - Feature UNDERSELL — QIF: line ~157 says "bank/credit QIF stubbed for a
+      later round" and line ~19 lists only "QIF (investment)". ADR-111 (Implemented
+      2026-06-26) shipped Bank/Credit/Cash QIF import. Update both.
+    - Feature UNDERSELL — Packaging: status table line ~33 says packaging is
+      "📋 Planned". The build scaffold + two-OS CI shipped (ADR-104). Change to
+      "🔧 Scaffold + CI done; signing/notarisation pending account/cert."
+    - Bank feeds naming: status line ~32 and structure line ~174 call the feeds
+      arc "GoCardless (UK Open Banking) foundation." The backlog + code frame it
+      as Enable-Banking-first with 5 providers (Enable Banking, SimpleFIN, Plaid,
+      OFX Direct, GoCardless). Rename to "Enable Banking + pluggable providers
+      (ADR-077)" for consistency with the backlog and F-workstream.
+    - BROKEN LINK: line ~58 links "[Legacy web app](#legacy-web-app-v01)" but
+      there is no "Legacy web app" heading in README. Either add the section or
+      drop the anchor.
+
+
+===============================================================================
+SECTION B — RELEASE_1.0_BACKLOG.md — INTERNAL INCONSISTENCIES
+===============================================================================
+(The backlog is otherwise the strongest doc; these are self-contradictions that
+will confuse a ship decision.)
+
+B1. Workstream K header vs the gate contradict each other on distribution.
+    - The K header (line ~207) is marked "⚠ SUPERSEDED": current plan is
+      store-only — Microsoft Store (ADR-123) + Mac App Store, sandboxed, MoR
+      (ADR-125).
+    - BUT the K0 decision (line ~213), the §11 decision table (K0 "✅ Locked",
+      no supersession note), and the §10 Definition of Done still describe the
+      OPPOSITE plan: "direct signed+notarised, no sandbox, stores deferred to
+      1.1+." The gate and the critical path (§9 Phase 2) are written against a
+      distribution model the K header says was reversed twice.
+    - This is the single largest internal inconsistency. Reconcile: decide the
+      actual 1.0 channel and rewrite K0/§9/§10/§11 to match the K header (or
+      vice-versa). ADR-122/123/125 are the current decisions of record.
+
+B2. P4 "Empty-state / first-run polish" is [ ] open but annotated "folded into
+    P5", and P5 is [x] DONE (ADR-098). Either close it [x] or state what remains.
+
+B3. §1b defect register lists two items as OPEN that P8 lists as DONE:
+    - "goal target renders 'by Jun 49'" tagged (P8a); P8a is [x] DONE (ADR-161).
+    - "sidebar shows USD+GBP with no unit marker" tagged (P8f); P8f is [x] DONE
+      (ADR-165). ADR-165 fixed the per-row unit MARKER; the NAIVE FOLDER-SUM
+      total is genuinely still open (see H2). Clarify: mark the marker/date parts
+      closed, keep only the still-open folder-sum part.
+
+B4. §11 decision table lists "C1-lic" as "⚠ Open (engineering)" but the C1 body
+    marks the offline license mechanism [x] DONE (ADR-079). Update the table row.
+
+B5. F2 "manual 'Update all'" is [ ] open, but ADR-116 shipped an "Update All"
+    toolbar action (prices+rates). Clarify that the OPEN part is bank-feed
+    scheduled/background refresh, not the manual price/FX button.
+
+
+===============================================================================
+SECTION C — BACKLOG ITEMS CLOSED BY NEWER ADRs (168–176) BUT STILL WRITTEN OPEN
+===============================================================================
+The backlog + CLAUDE_CONTEXT both stop around ADR-167 (2026-07-14). ADRs 168–176
+(2026-07-16/17) closed several tracked items. Mark these done:
+
+C1. Budget category-tree / roll-up display  -> CLOSED by ADR-170 (collapsible
+    roll-up header + indented children + "Everything else" residual).
+C2. Monthly budget row clarity + "the last GBP 822.64" ISO-code money  -> CLOSED
+    by ADR-171 (also drives budget_monthly_view.py 3->0 frozen colours; helps P9).
+C3. Budget burn-down pacing against the plan  -> CLOSED by ADR-172 (paces vs
+    allocation, adds run-out date + verdict; drives burn_down_chart.py 5->0
+    frozen colours; helps P9).
+C4. Scheduled-bill projection in burn-down  -> CLOSED by ADR-173 (projects every
+    perimeter schedule, not only budget-line-linked ones).
+C5. §1b "Kind-drill misses splits"  -> CLOSED by ADR-169 (kind match made
+    split-aware) + ADR-176 (split category-list matching consults split lines).
+    Remove from the open defect list; keep C6 below.
+C6. Sidebar folder expansion not preserved (ADR-015 follow-up)  -> CLOSED by
+    ADR-168 (per-file persisted group expand/collapse).
+
+Partial/advanced (update counts, don't fully close):
+C7. P9 "remaining ~60 frozen theme colours" — ADR-171 (budget_monthly_view 3->0)
+    and ADR-172 (burn_down_chart 5->0) reduced the ratchet. The NET-WORTH 6-family
+    palette is still untouched. Lower the count; keep P9 open for net-worth.
+
+Still open after 168–176 (no ADR closed these — keep tracked):
+C8. P8c chart palette: fold-to-"Other" in treemap/sunburst/Sankey/Category&Payee,
+    and "colour follows rank, not entity" (stable category->slot map). Not touched.
+C9. §1b "Splits import as a single row" (import fidelity) — ADR-176 is about
+    display/drill, NOT import; this is still open. VERIFY against import_engine.
+
+
+===============================================================================
+SECTION D — docs/adr/README.md (THE ADR INDEX)
+===============================================================================
+D1. GOOD: the Index table is complete and current — all 175 ADRs (001–176 less
+    107) present exactly once + 4 amendment cross-ref rows; reaches ADR-176; no
+    ADR-107 reference; no false total-count claim. This is the authoritative list.
+D2. The index table is NOT in numeric order (runs 001–062, jumps to 082–176, then
+    080/079/078/081, then descends 077->063). Cosmetic; re-sort for readability.
+D3. The "Summaries" prose section is badly stale: only ~79 ADRs summarised, highest
+    is ADR-092. Missing summaries for 038–041, 046–049, 062, 083–086, and ALL of
+    093–176 (~96 ADRs have an index row but no summary). Either backfill or drop
+    the Summaries section and rely on the table + per-ADR files.
+D4. DUPLICATE entry: ADR-076 has two summary blocks ("Arc B rounds 1–2" and
+    "Arc B round 1"). Delete one.
+D5. STATUS not back-annotated for retirement/reversal:
+    - ADR-066 (standalone Payee report) still reads "Accepted" though ADR-133
+      (Implemented) RETIRED it (deleted payee_report_window.py / payee_filter_dialog.py).
+      Mark ADR-066 "Superseded/Retired by ADR-133."
+    - ADR-123 still reads "Accepted" though ADR-125 reverses its "macOS out of
+      scope" stance. Add "amended/partially reversed by ADR-125."
+    - ADR-082 declares it "Amends ADR-033/041/056/046/064/066/068" but none of
+      those rows note "amended by ADR-082" (systemic — the index rarely back-
+      annotates amendments). Low priority; fix if doing a status pass.
+
+
+===============================================================================
+SECTION E — CLAUDE_CONTEXT.md — ADDITIONAL STALE CONTENT
+===============================================================================
+(Beyond A2 above. This file is dev-facing, not shipped, but it steers all future
+work, so worth a single refresh pass.)
+
+E1. Repository-structure section: "adr/ # ADR-001 through ADR-010 + README" —
+    grossly stale (001–176).
+E2. Repository-structure migration tree stops at 0031_loan_accounts.sql; 0032–0035
+    are absent even though the same file's narrative references 0033/0034 (ADR-130)
+    and 0035 (ADR-138).
+E3. Header carries a WINDOWS path "C:\Users\hallm\Documents\GitHub\my-financial-life\"
+    while development moved to macOS (/Users/markhall/...). Update or remove.
+E4. "bundles all 31 migrations" (macOS build note, ~line 7) -> should be 35.
+E5. ui/ listing omits many shipped modules (app_header.py, page_header.py,
+    home_view.py, donut_chart.py, net_worth_history_chart.py, net_worth_sparkline.py,
+    secret_field.py, chart_helpers.py, …). Refresh or delete the exhaustive listing.
+E6. Backlog section lists as OPEN several items already shipped:
+    - "Packaging: single-file .exe via PyInstaller per ADR-008" -> shipped/reframed
+      by ADR-078/104/122/123/125/126.
+    - "Dashboard needs porting to Qt" -> shipped ADR-075 (and the SAME section
+      elsewhere says "Shipped 2026-06-15 as ADR-075" — self-contradiction).
+    - "Category management: archive categories" -> shipped ADR-070.
+    - "Account/settings management: archive accounts" -> shipped ADR-069 (close/reopen).
+    - "Visible 'New Transaction' button … only entry points are the menu and Ctrl+N"
+      -> ADR-119 made it the primary filled button; ADR-116 added the toolbar.
+    - "Report currency selector + conversion … Spending Over Time still needs a
+      display-currency combo" -> shipped ADR-159.
+
+
+===============================================================================
+SECTION F — docs/schema.sql & OTHER DOCS
+===============================================================================
+F1. docs/schema.sql is STALE. Last edited 2026-06-21 (~migration 0025 era). Missing
+    tables/columns from later migrations, e.g. budget_goal_account (0022),
+    feed_account (0026), csv_import_mapping (0027), income-over-time (0028),
+    bonds/options (0029), budget_bill_lines (0030), loan_accounts (0031),
+    category_import_map (0032), transaction_status_ladder (0033), bank_posted_date
+    (0034), budget_funding_mode (0035). It is a hand-maintained snapshot that
+    drifted. FIX: regenerate from a freshly-migrated DB (`.schema`) or delete it
+    and point readers at mfl_desktop/migrations/ as the source of truth. It is not
+    referenced by README, so deletion is low-risk.
+F2. docs/WEBSITE_BRIEF.md (2026-06-22) predates the store-only distribution pivot
+    (ADR-123/125) and several features. It names Garelochsoft / garelochsoft.com /
+    the mfl-website (Astro) repo — consistent with W1. Before the website build,
+    re-sync it with the current distribution channel + the ADR-168..176 features
+    (esp. anything screenshot-worthy). Low priority until W1 starts.
+F3. docs/backlog_notes.txt "Post-ADR-112 category triage" is DUPLICATED verbatim in
+    RELEASE_1.0_BACKLOG.md (the "Open non-code owner action"). Keep one home for it
+    (the backlog) to avoid drift.
+
+
+===============================================================================
+SECTION G — ADR STATUS HYGIENE
+===============================================================================
+G1. Non-"Accepted/Implemented" ADRs (legitimate, but confirm the intent before ship):
+    - ADR-001 Partially superseded by ADR-009 (OK).
+    - ADR-002 Superseded by ADR-008 (OK).
+    - ADR-028 Proposed (planning umbrella — per-round ADRs shipped; OK).
+    - ADR-042 PARKED — inline-register-entry was built + reverted on owner
+      feedback. Confirm nothing in README/CLAUDE_CONTEXT implies it is a live
+      feature. (It doesn't appear shipped anywhere; just flagging.)
+    - ADR-080 Proposed (EB key custody — deferred post-B3; OK, 1.1).
+    - ADR-081 Proposed (MFL->MRL export — accept at M2 start; OK, 1.1).
+G2. See D5 for ADR-066/123/082 status back-annotation.
+
+
+===============================================================================
+SECTION H — DEFECT REGISTER (§1b) — RECONCILED STATE
+===============================================================================
+Still genuinely OPEN correctness defects (owner should decide which, if any, block ship):
+H1. Merged security's saved report silently matches nothing (stale sid after merge).
+H2. Multi-currency FOLDER SUM in sidebar is a naive 1:1 sum (no FX) — now LIVE on
+    the owner's mixed GBP/USD file. NOT fixed by ADR-165 (that fixed per-row unit
+    markers only). This is the still-open remnant of B3 above.
+H3. Historical net worth understates early points when FX/price history is short.
+H4. First price backfill exceeds Tiingo 50/hr limit -> 429s partway (ADR-049 arc).
+H5. Splits import as a single row (import fidelity loss) — see C9; VERIFY.
+
+Performance (open; from 2026-07-12 instrumented launch):
+H6. Quit freezes ~2.4s (WAL-checkpoint suspect, ADR-057).
+H7. Unexplained ~1,596 ms launch UI freeze (uninstrumented).
+H8. AccountSummary/Budget/TransactionsList reload on every WindowActivate (the
+    anti-pattern ADR-156/157 fixed for Home; still present on 3 windows).
+H9. list_category_tree() correlated subquery, called 2x per report open (~100 ms).
+
+NOW CLOSED (move to "Closed"): "Kind-drill misses splits" (ADR-169/176);
+currency-symbol duplication (ADR-165); the three dark-mode dialog defects (ADR-167).
+
+RECOMMENDATION: none of H1–H9 are in the 1.0 gate, but H2 (naive multi-currency
+folder sum) is the most user-visible wrong-number on the owner's own file and is
+cheap relative to its confusion cost — consider fixing or hiding the mixed-currency
+total before ship. There is also an explicit CAVEAT in the backlog that imports,
+budgets, reconcile, scheduled txns and bank feeds have NOT been defect-audited —
+worth a focused pass before declaring 1.0 quality.
+
+
+===============================================================================
+SECTION I — MISSED / UNDER-TRACKED ITEMS
+===============================================================================
+I1. No CHANGELOG / release-notes file in the repo. 1.0 needs one (also feeds the
+    auto-updater and the website changelog page W2). Create CHANGELOG.md.
+I2. No LICENSE file at repo root despite README saying "MIT". Add a LICENSE file
+    (the README claim currently has nothing to point to).
+I3. ADR-107 record gap (see A1) — the only ADR "decision without a file".
+I4. docs/schema.sql drift (see F1) — regenerate-or-delete decision is untracked.
+I5. The "UI-freeze checkpoint before the manual" (P7) is the sequencing gate for
+    W2's user manual and W1's screenshots. With ADR-176 (2026-07-17) the UI churn
+    has effectively stopped — declare the freeze explicitly so the manual can start.
+I6. Version string: confirm version.py / _build_info fallback reads "1.0.0" (or the
+    intended tag) before packaging; About box + crash header surface it (ADR-099).
+I7. requirements.txt (root, legacy web-app deps) still lists pyoxigraph/fastapi/etc.
+    That is intentional (legacy v0.1), but README/CLAUDE_CONTEXT should keep saying
+    so loudly — a fresh contributor could pip-install the wrong file. (Currently
+    documented; just verify the note survives the README edits in A3.)
+
+
+===============================================================================
+SECTION J — WISH-LIST / EXPLICITLY DEFERRED (not 1.0 blockers)
+===============================================================================
+J1. P7 broader iconography pass (UI still text-heavy) — needs an icon set.
+J2. P7 per-feature in-app Help for newest features (bonds/options, loans, budget
+    bills, Investment Income, reports-include-closed) — gated on UI freeze (I5).
+J3. P7 Investment Income filter dialog onto ReportFilterDialogBase (minor P3 tidy).
+J4. P7 auto-offer "Compact file" when freelist crosses a threshold (self-healing).
+J5. P8c colour-follows-rank stable palette (bigger than ADR-166; deferred).
+J6. P9 net-worth 6-family palette to meet the ADR-166 validator.
+J7. §1b register-clip fix for the INVESTMENT register (11 columns) — account/all-
+    txn registers fixed by ADR-162; investment needs frozen money columns.
+J8. F2 feed robustness (consent re-auth, background refresh, error surfaces,
+    keychain for provider creds), F3 SimpleFIN/Plaid — all 1.1 fast-follow.
+J9. M2/M3 MFL->MRL export + deeper integration — 1.1 / 1.2+.
+
+
+===============================================================================
+SECTION K — TIDYING UP (repo hygiene, non-functional)
+===============================================================================
+K1. Root-directory clutter (all gitignored, so not committed, but noisy in the
+    working tree): Copy-20260711-122113.mfl and Copy-20260711-122228.mfl (0 bytes),
+    Copy-20260711-140405.mfl, mfl_dev_backup.mfl, mfl_dev_windows.mfl,
+    mfl_dev.db(+ -shm/-wal), mfl_dev.mfl(+ -shm/-wal). Delete the stale copies /
+    backups; keep the one working dev DB. mfl_public.mfl IS tracked intentionally
+    (demo dataset) — leave it.
+K2. README "Project structure" tree omits real top-level dirs: packaging/, tools/,
+    tests/, assets/. Add packaging/ at least (it's now load-bearing for K1/K2).
+K3. ADR index numeric re-sort (D2) + remove duplicate ADR-076 summary (D4).
+K4. Consider moving docs/backlog_notes.txt content into the backlog and deleting it
+    (see F3) so there is one backlog of record.
+K5. .vscode/, .pytest_cache/ present — confirm intended (harmless).
+
+
+===============================================================================
+SECTION L — THE REAL 1.0 SHIP GATE (Definition of Done, current state)
+===============================================================================
+Engineering/product gate  ....... ✅ COMPLETE
+    P1 dates/periods, P2 report drill, P3 de-overlap, P4/P5 polish+onboarding —
+    all shipped. No engineering FEATURE item remains in the gate.
+    (Open ENGINEERING items H1–H9, C8–C9, J* are quality/1.1, not gate items.)
+
+Remaining gate items — ALL external/business/process:
+  [ ] K1/K2  Signed + notarised macOS build + signed Windows installer that pass
+             Gatekeeper/SmartScreen, with auto-update. (Blocked on Apple acct +
+             Windows cert -> blocked on B1 company. Scripts are ready.)
+             NOTE: reconcile with B1 above — is 1.0 direct-download or store-only?
+  [ ] B1/B2  Company formed (UK Ltd default, needs accountant); Privacy Policy +
+             ToS published at stable URLs.
+  [ ] W1/W2  Website live (showcase / download / buy / privacy / terms / support);
+             getting-started docs; full user manual (owner's explicit LAST task,
+             after the UI-freeze checkpoint I5).
+  [ ] C1/C2  Real purchase -> license-key -> install flow end-to-end via a
+             Merchant-of-Record (license mechanism itself DONE, ADR-079).
+  [~] M1     IRI-boundary guard test DONE (ADR-096); privacy-policy MFL->MRL
+             disclosure + website bundle story still pending (roll into B2/W1).
+  [ ] Q      Test matrix green incl. the live .mfl (macOS Intel+AS × Win10/11;
+             fresh / upgrade-over-old-DB / large real DB); launch checklist done.
+
+Explicitly OUT of the 1.0 gate (both 1.1 fast-follows): automated Enable Banking
+feeds, and the MFL->MRL RDF export code (M2). 1.0 only preserves the IRI boundary,
+discloses the hand-off, and markets the bundle.
+
+
+===============================================================================
+SECTION M — RECOMMENDED PRE-SHIP CHECKLIST (ordered, doc-side)
+===============================================================================
+Do these before tagging — they are cheap and make the docs tell one story:
+
+  1. Resolve ADR-107 (A1): create the ADR file (recommended) or strip the refs.
+  2. Reconcile the distribution contradiction (B1): decide direct vs store-only
+     for 1.0 and rewrite K0/§9/§10/§11 of the backlog + README status line to match
+     ADR-122/123/125.
+  3. README refresh (A3): fix ADR count (175), migrations (35), widgets (104),
+     deps (4), QIF status (Implemented), packaging status (scaffold+CI), feeds
+     naming (Enable Banking + providers), broken legacy-web-app anchor.
+  4. CLAUDE_CONTEXT refresh (A2, E1–E6): date to 2026-07-17, extend ADR table +
+     status through 176, fix counts, Windows path, migration tree, shipped-but-
+     -open backlog items.
+  5. Backlog reconcile (B2–B5, C1–C9): flip the now-done items, split the
+     partially-done ones, fix the decision-table rows.
+  6. ADR index (D2–D5): re-sort, delete the duplicate ADR-076 summary, back-
+     annotate ADR-066/123 status. (Backfilling the Summaries section D3 is
+     optional — the table is authoritative.)
+  7. Create CHANGELOG.md and a root LICENSE file (I1, I2).
+  8. Regenerate or delete docs/schema.sql (F1).
+  9. Delete stale root .mfl copies/backups (K1).
+ 10. Declare the UI-freeze checkpoint (I5) so W2's manual can start.
+
+Then — once B/W/C/K/Q (Section L) are done — SHIP.
+
+===============================================================================
+END
+===============================================================================
