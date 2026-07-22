@@ -16,6 +16,14 @@ no-rate slices excluded + noted). Reuses the Payee report's ranked-bar
 chart (:class:`PayeeChart`) and ranking (:func:`build_report`); the row id
 field carries the current dimension's item id (a category-group id or a
 canonical-payee id). No pies (ADR-018).
+
+The "Where it goes" sunburst owns the page's palette — ``_top_colours`` for its
+inner ring (top-level category), ``_group_colours`` for the outer ring's tints
+(budget-line group). A swatch legend under it names the inner ring, and when the
+ranked bars are one of those same bucketings (Group by Category at Top-level or
+Group roll-up) they take the matching colours, so the two panels read as one
+picture. Bars fall back to the flat accent hue whenever the buckets differ —
+payee bars, or Leaf roll-up. See ``_bar_colours``.
 """
 from __future__ import annotations
 
@@ -24,17 +32,19 @@ from datetime import date
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
+    QGridLayout,
     QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -114,6 +124,37 @@ class _NumericItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
+class _ElidedLabel(QLabel):
+    """A QLabel that elides its text to whatever width it's given, instead of
+    clipping it mid-word or forcing its container wider. Used for the sunburst
+    legend, where a long category name must not push the summary panel out."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full = text
+        self.setToolTip(text)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+
+    def setText(self, text: str) -> None:  # noqa: D401 — Qt override
+        self._full = text
+        self.setToolTip(text)
+        self._apply_elide()
+
+    def resizeEvent(self, event) -> None:  # noqa: D401 — Qt override
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self) -> None:
+        fm = QFontMetrics(self.font())
+        super().setText(fm.elidedText(self._full, Qt.ElideRight, max(0, self.width())))
+
+    def sizeHint(self):  # noqa: D401 — Qt override
+        hint = super().sizeHint()
+        hint.setWidth(0)     # never widen the panel on the full text's account
+        return hint
+
+
 class CategoryPayeeWindow(QMainWindow):
     """Category & Payee window — bare or saved-loaded.
 
@@ -161,6 +202,12 @@ class CategoryPayeeWindow(QMainWindow):
             "leaf":  {c.id: c.id for c in self._all_categories},
         }
         self._payee_names = dict(repo.list_canonical_payees())
+        # Sunburst palette: top-level category id → colour. Owned by
+        # _render_donut, reused by the legend and (when the buckets line up)
+        # the ranked bars, so all three share one colour language.
+        self._top_colours: dict[int, QColor] = {}
+        # Outer-ring tints: budget-line group id → colour.
+        self._group_colours: dict[int, QColor] = {}
 
         self._current_filters: CategoryPayeeFilters = (
             CategoryPayeeFilters.from_json(report.filters_json)
@@ -415,7 +462,18 @@ class CategoryPayeeWindow(QMainWindow):
         self._donut.setMinimumHeight(200)
         # ADR-152: click a sunburst slice → the transactions behind it.
         self._donut.account_clicked.connect(self._on_donut_slice_clicked)
+        self._donut.setMinimumHeight(260)
         layout.addWidget(self._donut, stretch=1)
+        # Inner-ring colour key, rebuilt per refresh by _render_donut_legend.
+        # Two columns so a 7-category key costs four short rows rather than
+        # seven, leaving the donut the height it needs to stay legible.
+        self._donut_legend = QGridLayout()
+        self._donut_legend.setContentsMargins(0, 6, 0, 0)
+        self._donut_legend.setHorizontalSpacing(10)
+        self._donut_legend.setVerticalSpacing(2)
+        self._donut_legend.setColumnStretch(1, 1)
+        self._donut_legend.setColumnStretch(3, 1)
+        layout.addLayout(self._donut_legend)
         return panel
 
     @staticmethod
@@ -512,12 +570,16 @@ class CategoryPayeeWindow(QMainWindow):
 
         report = build_report(raw, self._current_filters.top_n)
         symbol = _symbol_for(self._display_ccy) or ""
-        self._chart.render(rows=report.rows, symbol=symbol or "£")
+        # Donut first: it owns the palette (_top_colours) the bars key off.
+        self._render_donut()
+        self._chart.render(
+            rows=report.rows, symbol=symbol or "£",
+            colours=self._bar_colours(row_dim),
+        )
         self._populate_table(report.rows, symbol, _dim_label(row_dim))
         self._update_breadcrumb(row_dim)
         self._back_button.setVisible(self._drill is not None)
         self._update_summary_panel(report.summary, row_dim)
-        self._render_donut()
 
     def _show_empty(self, message: str) -> None:
         self._chart.show_empty(message)
@@ -526,6 +588,9 @@ class CategoryPayeeWindow(QMainWindow):
         self._update_breadcrumb(self._dimension)
         self._back_button.setVisible(self._drill is not None)
         self._update_summary_panel(None, self._dimension, note=message)
+        self._top_colours = {}
+        self._group_colours = {}
+        self._clear_donut_legend()
         self._donut.show_empty("No spending")
 
     # ── category distribution donut (ADR-134) ──
@@ -539,32 +604,26 @@ class CategoryPayeeWindow(QMainWindow):
         or drill — the inner ring lines up with the main top-level bars (the
         earlier group→leaf pairing sat a level below them and read as a mismatch).
         Every slice carries its category id, so a click opens its transactions."""
-        top_map = self._rollup_maps["top"]
-        group_map = self._group_map
-        tops: dict[int, dict[int, int]] = {}
-        top_totals: dict[int, int] = {}
-        for cell in self._cells:
-            pence = int(cell["spending_pence"])
-            if pence <= 0:
-                continue
-            leaf = cell["category_id"]
-            top = top_map.get(leaf, leaf)
-            grp = group_map.get(leaf, leaf)
-            tops.setdefault(top, {})
-            tops[top][grp] = tops[top].get(grp, 0) + pence
-            top_totals[top] = top_totals.get(top, 0) + pence
+        tops, top_totals = self._top_breakdown()
 
         if not top_totals:
+            self._top_colours = {}
+            self._group_colours = {}
+            self._clear_donut_legend()
             self._donut.show_empty("No spending")
             return
 
         symbol = _symbol_for(self._display_ccy) or "£"
         ordered = sorted(top_totals, key=lambda t: -top_totals[t])
+        self._top_colours = {top: colour_for(i) for i, top in enumerate(ordered)}
+        self._group_colours = {}
         segments: list[DonutSegment] = []
-        for i, top in enumerate(ordered):
-            base = colour_for(i)
+        for top in ordered:
+            base = self._top_colours[top]
             grps = sorted(tops[top].items(), key=lambda kv: -kv[1])
             n = len(grps)
+            for j, (gid, _p) in enumerate(grps):
+                self._group_colours[gid] = self._shade(base, j, n)
             children = tuple(
                 DonutChild(
                     label=self._category_label(gid),
@@ -588,6 +647,86 @@ class CategoryPayeeWindow(QMainWindow):
             center_sub=self._fmt(total),
             symbol=symbol,
         )
+        self._render_donut_legend(segments)
+
+    def _bar_colours(self, row_dim: str) -> dict[int, QColor]:
+        """The sunburst's palette, keyed by row id, when — and only when — the
+        ranked bars and the donut's inner ring are the *same* buckets.
+
+        The donut's two rings are fixed — inner = top-level category, outer =
+        budget-line group — while the bars follow Group by / Roll up / drill.
+        So the ring a bar corresponds to depends on the roll-up: ``top`` keys to
+        the inner ring, ``group`` (the default) to the outer ring's tints.
+        ``leaf`` has no ring of its own, and payee bars aren't categories at
+        all; both get no colours, because matching them would invent a
+        relationship that isn't there. Empty dict → PayeeChart falls back to its
+        single accent hue."""
+        if row_dim != "category":
+            return {}
+        level = self._current_filters.rollup_level
+        if level == "top":
+            return dict(self._top_colours)
+        if level == "group":
+            return dict(self._group_colours)
+        return {}
+
+    def _top_breakdown(self) -> tuple[dict[int, dict[int, int]], dict[int, int]]:
+        """``(tops, top_totals)`` over the cached cells: the inner ring's
+        top-level categories and, within each, its budget-line groups. Pence."""
+        top_map = self._rollup_maps["top"]
+        group_map = self._group_map
+        tops: dict[int, dict[int, int]] = {}
+        top_totals: dict[int, int] = {}
+        for cell in self._cells:
+            pence = int(cell["spending_pence"])
+            if pence <= 0:
+                continue
+            leaf = cell["category_id"]
+            top = top_map.get(leaf, leaf)
+            grp = group_map.get(leaf, leaf)
+            tops.setdefault(top, {})
+            tops[top][grp] = tops[top].get(grp, 0) + pence
+            top_totals[top] = top_totals.get(top, 0) + pence
+        return tops, top_totals
+
+    def _render_donut_legend(self, segments: list[DonutSegment]) -> None:
+        """A colour key for the INNER ring only. Swatch + name, no amounts —
+        the ranked bars and the table already carry the figures, so repeating
+        them here would be a third copy. The outer ring needs no entry of its
+        own: its slices are tints of their parent's colour, so the inner key
+        explains the whole sunburst by family.
+
+        Laid out in two columns, filled down-then-across so the reading order
+        still runs largest-first down column one."""
+        self._clear_donut_legend()
+        rows = (len(segments) + 1) // 2
+        for i, seg in enumerate(segments):
+            r, c = (i % rows, i // rows) if rows else (0, 0)
+            swatch, name_lab = self._legend_cells(seg.label, seg.color)
+            self._donut_legend.addWidget(swatch, r, c * 2)
+            self._donut_legend.addWidget(name_lab, r, c * 2 + 1)
+
+    def _clear_donut_legend(self) -> None:
+        """Tear down the legend cells. Widgets are reparented away immediately
+        so they stop painting at once, then scheduled for deletion."""
+        while self._donut_legend.count():
+            item = self._donut_legend.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+    @staticmethod
+    def _legend_cells(name: str, colour) -> tuple[QLabel, QLabel]:
+        """``(swatch, name)`` for one key entry. The name elides rather than
+        widening the panel — the full text stays on the tooltip."""
+        swatch = QLabel()
+        swatch.setFixedSize(9, 9)
+        swatch.setStyleSheet(f"background: {colour.name()}; border-radius: 2px;")
+        name_lab = _ElidedLabel(name)
+        tokens.themed(name_lab, "color: {text}; font-size: 11px; background: transparent;")
+        name_lab.setText(name)   # re-elide once the themed font is in effect
+        return swatch, name_lab
 
     @staticmethod
     def _shade(base: QColor, index: int, count: int) -> QColor:

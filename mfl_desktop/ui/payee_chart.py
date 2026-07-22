@@ -6,8 +6,12 @@ canonical payee's total spend over the period. Same hand-rolled paintEvent
 soft value labels, hover tooltip). No pies (ADR-018).
 
 Colour does not encode rank (a single accent hue), so the bars stay honest
-— length alone carries the comparison. Bars are **clickable**: a press
-emits :attr:`payee_clicked` so the window can open that payee's
+— length alone carries the comparison. A caller may pass ``colours`` to key
+each bar to a companion chart's palette (Category & Payee's sunburst does
+this so bar and donut share one colour language); that is a *categorical*
+key, not a rank signal, and the caller is responsible for only supplying it
+when its row ids genuinely match the other chart's. Bars are **clickable**:
+a press emits :attr:`payee_clicked` so the window can open that payee's
 transactions. The window pairs this with a sortable table for the precise
 figures.
 """
@@ -61,6 +65,7 @@ class PayeeChart(QWidget):
 
         self._rows: list[PayeeSpendRow] = []
         self._symbol: str = "£"
+        self._colours: dict = {}
         self._empty_message: Optional[str] = None
         # (rect, row_index) for hover hit-testing.
         self._hitmap: list[tuple[QRectF, int]] = []
@@ -69,14 +74,20 @@ class PayeeChart(QWidget):
 
     def render(
         self, *, rows: list[PayeeSpendRow], symbol: str = "£",
+        colours: Optional[dict] = None,
     ) -> None:
+        """``colours`` maps a row's id (``PayeeSpendRow.payee_id``) to the
+        colour its bar should take. Omit it — or leave an id out — to fall back
+        to the single accent hue."""
         self._rows = rows
         self._symbol = symbol or "£"
+        self._colours = dict(colours) if colours else {}
         self._empty_message = None
         self.update()
 
     def show_empty(self, message: str) -> None:
         self._rows = []
+        self._colours = {}
         self._empty_message = message
         self.update()
 
@@ -130,7 +141,7 @@ class PayeeChart(QWidget):
         for i, row in enumerate(self._rows):
             slot_top = area_top + i * slot_h
             bar_top = slot_top + (slot_h - bar_h) / 2
-            colour = QColor(_ch.chart_accent())
+            colour = QColor(self._colours.get(row.payee_id) or _ch.chart_accent())
 
             # Faint full-width track so short bars still read as a row.
             painter.setPen(Qt.NoPen)
