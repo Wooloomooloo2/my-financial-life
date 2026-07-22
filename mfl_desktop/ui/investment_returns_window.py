@@ -16,10 +16,12 @@ Saved/loaded through the ADR-039 reports framework — structurally the same
 top-bar / Save / Save As / dirty / close-prompt scaffolding as
 SpendingReportWindow, minus the drill-down (returns has no drill stack).
 
-Currency: when all selected accounts share a currency the report aggregates
-natively; a mixed-currency selection converts each account into the first
-account's currency via Repository.convert_amount (a note flags it). The owner's
-portfolio is single-currency USD, so native is the live path.
+Currency: the report aggregates into a user-chosen display currency, defaulting
+to the base currency (then GBP) like the other reports (ADR-055). Each account's
+figures convert from its native currency via Repository.convert_amount (a note
+flags missing / fallback rates). Per-row Price and Currency stay native /
+informational. The selector is a view preference — not persisted in the saved
+filters; it re-resolves to the default each time the report opens.
 """
 from __future__ import annotations
 
@@ -176,6 +178,9 @@ class InvestmentReturnsWindow(QMainWindow):
         self._filter_button = QPushButton("Filter…")
         self._filter_button.setProperty("mflVariant", "primary")
         self._filter_button.clicked.connect(self._on_open_filter)
+        self._ccy_combo = QComboBox()
+        self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
+        self._populate_ccy_combo()
         self._save_button = QPushButton("Save")
         self._save_button.setProperty("mflVariant", "ghost")
         self._save_button.clicked.connect(self._on_save)
@@ -185,6 +190,8 @@ class InvestmentReturnsWindow(QMainWindow):
 
         self._page_header = PageHeader(show_rule=True)
         self._page_header.add_action(self._filter_button)
+        self._page_header.add_action(QLabel("Display in:"))
+        self._page_header.add_action(self._ccy_combo)
         self._page_header.add_action(self._save_button)
         self._page_header.add_action(self._save_as_button)
 
@@ -613,6 +620,36 @@ class InvestmentReturnsWindow(QMainWindow):
         win.setAttribute(Qt.WA_DeleteOnClose)
         win.show()
 
+    def _populate_ccy_combo(self) -> None:
+        """Fill the display-currency selector from the currencies in use,
+        defaulting to the base currency (then GBP, then the first in use).
+        Like the other reports (ADR-055), this is a view preference — not
+        persisted in the saved filters; it re-resolves to the default each time
+        the report opens."""
+        currencies = self._repo.list_distinct_currencies()
+        base = self._repo.get_setting("base_currency")
+        options = sorted(set(currencies) | ({base} if base else set()))
+        if not options:
+            options = ["GBP"]
+        if base and base in options:
+            default = base
+        elif "GBP" in options:
+            default = "GBP"
+        else:
+            default = options[0]
+        self._display_ccy = default
+        self._ccy_combo.blockSignals(True)
+        self._ccy_combo.clear()
+        for ccy in options:
+            self._ccy_combo.addItem(ccy, ccy)
+        i = self._ccy_combo.findData(default)
+        self._ccy_combo.setCurrentIndex(i if i >= 0 else 0)
+        self._ccy_combo.blockSignals(False)
+
+    def _on_ccy_changed(self, *_a) -> None:
+        self._display_ccy = self._ccy_combo.currentData() or "GBP"
+        self._refresh()
+
     def _conv(self, amount: Decimal, from_ccy: str, on_date: str) -> Decimal:
         if from_ccy == self._display_ccy:
             return amount
@@ -678,12 +715,9 @@ class InvestmentReturnsWindow(QMainWindow):
         window_start = d_from.isoformat()
         end_iso = d_to.isoformat()
 
-        # Display currency: native if uniform, else first account's currency.
-        currencies = set(by_ccy)
-        self._display_ccy = (
-            next(iter(currencies)) if len(currencies) == 1
-            else accounts[0].currency
-        )
+        # Display currency comes from the header selector (_populate_ccy_combo),
+        # which defaults to the base currency — not from the accounts' native
+        # currency. _conv short-circuits for accounts already in that currency.
 
         results = []   # (currency, ReturnsResult)
         all_series: dict[int, list[tuple[str, float]]] = {}

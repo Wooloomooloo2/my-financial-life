@@ -16,10 +16,11 @@ reinvested dividends* toggle is on, reinvested DRIPs valued at quantity × price
 realized columns come from the holdings engine ``compute_returns`` (ADR-046),
 so this view and the Investment Returns report agree.
 
-Currency: when all selected accounts share a currency the report aggregates
-natively; a mixed-currency selection converts each account's monetary figures
-into the first account's currency via ``Repository.convert_amount`` (a note
-flags it). Per-row Price and Currency stay native / informational.
+Currency: the report aggregates into a user-chosen display currency, defaulting
+to the base currency (then GBP) — the ADR-055 FX path ADR-108 specified. Each
+account's monetary figures convert from its native currency via
+``Repository.convert_amount`` (a note flags missing / fallback rates). Per-row
+Price and Currency stay native / informational.
 
 Unlike the Investment Returns report this is a live analysis window — no saved
 type, no migration (ADR-108).
@@ -34,6 +35,7 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -156,9 +158,15 @@ class InvestmentIncomeWindow(QMainWindow):
         self._filter_button.setProperty("mflVariant", "primary")
         self._filter_button.clicked.connect(self._on_open_filter)
 
+        self._ccy_combo = QComboBox()
+        self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
+        self._populate_ccy_combo()
+
         top_bar = PageHeader(show_rule=True)
         top_bar.set_heading("Investment Income", "Dividends, interest & distributions")
         top_bar.add_action(self._filter_button)
+        top_bar.add_action(QLabel("Display in:"))
+        top_bar.add_action(self._ccy_combo)
 
         # ── body: (chart over table) | summary ──
         self._chart = IncomeBarChart()
@@ -327,6 +335,35 @@ class InvestmentIncomeWindow(QMainWindow):
             return start, end
         return (earliest or today), today
 
+    def _populate_ccy_combo(self) -> None:
+        """Fill the display-currency selector from the currencies in use,
+        defaulting to the base currency (then GBP, then the first in use).
+        Like the other reports (ADR-055), this is a view preference — it
+        re-resolves to the default each time the report opens."""
+        currencies = self._repo.list_distinct_currencies()
+        base = self._repo.get_setting("base_currency")
+        options = sorted(set(currencies) | ({base} if base else set()))
+        if not options:
+            options = ["GBP"]
+        if base and base in options:
+            default = base
+        elif "GBP" in options:
+            default = "GBP"
+        else:
+            default = options[0]
+        self._display_ccy = default
+        self._ccy_combo.blockSignals(True)
+        self._ccy_combo.clear()
+        for ccy in options:
+            self._ccy_combo.addItem(ccy, ccy)
+        i = self._ccy_combo.findData(default)
+        self._ccy_combo.setCurrentIndex(i if i >= 0 else 0)
+        self._ccy_combo.blockSignals(False)
+
+    def _on_ccy_changed(self, *_a) -> None:
+        self._display_ccy = self._ccy_combo.currentData() or "GBP"
+        self._refresh()
+
     def _conv(self, amount: Decimal, from_ccy: str, on_date: str) -> Decimal:
         if from_ccy == self._display_ccy:
             return amount
@@ -384,11 +421,9 @@ class InvestmentIncomeWindow(QMainWindow):
         end_iso = d_to.isoformat()
         samples = _month_end_samples(d_from, d_to)
 
-        currencies = set(by_ccy)
-        self._display_ccy = (
-            next(iter(currencies)) if len(currencies) == 1
-            else accounts[0].currency
-        )
+        # Display currency comes from the header selector (_populate_ccy_combo),
+        # which defaults to the base currency — not from the accounts' native
+        # currency. _conv short-circuits for accounts already in that currency.
 
         multipliers = self._repo.security_multipliers()
         merged: dict[int, dict] = {}
