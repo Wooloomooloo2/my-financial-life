@@ -53,7 +53,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 # the gitignored tools/.dev_signing_key) — replace it with the production
 # public key before shipping paid builds. Verification can also be pointed at
 # any key via the ``public_key_b64`` argument (used by tests).
-LICENSE_PUBLIC_KEY_B64 = "6fS7nETvW03i+9A2PFgOw0QKMkoNemzz/6l2me0JsDQ="
+#
+# Rotated 2026-07-24 (ADR-180): the previous dev key's private half was left
+# behind on the Mac in the Mac→Windows move, so nothing on this machine could
+# mint a key and the owner's own build was a day from trial expiry. Keys signed
+# by the old key no longer verify — safe, because none were ever issued (the
+# offline-key channel is dormant under ADR-123's Store-only 1.0.1).
+LICENSE_PUBLIC_KEY_B64 = "hNCRKH7EE/mUAPUTTkTcaK/HtKgocp4rnLPDjlOhtGg="
 
 # Free, full-feature trial length before a key is required (ADR-079). Generous
 # because the model is buy-once and the goal is conversion, not lockout.
