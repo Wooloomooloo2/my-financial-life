@@ -10,6 +10,8 @@ screen follows the light/dark theme live.
 """
 from __future__ import annotations
 
+import logging
+import sqlite3
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -37,6 +39,9 @@ from mfl_desktop.home_dashboard import (
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.chart_helpers import currency_symbol
 from mfl_desktop.ui.net_worth_sparkline import NetWorthSparkline
+
+logger = logging.getLogger(__name__)
+
 
 def _sym(ccy: str) -> str:
     """The currency glyph, via the one definition (ADR-165)."""
@@ -315,13 +320,25 @@ class HomeView(QWidget):
         Comparing the freshness token first keeps the ADR-075 guarantee (a real
         edit still bumps the generation, so it still redraws) while making the
         common no-op case cost a couple of microseconds. Returns whether it
-        rebuilt."""
-        if not self._repo.is_open():
+        rebuilt.
+
+        Database errors are logged and swallowed (ADR-179). Nobody asked for
+        this refresh — it is ambient, triggered by focus landing on the window —
+        so the worst honest outcome is a dashboard that keeps showing its last
+        good render. Raising here instead took the app down, and because
+        dismissing the crash dialog re-activates the window, it did so again on
+        the way out. A user-initiated :meth:`refresh` still reports failure."""
+        try:
+            if not self._repo.is_open():
+                return False
+            if self._freshness_token() == self._rendered_token:
+                return False
+            self.refresh()
+            return True
+        except sqlite3.Error:
+            logger.warning("Home activation refresh failed — keeping the last "
+                           "render", exc_info=True)
             return False
-        if self._freshness_token() == self._rendered_token:
-            return False
-        self.refresh()
-        return True
 
     def refresh(self, *, reuse_data: bool = False) -> None:
         """Rebuild the dashboard.

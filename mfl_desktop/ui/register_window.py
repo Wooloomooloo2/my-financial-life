@@ -8,6 +8,8 @@ Balance column hidden — see project-all-transactions-view in memory).
 from __future__ import annotations
 
 import calendar
+import logging
+import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -122,6 +124,8 @@ from mfl_desktop.ui.transfer_match_dialogs import (
     TransferMatchConfirmDialog,
     TransferMatchPickerDialog,
 )
+
+logger = logging.getLogger(__name__)
 
 # ADR-041: register date-window presets — (label, key). The chosen window is
 # turned into an inclusive lower bound on posted_date and pushed into the
@@ -597,15 +601,26 @@ class RegisterWindow(QMainWindow):
         unconditional rebuild cost ~450ms of synchronous work on the UI thread,
         which is what made closing a report feel like it stuck.
         ``refresh_if_stale`` keeps the guarantee (a real edit still redraws) and
-        makes the overwhelmingly common unchanged case free."""
+        makes the overwhelmingly common unchanged case free.
+
+        ADR-179: everything in here is *ambient* — the user asked for focus, not
+        for a database read — so a database error is logged and dropped rather
+        than allowed to escape. An uncaught exception in an activation handler
+        is uniquely bad: the crash dialog it raises re-activates this window when
+        dismissed, which fires this handler again, which crashes again. That is
+        exactly how one transient ``locking protocol`` error became three."""
         super().changeEvent(event)
         if event.type() == QEvent.ActivationChange and self.isActiveWindow():
-            self._refresh_schedules_cue()
-            # getattr-guarded: an ActivationChange can fire during construction
-            # before the stack exists.
-            stack = getattr(self, "_main_stack", None)
-            if stack is not None and stack.currentIndex() == 0:
-                self._home_view.refresh_if_stale()
+            try:
+                self._refresh_schedules_cue()
+                # getattr-guarded: an ActivationChange can fire during
+                # construction before the stack exists.
+                stack = getattr(self, "_main_stack", None)
+                if stack is not None and stack.currentIndex() == 0:
+                    self._home_view.refresh_if_stale()
+            except sqlite3.Error:
+                logger.warning("Activation refresh failed — leaving the window "
+                               "as it is", exc_info=True)
 
     # ── sidebar plumbing ──
 

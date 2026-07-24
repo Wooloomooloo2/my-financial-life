@@ -10,7 +10,9 @@ success or rollback() on failure.
 from __future__ import annotations
 
 import calendar
+import logging
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -23,6 +25,8 @@ from mfl_desktop.account_types import AccountTypeSpec, by_key
 from mfl_desktop.db.money import decimal_to_pence, pence_to_decimal
 from mfl_desktop.db.schema import bootstrap
 from mfl_desktop.rules_engine import rule_matches
+
+logger = logging.getLogger(__name__)
 
 # The one non-deletable category (ADR-010 §4). Seeded as id=1 in
 # 0001_initial.sql; serves as the deletion sink for every other category.
@@ -877,6 +881,13 @@ class Repository:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA synchronous = NORMAL")
+        # ADR-179: wait for a contended lock instead of failing instantly. The
+        # default busy timeout is zero, which turns any momentary overlap with
+        # another connection — the background price/FX workers open their own
+        # (ADR-035/044/116) — into an immediate "database is locked". Five
+        # seconds is far longer than any write this app makes and still short
+        # enough that a genuinely stuck lock surfaces as an error, not a hang.
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         # ADR-156: generation-keyed memo for compute_account_values, the single
         # most expensive derivation in the app and the one the UI recomputes
         # most often. See data_generation() for how staleness is detected.
@@ -913,12 +924,52 @@ class Repository:
         is a cheap backstop, not the guarantee. **Anything that writes through
         its own connection must call** :meth:`note_external_change` **on the main
         thread when it lands**, or callers will hold stale derived values.
+
+        Never raises (ADR-179). This is a *hint* — "is it worth redoing the
+        work?" — and a hint that cannot be read is not a reason to take the app
+        down. See :meth:`_data_version`.
         """
-        return (
-            self._conn.total_changes,
-            self._conn.execute("PRAGMA data_version").fetchone()[0],
-            self._ext_gen,
-        )
+        return (self._conn.total_changes, self._data_version(), self._ext_gen)
+
+    # How hard to try for PRAGMA data_version before giving up on it. SQLite's
+    # own WAL-index contention backoff works on this timescale, so a couple of
+    # short retries clears a momentary blip; 3 × 25ms is imperceptible on the
+    # UI thread even in the worst case.
+    _DATA_VERSION_TRIES = 3
+    _DATA_VERSION_RETRY_S = 0.025
+
+    def _data_version(self) -> Optional[int]:
+        """``PRAGMA data_version``, or ``None`` if it could not be read.
+
+        Unlike the other two generation sources this one runs SQL, so it can
+        fail for reasons that have nothing to do with our data: on 2026-07-24 it
+        raised ``sqlite3.OperationalError: locking protocol`` (SQLITE_PROTOCOL —
+        SQLite could not settle the WAL-index lock) on an app that had sat idle
+        overnight, and because the call site was a window-activation handler the
+        whole app came down with it (ADR-179).
+
+        So: retry briefly, and if it still won't read, degrade instead of
+        raising. Returning ``None`` *and* bumping ``_ext_gen`` makes the token
+        differ from whatever we last handed out, so every caller concludes "the
+        data may have moved" and redoes its work. That is the safe direction to
+        fail — the cost is a rebuild we might not have needed, not a stale
+        number on screen, and not a crash. If the connection really is
+        unusable, the caller's *real* query fails next and reports a real error
+        from a path the user actually asked for.
+        """
+        for attempt in range(self._DATA_VERSION_TRIES):
+            try:
+                return self._conn.execute("PRAGMA data_version").fetchone()[0]
+            except sqlite3.Error as exc:
+                if attempt + 1 < self._DATA_VERSION_TRIES:
+                    time.sleep(self._DATA_VERSION_RETRY_S)
+                    continue
+                logger.warning(
+                    "data_version unreadable (%s: %s) — assuming the data moved",
+                    type(exc).__name__, exc,
+                )
+        self._ext_gen += 1
+        return None
 
     def note_external_change(self) -> None:
         """Declare that a background thread wrote through its own connection, so
