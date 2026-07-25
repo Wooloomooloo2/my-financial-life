@@ -274,6 +274,11 @@ class InvestmentReturnsFilters:
     # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
     chart_split: tuple[int, ...] = field(default_factory=tuple)
     body_split: tuple[int, ...] = field(default_factory=tuple)
+    # Chart y-axis mode (ADR-181): True fits the baseline to the visible range
+    # so short windows show movement; False anchors at zero (each band's height
+    # is its true amount). A view preference — defaults on, and an old saved
+    # blob with no key auto-upgrades to True via _from_dict.
+    chart_fit: bool = True
     # ── round-trip helpers ──
 
     @classmethod

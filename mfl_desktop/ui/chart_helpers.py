@@ -200,6 +200,32 @@ def nice_ticks(vmax: float, target_count: int = 5) -> tuple[float, float]:
     return axis_max, step
 
 
+def nice_bounds(
+    vmin: float, vmax: float, target_count: int = 5,
+) -> tuple[float, float, float]:
+    """Return ``(axis_min, axis_max, step)`` bracketing ``[vmin, vmax]`` on
+    round numbers, for a chart whose baseline need **not** be zero.
+
+    Unlike :func:`nice_ticks` — which pins the floor at zero and only computes a
+    max — this rounds the *floor* down and the *ceiling* up to a step boundary
+    chosen from {1, 2, 5} × 10ⁿ, so a fitted axis lands on clean labels while
+    showing only the occupied range. Used by the Investment Returns chart's
+    "Fit" mode (ADR-181) to reclaim the dead space below a large cost basis.
+    """
+    if not (vmax > vmin):        # degenerate/flat — give a unit window to divide
+        vmax = vmin + 1.0
+    raw_step = (vmax - vmin) / max(target_count, 1)
+    mag = 10 ** math.floor(math.log10(raw_step))
+    step = mag
+    for m in (1, 2, 5, 10):
+        step = m * mag
+        if step >= raw_step:
+            break
+    axis_min = math.floor(vmin / step) * step
+    axis_max = math.ceil(vmax / step) * step
+    return axis_min, axis_max, step
+
+
 def fmt_currency(pounds: float, decimals: int = 0, symbol: str = "£") -> str:
     """``£1,234`` / ``£1,234.56`` — locale-free. ``symbol`` overrides the
     currency glyph for reports that convert to a chosen display currency.

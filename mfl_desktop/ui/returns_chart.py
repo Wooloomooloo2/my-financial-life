@@ -34,7 +34,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from mfl_desktop.ui.chart_helpers import nice_ticks
+from mfl_desktop.ui.chart_helpers import nice_bounds, nice_ticks
 import mfl_desktop.ui.chart_helpers as _ch
 from mfl_desktop.ui.ui_fonts import set_pt
 
@@ -65,6 +65,7 @@ class ReturnsChart(QWidget):
         self._any_fallback = False
         self._empty_message: Optional[str] = None
         self._x_positions: list[tuple[float, int]] = []
+        self._fit = True                 # y-axis fits the data unless toggled off
 
     # ── public ──
 
@@ -75,6 +76,14 @@ class ReturnsChart(QWidget):
         self._any_fallback = any_fallback
         self._empty_message = None
         self.update()
+
+    def set_fit(self, fit: bool) -> None:
+        """Toggle the y-axis between fit-to-data (True) and zero-anchored
+        (False), re-rendering in place. See :meth:`_y_range` (ADR-181)."""
+        fit = bool(fit)
+        if fit != self._fit:
+            self._fit = fit
+            self.update()
 
     def show_empty(self, message: str) -> None:
         self._points = []
@@ -117,6 +126,55 @@ class ReturnsChart(QWidget):
         dividends_top = realized_top + div
         return 0.0, cost_low, value_top, realized_top, dividends_top, cost
 
+    def _y_range(self) -> tuple[float, float, float]:
+        """The ``(ymin, ymax, ystep)`` for the current points and mode.
+
+        **Zero mode** (``_fit`` False) — the honest composition: floor pinned at
+        0 so each band's height is its true amount, dropping below only for a
+        realized loss. This is the all-time default and the original behaviour.
+
+        **Fit mode** (``_fit`` True, the default) — the floor is rounded *down*
+        to just below the lowest cost band, so the movement fills the panel on a
+        short window instead of being crushed against a 0→£2M axis (ADR-181).
+        It reduces to ~zero-anchored automatically when the window reaches back
+        to a near-empty portfolio (``data_lo ≈ 0``), so "Max" looks unchanged.
+        """
+        tops: list[float] = []
+        lows: list[float] = []
+        negs = [0.0]                    # how far any stack dips below zero (a realized loss)
+        for p in self._points:
+            _, cost_low, value_top, realized_top, dividends_top, _ = self._bounds(p)
+            tops.append(max(value_top, dividends_top))
+            lows.append(cost_low)
+            negs.append(min(realized_top, dividends_top, 0.0))
+        vmax = max(tops) if tops else 0.0
+        vneg = min(negs)                # <= 0
+
+        if not self._fit:
+            ymax, ystep = nice_ticks(vmax * 1.1 if vmax > 0 else 1.0)
+            ymin = 0.0
+            if vneg < 0 and ystep > 0:
+                steps_down = int((-vneg) / ystep) + 1
+                ymin = -steps_down * ystep
+            return ymin, ymax, ystep
+
+        # Fit: bracket [data_lo, data_hi] on round numbers with a little padding.
+        # The floor is the *lowest cost band top* across the window — the blue
+        # below it is the same solid base at every sample, the dead space the
+        # owner wanted reclaimed — dropping further only for a realized loss.
+        data_lo = min(lows) if lows else 0.0
+        if vneg < 0:
+            data_lo = min(data_lo, vneg)
+        data_hi = vmax
+        if data_hi <= data_lo:          # flat/degenerate — fall back to zero-anchored
+            ymax, ystep = nice_ticks(vmax * 1.1 if vmax > 0 else 1.0)
+            return 0.0, ymax, ystep
+        pad = (data_hi - data_lo) * 0.08
+        ymin, ymax, ystep = nice_bounds(data_lo - pad, data_hi + pad)
+        if vneg >= 0 and ymin < 0:      # don't invent negative space under all-positive data
+            ymin = 0.0
+        return ymin, ymax, ystep
+
     # ── painting ──
 
     def paintEvent(self, event) -> None:  # noqa: D401
@@ -134,29 +192,22 @@ class ReturnsChart(QWidget):
             return
 
         chart, legend = self._compute_rects()
-        # y-range: top from the tallest stack, bottom clamped at 0 unless a
-        # realized loss pushes a stack below zero.
-        tops = []
-        bottoms = [0.0]
-        for p in self._points:
-            _, _, value_top, realized_top, dividends_top, _ = self._bounds(p)
-            tops.append(max(value_top, dividends_top))
-            bottoms.append(min(realized_top, dividends_top, 0.0))
-        vmax = max(tops) if tops else 0.0
-        vmin = min(bottoms)
-        ymax, ystep = nice_ticks(vmax * 1.1 if vmax > 0 else 1.0)
-        ymin = 0.0
-        if vmin < 0:
-            # Extend the axis downward in whole steps to fit a realized loss.
-            steps_down = int((-vmin) / ystep) + 1 if ystep > 0 else 0
-            ymin = -steps_down * ystep
+        ymin, ymax, ystep = self._y_range()
 
         self._paint_gridlines(painter, chart, ymin, ymax, ystep)
         self._paint_y_labels(painter, chart, ymin, ymax, ystep)
         self._paint_x_labels(painter, chart)
+        # Clip the filled composition to the plot rect: in fit mode the floor
+        # sits above zero, so the cost band runs off the bottom and would
+        # otherwise paint over the x-axis labels (ADR-181).
+        painter.save()
+        painter.setClipRect(chart)
         self._paint_bands(painter, chart, ymin, ymax)
         self._paint_cost_line(painter, chart, ymin, ymax)
         self._paint_zero_baseline(painter, chart, ymin, ymax)
+        painter.restore()
+        if ymin > 0:
+            self._paint_axis_break(painter, chart)
         self._paint_legend(painter, legend)
         painter.end()
 
@@ -329,6 +380,25 @@ class ReturnsChart(QWidget):
         painter.setPen(pen)
         y = self._y_for(0.0, ymin, ymax, chart)
         painter.drawLine(int(chart.left()), int(y), int(chart.right()), int(y))
+
+    def _paint_axis_break(self, painter, chart) -> None:
+        """A small zig-zag at the foot of the y-axis, drawn only when fit mode
+        has lifted the floor above zero — the conventional 'axis is truncated'
+        cue, so a viewer doesn't read the clipped cost band as its full size
+        (ADR-181). The y-labels already read non-zero; this makes it obvious."""
+        pen = QPen(QColor(_ch.chart_axis_ink()))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        x = chart.left()
+        y0 = chart.bottom() - 1
+        w = 4.0
+        painter.drawPolyline(QPolygonF([
+            QPointF(x - w, y0),
+            QPointF(x + w, y0 - 4),
+            QPointF(x - w, y0 - 8),
+            QPointF(x + w, y0 - 12),
+        ]))
 
     def _paint_legend(self, painter, legend) -> None:
         font = QFont(painter.font())

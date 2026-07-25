@@ -188,8 +188,23 @@ class InvestmentReturnsWindow(QMainWindow):
         self._save_as_button.setProperty("mflVariant", "ghost")
         self._save_as_button.clicked.connect(self._on_save_as)
 
+        # ADR-181: Fit / Zero baseline toggle. Checked = fit the y-axis to the
+        # visible range so a short window shows movement; unchecked = the
+        # zero-anchored composition where each band's height is its true amount.
+        self._fit_button = QPushButton("Fit axis")
+        self._fit_button.setProperty("mflVariant", "ghost")
+        self._fit_button.setCheckable(True)
+        self._fit_button.setChecked(self._current_filters.chart_fit)
+        self._fit_button.setToolTip(
+            "Fit the chart's baseline to the visible range so short periods "
+            "show movement.\nUncheck to anchor at zero, where each band's "
+            "height is its true amount."
+        )
+        self._fit_button.toggled.connect(self._on_toggle_fit)
+
         self._page_header = PageHeader(show_rule=True)
         self._page_header.add_action(self._filter_button)
+        self._page_header.add_action(self._fit_button)
         self._page_header.add_action(QLabel("Display in:"))
         self._page_header.add_action(self._ccy_combo)
         self._page_header.add_action(self._save_button)
@@ -197,6 +212,7 @@ class InvestmentReturnsWindow(QMainWindow):
 
         # ── body: (chart over table) | summary ──
         self._chart = ReturnsChart()
+        self._chart.set_fit(self._current_filters.chart_fit)
 
         self._table = QTableWidget(0, len(_TABLE_HEADERS))
         self._table.setHorizontalHeaderLabels(_TABLE_HEADERS)
@@ -1044,11 +1060,31 @@ class InvestmentReturnsWindow(QMainWindow):
         if not accepted:
             return
         new_filters = dialog.values()
-        if new_filters is None or new_filters == self._current_filters:
+        if new_filters is None:
+            return
+        # The filter dialog doesn't manage the view-state fields (chart mode +
+        # splitter sizes), so carry them over rather than letting the dialog's
+        # constructed defaults reset them — chart_fit (ADR-181) and the splits
+        # (ADR-076).
+        new_filters = replace(
+            new_filters,
+            chart_fit=self._current_filters.chart_fit,
+            chart_split=self._current_filters.chart_split,
+            body_split=self._current_filters.body_split,
+        )
+        if new_filters == self._current_filters:
             return
         self._current_filters = new_filters
         self._mark_dirty()
         self._refresh()
+
+    def _on_toggle_fit(self, checked: bool) -> None:
+        """Flip the chart y-axis between fit and zero (ADR-181). A view
+        preference: re-render the chart in place (no recompute) and mark the
+        report dirty so a Save keeps the choice."""
+        self._current_filters = replace(self._current_filters, chart_fit=checked)
+        self._chart.set_fit(checked)
+        self._mark_dirty()
 
     # ── save / save-as / dirty state ──
 

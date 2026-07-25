@@ -159,6 +159,11 @@ QPushButton[mflVariant="ghost"] {{
 }}
 QPushButton[mflVariant="ghost"]:hover {{ background: {t("surface_alt")}; color: {t("text")}; }}
 QPushButton[mflVariant="ghost"]:pressed {{ background: {t("border")}; }}
+/* A *checkable* ghost button (e.g. the Investment Returns "Fit axis" toggle,
+   ADR-181) needs a visible on-state, mirroring the checked header tool-buttons
+   above — otherwise on and off look identical. */
+QPushButton[mflVariant="ghost"]:checked {{ background: {t("accent_subtle")}; color: {t("text")}; }}
+QPushButton[mflVariant="ghost"]:checked:hover {{ background: {t("accent_subtle")}; color: {t("text")}; }}
 
 /* ── App-header buttons (ADR-119) ──────────────────────────────────────────
    The flat menu/utility buttons that replace the OS menu bar + toolbar. They
