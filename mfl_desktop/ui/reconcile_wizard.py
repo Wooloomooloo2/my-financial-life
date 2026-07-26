@@ -251,6 +251,26 @@ class ReconcileWizard(QDialog):
         )
         layout.addWidget(self._include_cleared_check)
 
+        # Pending gate (ADR-179): pending rows are excluded by default (ADR-130,
+        # the June-variance fix). This opt-in adds pending rows that fall WITHIN
+        # the statement dates — for accounts kept by hand, where entries stay
+        # pending because no download ever confirms them. Date-bounded on
+        # purpose: only pending items plausibly on *this* statement, never
+        # next month's not-yet-real spending.
+        self._include_pending_check = QCheckBox(
+            "Include pending transactions within the statement dates"
+        )
+        self._include_pending_check.setToolTip(
+            "Off: pending (not-yet-at-the-bank) transactions can't be ticked.\n"
+            "On: also allow pending rows dated inside the statement period —\n"
+            "for hand-kept accounts with no download to confirm them.\n"
+            "Ticking one and closing the statement marks it reconciled."
+        )
+        self._include_pending_check.toggled.connect(
+            self._on_include_pending_toggled
+        )
+        layout.addWidget(self._include_pending_check)
+
         layout.addStretch(1)
 
         # Buttons.
@@ -453,6 +473,15 @@ class ReconcileWizard(QDialog):
         self._cleared_warning.setVisible(False)
         layout.addWidget(self._cleared_warning)
 
+        # Pending-but-not-shown rows in the period (ADR-179): the discovery
+        # nudge for hand-kept accounts, where everything stays pending. Hidden
+        # unless there are any and 'include pending' is off.
+        self._pending_warning = QLabel("")
+        self._pending_warning.setWordWrap(True)
+        tokens.themed(self._pending_warning, "color: " + _TOK_MUTED + "; font-size: 11px;")
+        self._pending_warning.setVisible(False)
+        layout.addWidget(self._pending_warning)
+
         # Table.
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
@@ -499,23 +528,30 @@ class ReconcileWizard(QDialog):
         # rows when viewing/resuming a closed one so they aren't hidden.
         sid = self._statement.id if self._statement is not None else None
         include_cleared = self._include_cleared_check.isChecked()
+        include_pending = self._include_pending_check.isChecked()
+        start_iso = _qdate_to_iso(self._start_date.date())
+        end_iso = _qdate_to_iso(self._end_date.date())
         rows = self._repo.list_reconcilable_txns(
             self._account.id, include_statement_id=sid,
             include_cleared=include_cleared,
+            include_pending=include_pending,
+            period=(start_iso, end_iso),
         )
 
         if auto_select:
             mode = self._auto_combo.currentData()
             if mode == "matched":
                 # Auto-tick the bank-confirmed rows that fall WITHIN the
-                # statement period — matched always, plus cleared when the user
-                # opted to include them (ADR-130). Rows outside the dates stay
-                # visible but deselected.
-                start_iso = _qdate_to_iso(self._start_date.date())
-                end_iso = _qdate_to_iso(self._end_date.date())
+                # statement period — matched always, plus cleared and/or pending
+                # when the user opted to include them (ADR-130 / 179). Rows
+                # outside the dates stay visible but deselected. (Pending are
+                # already date-bounded by the query, but the same date guard
+                # here keeps every branch consistent.)
                 eligible = {txn_status.MATCHED}
                 if include_cleared:
                     eligible.add(txn_status.CLEARED)
+                if include_pending:
+                    eligible.add(txn_status.PENDING)
                 preset = {
                     txn.id for txn in rows
                     if txn.status in eligible
@@ -552,6 +588,7 @@ class ReconcileWizard(QDialog):
             + (self._fmt_change_strip())
         )
         self._update_cleared_warning()
+        self._update_pending_warning()
         self._recompute()
 
     def _update_cleared_warning(self) -> None:
@@ -582,6 +619,40 @@ class ReconcileWizard(QDialog):
         """Re-gate the candidate set live when already on the check-off page.
         Preserves current ticks; newly-eligible cleared rows appear unticked
         (set the toggle on the balances page *before* Next to auto-select them)."""
+        if self._mode == "view" or not self._auto_selected_once:
+            return  # check-off page not built yet; the next Next reads the box
+        self._enter_checkoff(auto_select=False)
+
+    def _update_pending_warning(self) -> None:
+        """Surface any ``pending`` (not-yet-at-the-bank) rows in the period that
+        the gate is excluding, with a nudge to include them (ADR-179). This is
+        how a hand-kept account discovers the option — otherwise its rows, all
+        pending, would just never appear. Hidden when pending are already
+        included or there are none."""
+        if self._include_pending_check.isChecked():
+            self._pending_warning.setVisible(False)
+            return
+        start_iso = _qdate_to_iso(self._start_date.date())
+        end_iso = _qdate_to_iso(self._end_date.date())
+        n = self._repo.count_pending_in_period(
+            self._account.id, start_iso, end_iso,
+        )
+        if n <= 0:
+            self._pending_warning.setVisible(False)
+            return
+        it = "it" if n == 1 else "them"
+        self._pending_warning.setText(
+            f"⚠ {n} pending transaction{'' if n == 1 else 's'} in this period "
+            f"{'is' if n == 1 else 'are'} not shown — you entered {it} but the "
+            f"bank hasn't confirmed {it}. Tick “Include pending…” on the "
+            f"balances page to reconcile against {it}."
+        )
+        self._pending_warning.setVisible(True)
+
+    def _on_include_pending_toggled(self, _checked: bool) -> None:
+        """Re-gate the candidate set live when already on the check-off page
+        (ADR-179). Preserves current ticks; newly-eligible pending rows appear
+        unticked (set the toggle *before* Next to auto-select them)."""
         if self._mode == "view" or not self._auto_selected_once:
             return  # check-off page not built yet; the next Next reads the box
         self._enter_checkoff(auto_select=False)
@@ -700,6 +771,7 @@ class ReconcileWizard(QDialog):
         read_only = self._mode == "view"
         # The confidence gate can't change a closed statement's candidate set.
         self._include_cleared_check.setEnabled(not read_only)
+        self._include_pending_check.setEnabled(not read_only)
         self._add_txn_btn.setVisible(not read_only)
         self._edit_btn.setVisible(not read_only)
         self._save_btn.setVisible(not read_only)

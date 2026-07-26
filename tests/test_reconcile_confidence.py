@@ -7,7 +7,10 @@ statement. Phase 2 gates the candidate set by the confidence ladder:
 - ``matched`` (download-confirmed) is always eligible;
 - ``cleared`` (seen by eye, not downloaded) is eligible only with
   ``include_cleared`` — for banks that offer no download;
-- ``pending`` is **never** eligible;
+- ``pending`` is excluded by default, and eligible only with
+  ``include_pending`` **and** a ``period`` it falls inside (ADR-179) — for
+  hand-kept accounts whose rows never leave pending; the date bound is the
+  safety that keeps next month's not-yet-real spending un-reconcilable;
 - rows already ticked into the statement being resumed/viewed are always
   included so their ticks survive.
 
@@ -66,6 +69,49 @@ def test_include_cleared_adds_cleared_not_pending():
     assert ids["pending"] not in cand          # pending still never eligible
 
 
+def test_include_pending_in_period_adds_pending():
+    """ADR-179: include_pending + a period covering the pending row's date makes
+    it eligible — but only pending, not the still-gated cleared row."""
+    repo, acct, ids = _build()
+    cand = _cand(
+        repo, acct, include_pending=True, period=("2026-06-01", "2026-06-30"),
+    )
+    assert ids["pending"] in cand              # now reconcilable
+    assert ids["matched"] in cand              # still eligible on its own
+    assert ids["cleared"] not in cand          # cleared still needs its own flag
+
+
+def test_include_pending_requires_a_period():
+    """The ADR-130 safety default: without a period, no pending row is eligible
+    however the flag is set — pending is *only* ever date-bounded."""
+    repo, acct, ids = _build()
+    cand = _cand(repo, acct, include_pending=True, period=None)
+    assert cand == {ids["matched"]}, cand
+    assert ids["pending"] not in cand
+
+
+def test_include_pending_is_date_bounded():
+    """The key property distinguishing pending from matched/cleared: a pending
+    row OUTSIDE the statement dates stays excluded even with the flag on (the
+    June bug was next-month pending sneaking in). The pending row is 2026-06-10;
+    a July period must not surface it."""
+    repo, acct, ids = _build()
+    cand = _cand(
+        repo, acct, include_pending=True, period=("2026-07-01", "2026-07-31"),
+    )
+    assert ids["pending"] not in cand
+    assert ids["matched"] in cand              # any-date, unaffected by period
+
+
+def test_include_pending_and_cleared_together():
+    repo, acct, ids = _build()
+    cand = _cand(
+        repo, acct, include_cleared=True, include_pending=True,
+        period=("2026-06-01", "2026-06-30"),
+    )
+    assert cand == {ids["matched"], ids["cleared"], ids["pending"]}, cand
+
+
 def test_resumed_statement_ticks_always_included():
     """A row ticked into the statement being resumed shows regardless of status
     (else its tick would be lost) — even a pending one."""
@@ -94,6 +140,13 @@ def test_count_cleared_in_period():
     # the cleared row is dated 2026-06-11 (index 1 in STATUSES)
     assert repo.count_cleared_in_period(acct, "2026-06-01", "2026-06-30") == 1
     assert repo.count_cleared_in_period(acct, "2026-07-01", "2026-07-31") == 0
+
+
+def test_count_pending_in_period():
+    repo, acct, ids = _build()
+    # the pending row is dated 2026-06-10 (index 0 in STATUSES)
+    assert repo.count_pending_in_period(acct, "2026-06-01", "2026-06-30") == 1
+    assert repo.count_pending_in_period(acct, "2026-07-01", "2026-07-31") == 0
 
 
 def _run_all() -> int:
