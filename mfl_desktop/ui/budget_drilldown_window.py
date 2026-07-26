@@ -21,6 +21,7 @@ from typing import Optional
 from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QHeaderView,
     QLabel,
     QMainWindow,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mfl_desktop.import_engine.qif_actions import is_categorisable
 from mfl_desktop.db.repository import Repository
 from mfl_desktop.ui.delegates import (
     CategoryTypeaheadDelegate,
@@ -37,7 +39,9 @@ from mfl_desktop.ui.delegates import (
     StatusDelegate,
 )
 from mfl_desktop.ui.filter_proxy import TransactionFilterProxy
+from mfl_desktop.ui.investment_transaction_dialog import InvestmentTransactionDialog
 from mfl_desktop.ui.register_model import TransactionTableModel
+from mfl_desktop.ui.split_transaction_dialog import SplitTransactionDialog
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui import type_scale
 
@@ -80,6 +84,8 @@ class BudgetDrillDownWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self._repo = repo
+        self._ids = set(txn_ids)
+        self._display_ccy = display_ccy
         self.setWindowTitle(title)
         self.resize(1040, 600)
 
@@ -94,21 +100,30 @@ class BudgetDrillDownWindow(QMainWindow):
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
+        # The rows are an editable register (see module docstring). Plain cash
+        # rows edit inline via these triggers; split/investment rows are non-
+        # editable inline (register_model.flags), so a double-click opens their
+        # detail dialog instead — the same affordance the register and the
+        # shared drill-down (ADR-147) give.
+        self._table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
 
         self._model = TransactionTableModel(repo, account_id=None)
         self._proxy = _TxnIdFilterProxy(self._model)
         self._table.setModel(self._proxy)
         self._model.reload()
-        self._proxy.set_ids(txn_ids)
+        self._proxy.set_ids(self._ids)
         self._attach_delegates()
         self._apply_column_widths()
+        self._table.doubleClicked.connect(self._on_table_double_clicked)
 
-        count = len(txn_ids)
-        footer = QLabel(
-            f"{count} transaction" + ("s" if count != 1 else "")
-            + f"  ·  net {display_ccy} {net:,.2f}"
-        )
-        tokens.themed(footer, "color: {muted_strong}; padding: 8px 4px;")
+        self._footer = QLabel()
+        tokens.themed(self._footer, "color: {muted_strong}; padding: 8px 4px;")
+        self._refresh_footer()
+        footer = self._footer
 
         container = QWidget()
         v = QVBoxLayout(container)
@@ -171,3 +186,94 @@ class BudgetDrillDownWindow(QMainWindow):
             self._table.horizontalHeader().setSectionResizeMode(
                 col_index["memo"], QHeaderView.Stretch,
             )
+
+    # ── editing (matches the register / shared drill-down, ADR-147) ──
+
+    def _on_table_double_clicked(self, proxy_index) -> None:
+        """Route a double-click on a dialog-edited row to its detail dialog —
+        the same affordance the register offers. Split rows (ADR-051) open the
+        split dialog; investment rows (ADR-048) open the investment dialog.
+        Plain cash rows stay inline-editable (Qt's own double-click edit
+        trigger handles them; this is a no-op for them)."""
+        if not proxy_index.isValid():
+            return
+        source_index = self._proxy.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return
+        row = self._model.row_at(source_index.row())
+        if row.action is not None:
+            # ADR-086: the Category cell is inline-editable for cash income /
+            # expense actions — don't hijack its double-click to open the dialog.
+            col_name = self._model.COLUMNS[source_index.column()][1]
+            if col_name == "category_name" and is_categorisable(row.action):
+                return
+            self._open_investment_txn_dialog(row)
+        elif row.split_count:
+            self._open_split_txn_dialog(row)
+
+    def _open_split_txn_dialog(self, seed) -> None:
+        """Edit a split parent (ADR-051) in the split dialog, resolving the
+        account from the row, then reload the snapshot on save."""
+        account = self._repo.get_account_by_id(seed.account_id)
+        if account is None or account.family == "investment":
+            return  # splits aren't supported on investment accounts
+        if (
+            self._repo.is_reconciled(seed.id)
+            and not self._confirm_reconciled_edit(seed.id)
+        ):
+            return
+        dialog = SplitTransactionDialog(
+            self._repo, account, self._repo.list_categories_flat(),
+            seed=seed, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._reload_after_edit()
+
+    def _open_investment_txn_dialog(self, seed) -> None:
+        """Edit an investment transaction (ADR-048) in its dialog, resolving
+        the account from the row, then reload the snapshot on save."""
+        account = self._repo.get_account_by_id(seed.account_id)
+        if account is None:
+            return
+        if (
+            self._repo.is_reconciled(seed.id)
+            and not self._confirm_reconciled_edit(seed.id)
+        ):
+            return
+        dialog = InvestmentTransactionDialog(
+            self._repo, account, seed=seed, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._reload_after_edit()
+
+    def _confirm_reconciled_edit(self, _txn_id: int) -> bool:
+        """Gate an edit on a reconciled row (ADR-040)."""
+        resp = QMessageBox.question(
+            self, "Reconciled transaction",
+            "This transaction is reconciled to a statement.\n\n"
+            "Changing it may put that statement out of balance. Change anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        return resp == QMessageBox.Yes
+
+    def _reload_after_edit(self) -> None:
+        """Re-read the model after a dialog edit; the id set is fixed, so the
+        snapshot keeps showing exactly this cell's transactions."""
+        self._model.reload()
+        self._proxy.set_ids(self._ids)
+        self._refresh_footer()
+
+    def _refresh_footer(self) -> None:
+        """Recompute the count + net from the currently-shown rows — a plain
+        sum of their amounts, matching how `_drill` computed the cell net."""
+        net = Decimal("0.00")
+        for r in range(self._proxy.rowCount()):
+            source_index = self._proxy.mapToSource(self._proxy.index(r, 0))
+            net += self._model.row_at(source_index.row()).amount
+        count = self._proxy.rowCount()
+        self._footer.setText(
+            f"{count} transaction" + ("s" if count != 1 else "")
+            + f"  ·  net {self._display_ccy} {net:,.2f}"
+        )
