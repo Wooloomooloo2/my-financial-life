@@ -355,13 +355,22 @@ class RegisterWindow(QMainWindow):
         # without a dedicated combo. The proxy keeps its set_category_id()
         # capability for other callers; it's simply no longer driven here.
 
+        # ADR-180: the search box gets its own full-width row above the
+        # filter/action controls. Sharing one row with the Show/Status combos
+        # and the New Transaction / Schedules / Reconcile buttons squeezed it —
+        # on a narrow window down to a few characters ("Se…"), so you couldn't
+        # see what you were typing. A dedicated row keeps it readable at any width.
+        search.setMinimumWidth(280)
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(16, 12, 16, 0)
+        search_row.setSpacing(6)
+        search_row.addWidget(QLabel("Search:"))
+        search_row.addWidget(search, stretch=1)
+
         filter_bar = QHBoxLayout()
         # ADR-119: a roomier header strip above the register.
-        filter_bar.setContentsMargins(16, 12, 16, 10)
+        filter_bar.setContentsMargins(16, 10, 16, 10)
         filter_bar.setSpacing(6)
-        filter_bar.addWidget(QLabel("Search:"))
-        filter_bar.addWidget(search, stretch=2)
-        filter_bar.addSpacing(12)
         filter_bar.addWidget(QLabel("Show:"))
         filter_bar.addWidget(self._window_combo)
         filter_bar.addSpacing(12)
@@ -440,6 +449,7 @@ class RegisterWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
+        right_layout.addLayout(search_row)
         right_layout.addLayout(filter_bar)
         right_layout.addWidget(self._table)
 
