@@ -1,4 +1,4 @@
-"""Investment Income — per-security income & yield report (ADR-108).
+"""Investment Income — per-security income & yield report (ADR-108 / ADR-185).
 
 A non-modal QMainWindow for income / FIRE investing: for one investment account
 or the whole portfolio it shows, per security, the income received over the
@@ -20,19 +20,26 @@ Currency: the report aggregates into a user-chosen display currency, defaulting
 to the base currency (then GBP) — the ADR-055 FX path ADR-108 specified. Each
 account's monetary figures convert from its native currency via
 ``Repository.convert_amount`` (a note flags missing / fallback rates). Per-row
-Price and Currency stay native / informational.
+Price and Currency stay native / informational. The display-currency selector
+is a view preference — not persisted; it re-resolves to the default each time
+the report opens (like Investment Returns).
 
-Unlike the Investment Returns report this is a live analysis window — no saved
-type, no migration (ADR-108).
+Saved/loaded through the ADR-039 reports framework (ADR-185): ADR-108 shipped
+this as a live-only view, but that meant its filters, period and account
+selection vanished on close while every other report persisted them. It now
+carries the same top-bar / Save / Save As / dirty / close-prompt scaffolding as
+:class:`InvestmentReturnsWindow`, backed by
+:class:`~mfl_desktop.reports.filters.InvestmentIncomeFilters`.
 """
 from __future__ import annotations
 
 import calendar
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -42,6 +49,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -50,19 +58,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mfl_desktop.db.repository import Repository
+from mfl_desktop.db.repository import Repository, ReportRow
 from mfl_desktop.holdings import compute_returns
 from mfl_desktop import periods
+from mfl_desktop.reports.filters import (
+    InvestmentIncomeFilters, TYPE_INVESTMENT_INCOME,
+)
 from mfl_desktop.reports.investment_income import (
-    IncomeFilters, enumerate_months, income_by_month, income_by_security,
+    enumerate_months, income_by_month, income_by_security,
 )
 from mfl_desktop.ui import tokens
 from mfl_desktop.ui.investment_income_chart import IncomeBarChart
 from mfl_desktop.ui.investment_income_filter_dialog import (
     InvestmentIncomeFilterDialog,
 )
-from mfl_desktop.ui.page_header import PageHeader
+from mfl_desktop.ui.page_header import (
+    PageHeader,
+    report_folder_name,
+    report_heading,
+)
 from mfl_desktop.ui.chart_helpers import currency_symbol
+from mfl_desktop.ui.report_save import resolve_save_as
+from mfl_desktop.ui.save_report_as_dialog import SaveReportAsDialog
 from mfl_desktop.ui.stock_record_dialog import StockRecordDialog
 from mfl_desktop.ui.transactions_list_window import (
     TransactionsListWindow, TxnListFilter, drilldown_account_scope,
@@ -133,19 +150,37 @@ class _SortItem(QTableWidgetItem):
 
 
 class InvestmentIncomeWindow(QMainWindow):
-    """Investment Income report window — live, not saved (ADR-108)."""
+    """Investment Income report window — bare or saved-loaded (ADR-185)."""
 
-    def __init__(self, repo: Repository, *, parent=None) -> None:
+    reports_changed = Signal()
+
+    def __init__(
+        self,
+        repo: Repository,
+        *,
+        report: Optional[ReportRow] = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._repo = repo
+        self._report_id: Optional[int] = report.id if report is not None else None
+        self._loaded_name: Optional[str] = report.name if report is not None else None
+        self._loaded_folder_id: Optional[int] = (
+            report.folder_id if report is not None else None
+        )
+        self._dirty: bool = False
         self.resize(1200, 740)
-        self.setWindowTitle("Investment Income")
 
         # Reports include closed accounts by default (ADR-115) — their history
         # matters for long-term trends; the filter dialog can uncheck them.
         self._all_accounts = repo.list_investment_accounts(include_closed=True)
         self._accounts_by_id = {a.id: a for a in self._all_accounts}
-        self._filters = IncomeFilters.default()
+
+        self._filters: InvestmentIncomeFilters = (
+            InvestmentIncomeFilters.from_json(report.filters_json)
+            if report is not None
+            else InvestmentIncomeFilters.default()
+        )
 
         self._display_ccy = ""
         self._convert_missing = False
@@ -162,11 +197,19 @@ class InvestmentIncomeWindow(QMainWindow):
         self._ccy_combo.currentIndexChanged.connect(self._on_ccy_changed)
         self._populate_ccy_combo()
 
-        top_bar = PageHeader(show_rule=True)
-        top_bar.set_heading("Investment Income", "Dividends, interest & distributions")
-        top_bar.add_action(self._filter_button)
-        top_bar.add_action(QLabel("Display in:"))
-        top_bar.add_action(self._ccy_combo)
+        self._save_button = QPushButton("Save")
+        self._save_button.setProperty("mflVariant", "ghost")
+        self._save_button.clicked.connect(self._on_save)
+        self._save_as_button = QPushButton("Save As…")
+        self._save_as_button.setProperty("mflVariant", "ghost")
+        self._save_as_button.clicked.connect(self._on_save_as)
+
+        self._page_header = PageHeader(show_rule=True)
+        self._page_header.add_action(self._filter_button)
+        self._page_header.add_action(QLabel("Display in:"))
+        self._page_header.add_action(self._ccy_combo)
+        self._page_header.add_action(self._save_button)
+        self._page_header.add_action(self._save_as_button)
 
         # ── body: (chart over table) | summary ──
         self._chart = IncomeBarChart()
@@ -189,31 +232,57 @@ class InvestmentIncomeWindow(QMainWindow):
         for col in range(2, len(_TABLE_HEADERS)):
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
 
-        left_splitter = QSplitter(Qt.Vertical)
-        left_splitter.addWidget(self._chart)
-        left_splitter.addWidget(self._table)
-        left_splitter.setStretchFactor(0, 0)
-        left_splitter.setStretchFactor(1, 1)
-        left_splitter.setSizes([240, 460])
+        self._left_splitter = QSplitter(Qt.Vertical)
+        self._left_splitter.addWidget(self._chart)
+        self._left_splitter.addWidget(self._table)
+        self._left_splitter.setStretchFactor(0, 0)
+        self._left_splitter.setStretchFactor(1, 1)
 
         self._summary_panel = self._build_summary_panel()
 
-        body_splitter = QSplitter(Qt.Horizontal)
-        body_splitter.addWidget(left_splitter)
-        body_splitter.addWidget(self._summary_panel)
-        body_splitter.setStretchFactor(0, 1)
-        body_splitter.setStretchFactor(1, 0)
-        body_splitter.setSizes([900, 300])
+        self._body_splitter = QSplitter(Qt.Horizontal)
+        self._body_splitter.addWidget(self._left_splitter)
+        self._body_splitter.addWidget(self._summary_panel)
+        self._body_splitter.setStretchFactor(0, 1)
+        self._body_splitter.setStretchFactor(1, 0)
+
+        # Restore saved splitter sizes (ADR-076), else the window defaults.
+        _f = self._filters
+        self._left_splitter.setSizes(
+            list(_f.chart_split) if _f.chart_split else [240, 460]
+        )
+        self._body_splitter.setSizes(
+            list(_f.body_split) if _f.body_split else [900, 300]
+        )
+        self._left_splitter.splitterMoved.connect(lambda *_: self._mark_dirty())
+        self._body_splitter.splitterMoved.connect(lambda *_: self._mark_dirty())
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
-        central_layout.addWidget(top_bar)
-        central_layout.addWidget(body_splitter, stretch=1)
+        central_layout.addWidget(self._page_header)
+        central_layout.addWidget(self._body_splitter, stretch=1)
         self.setCentralWidget(central)
 
+        self._update_name_label()
+        self._update_save_buttons()
         self._refresh()
+
+    # ── constructors ──
+
+    @classmethod
+    def open_bare(cls, repo: Repository, parent=None) -> "InvestmentIncomeWindow":
+        return cls(repo, report=None, parent=parent)
+
+    @classmethod
+    def load_from_id(
+        cls, repo: Repository, report_id: int, parent=None,
+    ) -> Optional["InvestmentIncomeWindow"]:
+        report = repo.get_report(report_id)
+        if report is None or report.type != TYPE_INVESTMENT_INCOME:
+            return None
+        return cls(repo, report=report, parent=parent)
 
     # ── summary panel ──
 
@@ -338,8 +407,9 @@ class InvestmentIncomeWindow(QMainWindow):
     def _populate_ccy_combo(self) -> None:
         """Fill the display-currency selector from the currencies in use,
         defaulting to the base currency (then GBP, then the first in use).
-        Like the other reports (ADR-055), this is a view preference — it
-        re-resolves to the default each time the report opens."""
+        Like the other reports (ADR-055), this is a view preference — not
+        persisted in the saved filters; it re-resolves to the default each time
+        the report opens."""
         currencies = self._repo.list_distinct_currencies()
         base = self._repo.get_setting("base_currency")
         options = sorted(set(currencies) | ({base} if base else set()))
@@ -361,6 +431,8 @@ class InvestmentIncomeWindow(QMainWindow):
         self._ccy_combo.blockSignals(False)
 
     def _on_ccy_changed(self, *_a) -> None:
+        # Display currency is a view preference (not persisted, ADR-055), so a
+        # change re-renders without marking the report dirty.
         self._display_ccy = self._ccy_combo.currentData() or "GBP"
         self._refresh()
 
@@ -693,7 +765,129 @@ class InvestmentIncomeWindow(QMainWindow):
         if not accepted:
             return
         new_filters = dialog.values()
-        if new_filters is None or new_filters == self._filters:
+        if new_filters is None:
+            return
+        # The filter dialog doesn't manage the view-state fields (splitter
+        # sizes), so carry them over rather than letting the dialog's
+        # constructed defaults reset them (ADR-076).
+        new_filters = replace(
+            new_filters,
+            chart_split=self._filters.chart_split,
+            body_split=self._filters.body_split,
+        )
+        if new_filters == self._filters:
             return
         self._filters = new_filters
+        self._mark_dirty()
         self._refresh()
+
+    # ── save / save-as / dirty state ──
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+        self._update_save_buttons()
+
+    def _filters_to_persist(self) -> InvestmentIncomeFilters:
+        """Current filters with the live splitter sizes folded in (ADR-076)."""
+        return replace(
+            self._filters,
+            chart_split=tuple(self._left_splitter.sizes()),
+            body_split=tuple(self._body_splitter.sizes()),
+        )
+
+    def _on_save(self) -> None:
+        if self._report_id is None:
+            self._on_save_as()
+            return
+        try:
+            row = self._repo.update_report(
+                self._report_id,
+                filters_json=self._filters_to_persist().to_json(),
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Could not save report",
+                f"The report was not saved:\n\n{e}",
+            )
+            return
+        self._loaded_name = row.name
+        self._loaded_folder_id = row.folder_id
+        self._dirty = False
+        self._update_name_label()
+        self._update_save_buttons()
+        self.reports_changed.emit()
+
+    def _on_save_as(self) -> None:
+        dialog = SaveReportAsDialog(
+            self._repo,
+            initial_name=self._loaded_name,
+            initial_folder_id=self._loaded_folder_id,
+            title="Save As…" if self._report_id is not None else "Save report",
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        choice = dialog.values()
+        if choice is None:
+            return
+        try:
+            row = resolve_save_as(
+                self, self._repo, self._report_id, TYPE_INVESTMENT_INCOME,
+                choice.name, choice.folder_id, self._filters_to_persist().to_json(),
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, "Could not save report", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Could not save report",
+                f"The report was not saved:\n\n{e}",
+            )
+            return
+        if row is None:
+            return
+        self._report_id = row.id
+        self._loaded_name = row.name
+        self._loaded_folder_id = row.folder_id
+        self._dirty = False
+        self._update_name_label()
+        self._update_save_buttons()
+        self.reports_changed.emit()
+
+    def _update_name_label(self) -> None:
+        title, subtitle, window_title = report_heading(
+            "Investment Income", self._loaded_name,
+            folder_name=report_folder_name(self._repo, self._loaded_folder_id),
+            dirty=self._dirty,
+        )
+        self._page_header.set_heading(title, subtitle)
+        self.setWindowTitle(window_title)
+
+    def _update_save_buttons(self) -> None:
+        if self._report_id is None:
+            self._save_button.setText("Save As…")
+            self._save_button.setEnabled(True)
+            self._save_as_button.setVisible(False)
+        else:
+            self._save_button.setText("Save")
+            self._save_button.setEnabled(self._dirty)
+            self._save_as_button.setVisible(True)
+        self._update_name_label()
+
+    # ── close prompt ──
+
+    def closeEvent(self, event) -> None:
+        if self._report_id is not None and self._dirty:
+            reply = QMessageBox.question(
+                self,
+                "Unsaved changes",
+                f"‘{self._loaded_name}’ has unsaved changes. Save before closing?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save,
+            )
+            if reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if reply == QMessageBox.Save:
+                self._on_save()
+        super().closeEvent(event)

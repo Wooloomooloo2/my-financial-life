@@ -105,6 +105,7 @@ from mfl_desktop.reports.filters import (
     TYPE_CATEGORY_PAYEE,
     TYPE_INCOME_EXPENSE,
     TYPE_INCOME_OVER_TIME,
+    TYPE_INVESTMENT_INCOME,
     TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
     TYPE_SANKEY,
@@ -310,10 +311,6 @@ class RegisterWindow(QMainWindow):
         # reports_changed signal + WA_DeleteOnClose contract).
         self._saved_report_wins: dict[int, QMainWindow] = {}
         self._bare_report_wins: dict[str, QMainWindow] = {}
-        # ADR-108: the Investment Income view is a live analysis window (no
-        # saved type), kept singleton via this reference rather than the
-        # report-framework registries above.
-        self._investment_income_win: Optional[QMainWindow] = None
 
         search = QLineEdit()
         search.setPlaceholderText("Search payee, memo, amount, or date…")
@@ -3986,21 +3983,10 @@ class RegisterWindow(QMainWindow):
         self._open_bare_report(TYPE_SANKEY)
 
     def _on_investment_income_report(self) -> None:
-        """Reports menu → Investment Income (ADR-108). A live analysis window
-        (not a saved report), kept singleton — repeat clicks raise the existing
-        one rather than stacking duplicates."""
-        existing = self._investment_income_win
-        if existing is not None and existing.isVisible():
-            existing.raise_()
-            existing.activateWindow()
-            return
-        win = InvestmentIncomeWindow(self._repo, parent=self)
-        win.setAttribute(Qt.WA_DeleteOnClose)
-        win.destroyed.connect(
-            lambda _obj=None: setattr(self, "_investment_income_win", None)
-        )
-        self._investment_income_win = win
-        win.show()
+        """Reports menu → Investment Income. Opens the *bare* window; saved
+        reports open via the sidebar (ADR-108 shipped this live-only; ADR-185
+        made it a saved report so its filters persist like the others)."""
+        self._open_bare_report(TYPE_INVESTMENT_INCOME)
 
     def _open_bare_report(self, type_key: str) -> None:
         """Open an unattached report window for the given type. Singleton
@@ -4018,6 +4004,8 @@ class RegisterWindow(QMainWindow):
             win = IncomeExpenseWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_INVESTMENT_RETURNS:
             win = InvestmentReturnsWindow.open_bare(self._repo, parent=self)
+        elif type_key == TYPE_INVESTMENT_INCOME:
+            win = InvestmentIncomeWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_SANKEY:
             win = SankeyReportWindow.open_bare(self._repo, parent=self)
         elif type_key == TYPE_CATEGORY_PAYEE:
@@ -4068,6 +4056,10 @@ class RegisterWindow(QMainWindow):
             )
         elif report.type == TYPE_INVESTMENT_RETURNS:
             win = InvestmentReturnsWindow.load_from_id(
+                self._repo, report_id, parent=self,
+            )
+        elif report.type == TYPE_INVESTMENT_INCOME:
+            win = InvestmentIncomeWindow.load_from_id(
                 self._repo, report_id, parent=self,
             )
         elif report.type == TYPE_SANKEY:

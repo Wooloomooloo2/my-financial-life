@@ -12,7 +12,11 @@ Modal editor opened by the window's "Filter…" button. Three dimensions:
 
 The period/accounts plumbing + the OK/Cancel scaffold come from
 :class:`ReportFilterDialogBase` (ADR-084). Returns the chosen
-:class:`IncomeFilters` on Accepted via :py:meth:`values`.
+:class:`InvestmentIncomeFilters` on Accepted via :py:meth:`values`.
+
+The dialog only edits the filter-relevant fields (period, accounts, reinvest
+toggle); the window carries the view-state fields (splitter sizes, ADR-076)
+across a filter change itself, so they aren't reset to defaults here.
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from mfl_desktop.db.repository import AccountSummary, Repository
 from mfl_desktop.periods import INVESTMENT_PRESETS
-from mfl_desktop.reports.investment_income import IncomeFilters
+from mfl_desktop.reports.filters import InvestmentIncomeFilters
 from mfl_desktop.ui.report_filter_dialog_base import ReportFilterDialogBase
 
 
@@ -39,7 +43,7 @@ class InvestmentIncomeFilterDialog(ReportFilterDialogBase):
         self,
         repo: Repository,
         *,
-        current: IncomeFilters,
+        current: InvestmentIncomeFilters,
         accounts: list[AccountSummary],
         parent=None,
     ) -> None:
@@ -94,7 +98,7 @@ class InvestmentIncomeFilterDialog(ReportFilterDialogBase):
 
     def _on_accept(self) -> None:
         period_key, custom_start, custom_end = self._period_and_custom("1y")
-        self._result = IncomeFilters(
+        self._result = InvestmentIncomeFilters(
             period_key=period_key,
             custom_start=custom_start,
             custom_end=custom_end,

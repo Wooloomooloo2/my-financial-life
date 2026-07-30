@@ -40,6 +40,7 @@ TYPE_NET_WORTH = "net_worth"
 TYPE_INCOME_EXPENSE = "income_expense"
 TYPE_SANKEY = "sankey"
 TYPE_INVESTMENT_RETURNS = "investment_returns"
+TYPE_INVESTMENT_INCOME = "investment_income"
 TYPE_PAYEE = "payee"
 TYPE_CATEGORY_PAYEE = "category_payee"
 
@@ -50,6 +51,7 @@ REPORT_TYPES: tuple[str, ...] = (
     TYPE_INCOME_EXPENSE,
     TYPE_SANKEY,
     TYPE_INVESTMENT_RETURNS,
+    TYPE_INVESTMENT_INCOME,
     TYPE_PAYEE,
     TYPE_CATEGORY_PAYEE,
 )
@@ -61,6 +63,7 @@ REPORT_TYPE_LABELS: dict[str, str] = {
     TYPE_INCOME_EXPENSE:     "Income & Expense",
     TYPE_SANKEY:             "Sankey",
     TYPE_INVESTMENT_RETURNS: "Investment Returns",
+    TYPE_INVESTMENT_INCOME:  "Investment Income",
     TYPE_PAYEE:              "Payee",
     TYPE_CATEGORY_PAYEE:     "Category & Payee",
 }
@@ -299,6 +302,59 @@ class InvestmentReturnsFilters:
         return _from_dict(cls, raw)
 
 
+# ── Investment Income (ADR-108 / ADR-185) ───────────────────────────────────
+
+# The per-security income & yield report. Shipped as a live-only view in
+# ADR-108; ADR-185 promotes it to a saved report so its filters persist like
+# every other report, which is why its filter state moved here from
+# ``mfl_desktop.reports.investment_income`` (where a non-persisted ``IncomeFilters``
+# used to live). Reuses the investment period vocabulary (INVESTMENT_PRESETS):
+# "max" = first transaction → today; "custom" uses custom_start / custom_end.
+# The display currency is NOT persisted — like Investment Returns (ADR-055) it's
+# a view preference re-resolved to the base currency each time the report opens.
+
+
+@dataclass(frozen=True)
+class InvestmentIncomeFilters:
+    """Persisted filter set for a saved Investment Income report (ADR-185).
+
+    Empty ``account_ids`` means "all" — the whole portfolio — the same
+    convention as :class:`InvestmentReturnsFilters`. ``period_key`` defaults to
+    ``"1y"`` = trailing twelve months (TTM), the income-investing convention
+    from ADR-108. ``include_reinvested`` folds DRIP / reinvested distributions
+    (valued at quantity × price, ADR-089) in alongside cash dividends, coupons
+    and interest — default **on**, the natural expectation for an income report.
+    """
+
+    period_key: str = "1y"
+    custom_start: Optional[str] = None     # ISO date, only when period_key == "custom"
+    custom_end:   Optional[str] = None
+    account_ids: tuple[int, ...] = field(default_factory=tuple)
+    include_reinvested: bool = True
+
+    # Saved splitter sizes (ADR-076): chart-over-table + content-vs-summary.
+    chart_split: tuple[int, ...] = field(default_factory=tuple)
+    body_split: tuple[int, ...] = field(default_factory=tuple)
+    # ── round-trip helpers ──
+
+    @classmethod
+    def default(cls) -> "InvestmentIncomeFilters":
+        return cls()
+
+    def to_json(self) -> str:
+        return json.dumps(_asdict_for_json(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, blob: str) -> "InvestmentIncomeFilters":
+        raw = json.loads(blob) if blob else {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"InvestmentIncomeFilters: expected JSON object, got "
+                f"{type(raw).__name__}"
+            )
+        return _from_dict(cls, raw)
+
+
 # ── Sankey (ADR-056) ────────────────────────────────────────────────────────
 
 # Income → Total → Expenses flow. SANKEY_PERIOD_KEYS is imported at the top from
@@ -501,6 +557,7 @@ _FILTER_CLASSES: dict[str, type] = {
     TYPE_INCOME_OVER_TIME: IncomeOverTimeFilters,
     TYPE_INCOME_EXPENSE: IncomeExpenseFilters,
     TYPE_INVESTMENT_RETURNS: InvestmentReturnsFilters,
+    TYPE_INVESTMENT_INCOME: InvestmentIncomeFilters,
     TYPE_SANKEY: SankeyFilters,
     TYPE_PAYEE: PayeeReportFilters,
     TYPE_CATEGORY_PAYEE: CategoryPayeeFilters,

@@ -28,6 +28,7 @@ from mfl_desktop.reports.filters import (
     TYPE_CATEGORY_PAYEE,
     TYPE_INCOME_EXPENSE,
     TYPE_INCOME_OVER_TIME,
+    TYPE_INVESTMENT_INCOME,
     TYPE_INVESTMENT_RETURNS,
     TYPE_NET_WORTH,
     TYPE_SANKEY,
@@ -40,7 +41,8 @@ from mfl_desktop.reports.filters import (
 # toggle ranks spending by payee), so it's no longer offered here.
 _AVAILABLE_TYPES: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME, TYPE_INCOME_OVER_TIME, TYPE_INCOME_EXPENSE,
-    TYPE_INVESTMENT_RETURNS, TYPE_SANKEY, TYPE_CATEGORY_PAYEE,
+    TYPE_INVESTMENT_RETURNS, TYPE_INVESTMENT_INCOME, TYPE_SANKEY,
+    TYPE_CATEGORY_PAYEE,
 )
 _TYPE_ORDER: tuple[str, ...] = (
     TYPE_SPENDING_OVER_TIME,
@@ -48,6 +50,7 @@ _TYPE_ORDER: tuple[str, ...] = (
     TYPE_INCOME_EXPENSE,
     TYPE_CATEGORY_PAYEE,
     TYPE_INVESTMENT_RETURNS,
+    TYPE_INVESTMENT_INCOME,
     TYPE_SANKEY,
     TYPE_NET_WORTH,
 )

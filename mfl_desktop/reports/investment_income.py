@@ -16,30 +16,14 @@ window (``InvestmentIncomeWindow``) does that conversion.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
 from mfl_desktop.import_engine.qif_actions import is_income, is_reinvest
 
-
-@dataclass(frozen=True)
-class IncomeFilters:
-    """The Investment Income view's filter state.
-
-    Not persisted — ADR-108 ships no saved-report type (hence no migration);
-    the view is a live analysis window, so these live only for the session.
-    ``period_key`` defaults to ``"1y"`` = trailing twelve months (TTM).
-    ``account_ids`` empty == the whole portfolio.
-    """
-    period_key: str = "1y"
-    custom_start: Optional[str] = None
-    custom_end: Optional[str] = None
-    account_ids: tuple[int, ...] = ()
-    include_reinvested: bool = True
-
-    @classmethod
-    def default(cls) -> "IncomeFilters":
-        return cls()
+# The report's persisted filter state lives in mfl_desktop.reports.filters as
+# InvestmentIncomeFilters (ADR-185 promoted this view to a saved report). It
+# used to be a non-persisted ``IncomeFilters`` here; this module now stays pure
+# aggregation, exactly like the holdings engine it mirrors.
 
 
 def income_for_txn(t, multipliers: dict[int, float], include_reinvested: bool) -> float:
