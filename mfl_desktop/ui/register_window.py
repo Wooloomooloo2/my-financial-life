@@ -3248,9 +3248,15 @@ class RegisterWindow(QMainWindow):
 
         self._refresh_categories_view()
         self._refresh_sidebar_balances()
+        # ADR-186: re-confirmed rows are a subset of the skipped duplicates, so
+        # they only earn a clause when there are some — an ordinary re-import of
+        # a settled period repairs nothing and shouldn't say so.
+        refreshed = (
+            f" ({result.refreshed} re-confirmed)" if result.refreshed else ""
+        )
         self.statusBar().showMessage(
             f"Imported {result.imported} new into {pending.account_name} · "
-            f"{result.skipped} skipped · "
+            f"{result.skipped} skipped{refreshed} · "
             f"{result.matched} matched  "
             f"(status: {pending.suggested_status})",
             10_000,

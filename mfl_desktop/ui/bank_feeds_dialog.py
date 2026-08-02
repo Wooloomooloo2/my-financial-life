@@ -593,9 +593,17 @@ class BankFeedsDialog(QDialog):
                         token, pending.suggested_status, accepted)
                     self._repo.mark_feed_synced(account_id)
                     any_committed = any_committed or result.imported > 0
+                    # ADR-186: a feed re-delivers the same FITIDs every sync, so
+                    # the re-confirmed count is the interesting part of 'skipped'
+                    # here — name it only when it's non-zero.
+                    reconf = (
+                        f" ({result.refreshed} re-confirmed)"
+                        if result.refreshed else ""
+                    )
                     lines.append(
                         f"• {name}: {result.imported} new, "
-                        f"{result.skipped} skipped, {result.matched} matched.")
+                        f"{result.skipped} skipped{reconf}, "
+                        f"{result.matched} matched.")
                 except Exception as e:
                     self._repo.set_feed_status(account_id, "error")
                     lines.append(f"• {name}: ✗ {e}")

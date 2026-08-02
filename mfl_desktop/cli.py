@@ -107,7 +107,8 @@ def cmd_import(args) -> int:
         result = service.commit_import(token, status, accepted)
         print(
             f"Committed: imported={result.imported} "
-            f"skipped={result.skipped} matched={result.matched} "
+            f"skipped={result.skipped} refreshed={result.refreshed} "
+            f"matched={result.matched} "
             f"batch_id={result.batch_id}"
         )
         return 0

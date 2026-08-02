@@ -127,6 +127,10 @@ class ImportResult:
     imported: int
     skipped: int
     matched: int
+    # ADR-186: of the ``skipped`` exact-hash duplicates, how many re-confirmed
+    # the row they duplicate — i.e. carried it back up the ladder to 'matched'.
+    # A subset of ``skipped``, never an additional row.
+    refreshed: int = 0
 
 
 @dataclass(frozen=True)
@@ -578,11 +582,22 @@ class ImportService:
             # ADR-073: load the auto-categorisation rules once for this batch.
             rules = self._repo.list_rules()
 
-            imported = skipped = matched = 0
+            imported = skipped = matched = refreshed = 0
 
             for tx in pending.transactions:
                 if tx.status == "duplicate":
                     skipped += 1
+                    # ADR-186: the incoming copy is dropped, but the download is
+                    # still the bank confirming this transaction — so re-confirm
+                    # the row it duplicates (pending/cleared → 'matched', fill a
+                    # missing bank date) instead of walking past it. Without this
+                    # a row knocked back down the ladder after its first import
+                    # could never be repaired: every later download of that
+                    # period carries the same FITID and is skipped here.
+                    if self._repo.reconfirm_by_import_hash(
+                        pending.account_id, tx.import_hash, tx.date_iso,
+                    ):
+                        refreshed += 1
                     continue
 
                 if tx.status == "potential_match" and tx.fitid in accepted_match_fitids:
@@ -763,12 +778,13 @@ class ImportService:
 
         del self._pending[token]
         logger.info(
-            f"Import committed: {imported} new, {skipped} skipped, "
-            f"{matched} matched (batch id {batch_id})"
+            f"Import committed: {imported} new, {skipped} skipped "
+            f"({refreshed} re-confirmed), {matched} matched "
+            f"(batch id {batch_id})"
         )
         return ImportResult(
             batch_id=batch_id, imported=imported,
-            skipped=skipped, matched=matched,
+            skipped=skipped, matched=matched, refreshed=refreshed,
         )
 
     def _resolve_category_id(

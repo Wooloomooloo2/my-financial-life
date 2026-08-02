@@ -4734,6 +4734,49 @@ class Repository:
                 (memo, manual_id),
             )
 
+    def reconfirm_by_import_hash(
+        self,
+        account_id: int,
+        import_hash: str,
+        bank_posted_date: Optional[str] = None,
+    ) -> bool:
+        """Re-confirm the existing row an exact-hash duplicate points at (ADR-186).
+
+        Re-downloading a period already imported hands back the same FITID, so
+        the incoming copy is skipped — but the download is still the bank
+        confirming that transaction, exactly as it is on the merge path. Advance
+        that row up the confidence ladder (``pending``/``cleared`` → ``matched``,
+        ADR-130) and fill a *missing* ``bank_posted_date``. A ``reconciled`` row
+        is locked and left alone; a ``matched`` one is already at the rung.
+
+        Only the status and an absent bank date move — the amount, payee,
+        category, memo, and the user's spend date are never touched, so this
+        can't overwrite an edit made since the original import. An existing
+        ``bank_posted_date`` is kept (the duplicate carries the same date by
+        construction; first write wins).
+
+        Returns True when the status was actually advanced, so the caller can
+        report how many rows the re-import repaired. No commit — the caller owns
+        the transaction.
+        """
+        row = self._conn.execute(
+            "SELECT id, status FROM txn "
+            "WHERE account_id = ? AND import_hash = ? LIMIT 1",
+            (account_id, import_hash),
+        ).fetchone()
+        if row is None:
+            return False
+        advanced = row["status"] in ("pending", "cleared")
+        self._conn.execute(
+            "UPDATE txn SET "
+            "  status = CASE WHEN status IN ('pending', 'cleared') "
+            "                THEN 'matched' ELSE status END, "
+            "  bank_posted_date = COALESCE(bank_posted_date, ?) "
+            "WHERE id = ?",
+            (bank_posted_date, row["id"]),
+        )
+        return advanced
+
     # ── Import batch ──
 
     def create_import_batch(
