@@ -544,9 +544,11 @@ class ReconcileWizard(QDialog):
                 # Auto-tick the bank-confirmed rows that fall WITHIN the
                 # statement period — matched always, plus cleared and/or pending
                 # when the user opted to include them (ADR-130 / 179). Rows
-                # outside the dates stay visible but deselected. (Pending are
-                # already date-bounded by the query, but the same date guard
-                # here keeps every branch consistent.)
+                # outside the dates stay visible but deselected. That now covers
+                # pending stragglers from before the period too (ADR-187):
+                # they're offered, never auto-ticked, exactly like an old
+                # matched/cleared straggler (ADR-040) — a years-old pending row
+                # must be a deliberate tick, not a silent one.
                 eligible = {txn_status.MATCHED}
                 if include_cleared:
                     eligible.add(txn_status.CLEARED)
@@ -624,28 +626,27 @@ class ReconcileWizard(QDialog):
         self._enter_checkoff(auto_select=False)
 
     def _update_pending_warning(self) -> None:
-        """Surface any ``pending`` (not-yet-at-the-bank) rows in the period that
-        the gate is excluding, with a nudge to include them (ADR-179). This is
-        how a hand-kept account discovers the option — otherwise its rows, all
-        pending, would just never appear. Hidden when pending are already
-        included or there are none."""
+        """Surface the ``pending`` (not-yet-at-the-bank) rows the gate is
+        excluding, with a nudge to include them (ADR-179). This is how a
+        hand-kept account discovers the option — otherwise its rows, all
+        pending, would just never appear. Counts on or before the end date, so
+        it names exactly the rows ticking the box would surface — stragglers
+        from before the period included (ADR-187). Hidden when pending are
+        already included or there are none."""
         if self._include_pending_check.isChecked():
             self._pending_warning.setVisible(False)
             return
-        start_iso = _qdate_to_iso(self._start_date.date())
         end_iso = _qdate_to_iso(self._end_date.date())
-        n = self._repo.count_pending_in_period(
-            self._account.id, start_iso, end_iso,
-        )
+        n = self._repo.count_pending_reconcilable(self._account.id, end_iso)
         if n <= 0:
             self._pending_warning.setVisible(False)
             return
         it = "it" if n == 1 else "them"
         self._pending_warning.setText(
-            f"⚠ {n} pending transaction{'' if n == 1 else 's'} in this period "
-            f"{'is' if n == 1 else 'are'} not shown — you entered {it} but the "
-            f"bank hasn't confirmed {it}. Tick “Include pending…” on the "
-            f"balances page to reconcile against {it}."
+            f"⚠ {n} pending transaction{'' if n == 1 else 's'} dated on or "
+            f"before {end_iso} {'is' if n == 1 else 'are'} not shown — you "
+            f"entered {it} but the bank hasn't confirmed {it}. Tick “Include "
+            f"pending…” on the balances page to reconcile against {it}."
         )
         self._pending_warning.setVisible(True)
 

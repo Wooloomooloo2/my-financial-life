@@ -10188,18 +10188,22 @@ class Repository:
         ``include_cleared`` — for institutions that offer no download.
 
         **pending** rows (entered but not yet seen at the bank) are eligible
-        only when ``include_pending`` **and** they fall inside ``period``
-        (``(start_iso, end_iso)``, the statement dates) — ADR-179. The date
-        bound is what keeps this safe: next month's not-yet-real spending never
-        becomes reconcilable, only pending items plausibly on *this* statement.
-        Without a ``period`` no pending row is eligible, whatever the flag —
-        this is the ADR-130 default that stopped the June variance.
+        only when ``include_pending`` **and** they are dated on or before the
+        period's **end** date — ADR-179, amended by ADR-187. The *upper* bound
+        is the whole safety argument: next month's not-yet-real spending never
+        becomes reconcilable. There is deliberately no lower bound — a pending
+        row that missed the previous statement on a timing difference is a
+        straggler for *this* one, exactly as an old ``matched``/``cleared`` row
+        is (ADR-040); bounding it below stranded it until the user faked a
+        start date backwards. Without a ``period`` no pending row is eligible,
+        whatever the flag — this is the ADR-130 default that stopped the June
+        variance.
 
         Rows already ticked into ``include_statement_id`` (an open pass being
         resumed, or a closed statement being viewed) are **always** included
         regardless of status, so their ticks aren't lost. Matched/cleared are
         eligible at any date (old stragglers can still be caught — ADR-040);
-        only pending is date-bounded.
+        pending is bounded above only.
 
         The reported ``posted_date`` is the **bank posting date** where a
         download recorded one (``COALESCE(bank_posted_date, posted_date)``,
@@ -10208,7 +10212,7 @@ class Repository:
         so it ranges on the user's ``posted_date``. ``running_balance`` is 0."""
         sid = include_statement_id if include_statement_id is not None else -1
         pend_on = 1 if (include_pending and period is not None) else 0
-        pstart, pend = period if period is not None else ("", "")
+        _pstart, pend = period if period is not None else ("", "")
         cur = self._conn.execute(
             "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
             "       COALESCE(t.bank_posted_date, t.posted_date) AS posted_date, "
@@ -10226,11 +10230,11 @@ class Repository:
             "        OR (t.status = 'cleared' AND ?) "
             "        OR (t.status = 'pending' AND ? "
             "            AND COALESCE(t.bank_posted_date, t.posted_date) "
-            "                BETWEEN ? AND ?) "
+            "                <= ?) "
             "        OR t.id IN (SELECT txn_id FROM statement_txn "
             "                    WHERE statement_id = ?) ) "
             "ORDER BY COALESCE(t.bank_posted_date, t.posted_date) ASC, t.id ASC",
-            (account_id, 1 if include_cleared else 0, pend_on, pstart, pend, sid),
+            (account_id, 1 if include_cleared else 0, pend_on, pend, sid),
         )
         return [
             TransactionRow(
@@ -10261,18 +10265,19 @@ class Repository:
         ).fetchone()
         return int(row[0]) if row else 0
 
-    def count_pending_in_period(
-        self, account_id: int, date_from: str, date_to: str,
-    ) -> int:
-        """How many ``pending`` rows (entered, not yet seen at the bank) fall in
-        the statement period — surfaced as a reconcile nudge when pending rows
-        are excluded from the candidate set (ADR-179). A pending row has no bank
-        date, so this ranges on the user's ``posted_date``."""
+    def count_pending_reconcilable(self, account_id: int, date_to: str) -> int:
+        """How many ``pending`` rows (entered, not yet seen at the bank) the
+        ``include_pending`` gate is excluding — surfaced as a reconcile nudge
+        (ADR-179). Ranges on or before ``date_to`` so it mirrors
+        :meth:`list_reconcilable_txns` exactly: same rows counted as would
+        appear if the box were ticked, stragglers from before the period
+        included (ADR-187). A pending row has no bank date, so this falls back
+        to the user's ``posted_date``."""
         row = self._conn.execute(
             "SELECT COUNT(*) FROM txn "
             "WHERE account_id = ? AND status = 'pending' "
-            "  AND COALESCE(bank_posted_date, posted_date) BETWEEN ? AND ?",
-            (account_id, date_from, date_to),
+            "  AND COALESCE(bank_posted_date, posted_date) <= ?",
+            (account_id, date_to),
         ).fetchone()
         return int(row[0]) if row else 0
 

@@ -8,9 +8,11 @@ statement. Phase 2 gates the candidate set by the confidence ladder:
 - ``cleared`` (seen by eye, not downloaded) is eligible only with
   ``include_cleared`` — for banks that offer no download;
 - ``pending`` is excluded by default, and eligible only with
-  ``include_pending`` **and** a ``period`` it falls inside (ADR-179) — for
-  hand-kept accounts whose rows never leave pending; the date bound is the
-  safety that keeps next month's not-yet-real spending un-reconcilable;
+  ``include_pending`` **and** a ``period`` whose END date it falls on or before
+  (ADR-179, amended by ADR-187) — for hand-kept accounts whose rows never leave
+  pending; the *upper* bound is the safety that keeps next month's not-yet-real
+  spending un-reconcilable, while an earlier row is a straggler this statement
+  should catch;
 - rows already ticked into the statement being resumed/viewed are always
   included so their ticks survive.
 
@@ -90,17 +92,32 @@ def test_include_pending_requires_a_period():
     assert ids["pending"] not in cand
 
 
-def test_include_pending_is_date_bounded():
-    """The key property distinguishing pending from matched/cleared: a pending
-    row OUTSIDE the statement dates stays excluded even with the flag on (the
-    June bug was next-month pending sneaking in). The pending row is 2026-06-10;
-    a July period must not surface it."""
+def test_include_pending_excludes_future_but_not_stragglers():
+    """The bound that matters is the UPPER one: a pending row dated after the
+    period stays excluded even with the flag on (the June bug was next-month
+    pending sneaking in). An EARLIER one is a straggler and is offered — a
+    timing difference that missed the last statement belongs on this one
+    (ADR-187). The pending row is 2026-06-10."""
     repo, acct, ids = _build()
+    # July period: the June pending row is a straggler → now eligible
     cand = _cand(
         repo, acct, include_pending=True, period=("2026-07-01", "2026-07-31"),
     )
-    assert ids["pending"] not in cand
+    assert ids["pending"] in cand
     assert ids["matched"] in cand              # any-date, unaffected by period
+    # May period: the June pending row is in the FUTURE → still excluded
+    cand = _cand(
+        repo, acct, include_pending=True, period=("2026-05-01", "2026-05-31"),
+    )
+    assert ids["pending"] not in cand
+
+
+def test_include_pending_straggler_still_needs_the_flag():
+    """The straggler is only reachable through the opt-in — without the flag an
+    earlier pending row stays out, so the ADR-130 default is untouched."""
+    repo, acct, ids = _build()
+    cand = _cand(repo, acct, period=("2026-07-01", "2026-07-31"))
+    assert ids["pending"] not in cand
 
 
 def test_include_pending_and_cleared_together():
@@ -142,11 +159,14 @@ def test_count_cleared_in_period():
     assert repo.count_cleared_in_period(acct, "2026-07-01", "2026-07-31") == 0
 
 
-def test_count_pending_in_period():
+def test_count_pending_reconcilable_mirrors_the_gate():
+    """The warning must name exactly the rows ticking the box would surface, so
+    it counts on or before the end date — stragglers included (ADR-187)."""
     repo, acct, ids = _build()
     # the pending row is dated 2026-06-10 (index 0 in STATUSES)
-    assert repo.count_pending_in_period(acct, "2026-06-01", "2026-06-30") == 1
-    assert repo.count_pending_in_period(acct, "2026-07-01", "2026-07-31") == 0
+    assert repo.count_pending_reconcilable(acct, "2026-06-30") == 1
+    assert repo.count_pending_reconcilable(acct, "2026-07-31") == 1   # straggler
+    assert repo.count_pending_reconcilable(acct, "2026-05-31") == 0   # future
 
 
 def _run_all() -> int:
