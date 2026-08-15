@@ -10177,33 +10177,31 @@ class Repository:
 
     def list_reconcilable_txns(
         self, account_id: int, *, include_statement_id: Optional[int] = None,
-        include_cleared: bool = False, include_pending: bool = False,
-        period: Optional[tuple[str, str]] = None,
     ) -> list[TransactionRow]:
-        """Transactions eligible to appear on a reconciliation (ADR-130 / 179).
+        """Every transaction that can be ticked onto a reconciliation (ADR-189).
 
-        Eligibility follows the confidence ladder: **matched** rows (a download
-        confirmed them) are always eligible; **cleared** rows (seen at the bank
-        by eye but not download-confirmed) are eligible only when
-        ``include_cleared`` — for institutions that offer no download.
+        **Visibility is unconditional**: any row not already reconciled onto
+        some *other* statement is a candidate, whatever its place on the
+        confidence ladder — pending, cleared and matched alike, at any date.
+        A row you entered is a row you can tick off against the paper
+        statement in front of you; the app has no business hiding it.
 
-        **pending** rows (entered but not yet seen at the bank) are eligible
-        only when ``include_pending`` **and** they are dated on or before the
-        period's **end** date — ADR-179, amended by ADR-187. The *upper* bound
-        is the whole safety argument: next month's not-yet-real spending never
-        becomes reconcilable. There is deliberately no lower bound — a pending
-        row that missed the previous statement on a timing difference is a
-        straggler for *this* one, exactly as an old ``matched``/``cleared`` row
-        is (ADR-040); bounding it below stranded it until the user faked a
-        start date backwards. Without a ``period`` no pending row is eligible,
-        whatever the flag — this is the ADR-130 default that stopped the June
-        variance.
+        This reverses the candidate *gating* of ADR-130 / ADR-182, and
+        supersedes ADR-187, which relaxed that gate's lower bound so pending
+        stragglers from before the period could be caught. ADR-187 was right
+        that the lower bound protected nothing; ADR-189 goes further and finds
+        the upper bound was doing the wrong job too. The gating solved a real
+        problem — pending rows silently landing on a statement — with the wrong
+        instrument: it removed them from view, so an account whose rows are all
+        pending reconciled against an **empty list**. The protection now lives
+        where it belongs, in **pre-selection**: nothing below `matched` is ever
+        ticked *for* you, so a pending row reaches a statement only by a
+        deliberate click, and ADR-187's straggler is simply always listed with
+        no toggle to find. See the wizard's ``_preselect_statuses``.
 
         Rows already ticked into ``include_statement_id`` (an open pass being
-        resumed, or a closed statement being viewed) are **always** included
-        regardless of status, so their ticks aren't lost. Matched/cleared are
-        eligible at any date (old stragglers can still be caught — ADR-040);
-        pending is bounded above only.
+        resumed, or a closed statement being viewed) are included even though
+        they are reconciled, so their ticks aren't lost.
 
         The reported ``posted_date`` is the **bank posting date** where a
         download recorded one (``COALESCE(bank_posted_date, posted_date)``,
@@ -10211,8 +10209,6 @@ class Repository:
         dates rather than the user's spend date. A pending row has no bank date,
         so it ranges on the user's ``posted_date``. ``running_balance`` is 0."""
         sid = include_statement_id if include_statement_id is not None else -1
-        pend_on = 1 if (include_pending and period is not None) else 0
-        _pstart, pend = period if period is not None else ("", "")
         cur = self._conn.execute(
             "SELECT t.id, t.iri, t.account_id, a.name AS account_name, "
             "       COALESCE(t.bank_posted_date, t.posted_date) AS posted_date, "
@@ -10226,15 +10222,11 @@ class Repository:
             "LEFT JOIN payee p    ON p.id = t.payee_id "
             "LEFT JOIN category c ON c.id = t.category_id "
             "WHERE t.account_id = ? "
-            "  AND ( t.status = 'matched' "
-            "        OR (t.status = 'cleared' AND ?) "
-            "        OR (t.status = 'pending' AND ? "
-            "            AND COALESCE(t.bank_posted_date, t.posted_date) "
-            "                <= ?) "
+            "  AND ( t.status <> 'reconciled' "
             "        OR t.id IN (SELECT txn_id FROM statement_txn "
             "                    WHERE statement_id = ?) ) "
             "ORDER BY COALESCE(t.bank_posted_date, t.posted_date) ASC, t.id ASC",
-            (account_id, 1 if include_cleared else 0, pend_on, pend, sid),
+            (account_id, sid),
         )
         return [
             TransactionRow(
@@ -10251,35 +10243,12 @@ class Repository:
             for r in cur
         ]
 
-    def count_cleared_in_period(
-        self, account_id: int, date_from: str, date_to: str,
-    ) -> int:
-        """How many ``cleared`` rows (seen at the bank, not download-confirmed)
-        fall in the statement period — surfaced as a reconcile warning when
-        cleared rows are excluded from the candidate set (ADR-130)."""
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM txn "
-            "WHERE account_id = ? AND status = 'cleared' "
-            "  AND posted_date BETWEEN ? AND ?",
-            (account_id, date_from, date_to),
-        ).fetchone()
-        return int(row[0]) if row else 0
-
-    def count_pending_reconcilable(self, account_id: int, date_to: str) -> int:
-        """How many ``pending`` rows (entered, not yet seen at the bank) the
-        ``include_pending`` gate is excluding — surfaced as a reconcile nudge
-        (ADR-179). Ranges on or before ``date_to`` so it mirrors
-        :meth:`list_reconcilable_txns` exactly: same rows counted as would
-        appear if the box were ticked, stragglers from before the period
-        included (ADR-187). A pending row has no bank date, so this falls back
-        to the user's ``posted_date``."""
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM txn "
-            "WHERE account_id = ? AND status = 'pending' "
-            "  AND COALESCE(bank_posted_date, posted_date) <= ?",
-            (account_id, date_to),
-        ).fetchone()
-        return int(row[0]) if row else 0
+    # ``count_cleared_in_period`` and ``count_pending_reconcilable`` lived
+    # here to feed the reconcile wizard's "N transactions are not shown"
+    # nudges. ADR-189 stopped hiding those rows, so both counts — and the
+    # banners they fed — are gone rather than left behind to encode a rule
+    # that is now wrong. (ADR-187 had just renamed the pending one to make
+    # its count match the gate; the gate itself is what went.)
 
     def get_statement_tick_ids(self, statement_id: int) -> set[int]:
         """The set of txn ids currently ticked into a statement (open or

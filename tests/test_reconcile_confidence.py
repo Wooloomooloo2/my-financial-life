@@ -1,20 +1,23 @@
-"""Reconcile-by-confidence — Phase 2 candidate gating (ADR-130).
+"""Reconcile candidates — visibility is not selection (ADR-189).
 
-The June reconcile mess happened because *any* non-reconciled row (including
-``pending`` not-yet-at-the-bank purchases and duplicates) was tickable onto a
-statement. Phase 2 gates the candidate set by the confidence ladder:
+ADR-130 gated the *candidate set* by the confidence ladder: only ``matched``
+rows were listed, with ``cleared`` and ``pending`` behind opt-in flags (and
+pending additionally date-bounded, ADR-182 — later relaxed below by ADR-187
+so stragglers could be caught, which this ADR subsumes). That stopped pending rows drifting
+onto statements, but it did it by removing them from the screen — so an account
+whose rows are all pending reconciled against an **empty table**, with a banner
+explaining what it was refusing to show.
 
-- ``matched`` (download-confirmed) is always eligible;
-- ``cleared`` (seen by eye, not downloaded) is eligible only with
-  ``include_cleared`` — for banks that offer no download;
-- ``pending`` is excluded by default, and eligible only with
-  ``include_pending`` **and** a ``period`` whose END date it falls on or before
-  (ADR-179, amended by ADR-187) — for hand-kept accounts whose rows never leave
-  pending; the *upper* bound is the safety that keeps next month's not-yet-real
-  spending un-reconcilable, while an earlier row is a straggler this statement
-  should catch;
-- rows already ticked into the statement being resumed/viewed are always
-  included so their ticks survive.
+ADR-189 splits the two ideas apart:
+
+- **Listing** is unconditional. Every row not already reconciled onto some
+  *other* statement is a candidate, whatever its status and whatever its date.
+  Rows ticked into the statement being resumed/viewed are listed too, so their
+  ticks survive.
+- **Pre-selection** carries the safety. Nothing below ``matched`` is ever
+  ticked for you; a pending row reaches a statement only by a deliberate click.
+  That half is asserted in ``test_reconcile_preselection.py``, which drives the
+  real wizard.
 
 Qt-free — ``python3 tests/test_reconcile_confidence.py`` or under pytest.
 """
@@ -52,121 +55,109 @@ def _cand(repo, acct, **kw):
     return {t.id for t in repo.list_reconcilable_txns(acct, **kw)}
 
 
-# ── candidate gating ─────────────────────────────────────────────────────────
-
-
-def test_default_only_matched_eligible():
-    repo, acct, ids = _build()
-    cand = _cand(repo, acct)
-    assert cand == {ids["matched"]}, cand
-    # the June-mess guard: pending is never a candidate
-    assert ids["pending"] not in cand
-    assert ids["cleared"] not in cand
-
-
-def test_include_cleared_adds_cleared_not_pending():
-    repo, acct, ids = _build()
-    cand = _cand(repo, acct, include_cleared=True)
-    assert cand == {ids["matched"], ids["cleared"]}, cand
-    assert ids["pending"] not in cand          # pending still never eligible
-
-
-def test_include_pending_in_period_adds_pending():
-    """ADR-179: include_pending + a period covering the pending row's date makes
-    it eligible — but only pending, not the still-gated cleared row."""
-    repo, acct, ids = _build()
-    cand = _cand(
-        repo, acct, include_pending=True, period=("2026-06-01", "2026-06-30"),
-    )
-    assert ids["pending"] in cand              # now reconcilable
-    assert ids["matched"] in cand              # still eligible on its own
-    assert ids["cleared"] not in cand          # cleared still needs its own flag
-
-
-def test_include_pending_requires_a_period():
-    """The ADR-130 safety default: without a period, no pending row is eligible
-    however the flag is set — pending is *only* ever date-bounded."""
-    repo, acct, ids = _build()
-    cand = _cand(repo, acct, include_pending=True, period=None)
-    assert cand == {ids["matched"]}, cand
-    assert ids["pending"] not in cand
-
-
-def test_include_pending_excludes_future_but_not_stragglers():
-    """The bound that matters is the UPPER one: a pending row dated after the
-    period stays excluded even with the flag on (the June bug was next-month
-    pending sneaking in). An EARLIER one is a straggler and is offered — a
-    timing difference that missed the last statement belongs on this one
-    (ADR-187). The pending row is 2026-06-10."""
-    repo, acct, ids = _build()
-    # July period: the June pending row is a straggler → now eligible
-    cand = _cand(
-        repo, acct, include_pending=True, period=("2026-07-01", "2026-07-31"),
-    )
-    assert ids["pending"] in cand
-    assert ids["matched"] in cand              # any-date, unaffected by period
-    # May period: the June pending row is in the FUTURE → still excluded
-    cand = _cand(
-        repo, acct, include_pending=True, period=("2026-05-01", "2026-05-31"),
-    )
-    assert ids["pending"] not in cand
-
-
-def test_include_pending_straggler_still_needs_the_flag():
-    """The straggler is only reachable through the opt-in — without the flag an
-    earlier pending row stays out, so the ADR-130 default is untouched."""
-    repo, acct, ids = _build()
-    cand = _cand(repo, acct, period=("2026-07-01", "2026-07-31"))
-    assert ids["pending"] not in cand
-
-
-def test_include_pending_and_cleared_together():
-    repo, acct, ids = _build()
-    cand = _cand(
-        repo, acct, include_cleared=True, include_pending=True,
-        period=("2026-06-01", "2026-06-30"),
-    )
-    assert cand == {ids["matched"], ids["cleared"], ids["pending"]}, cand
-
-
-def test_resumed_statement_ticks_always_included():
-    """A row ticked into the statement being resumed shows regardless of status
-    (else its tick would be lost) — even a pending one."""
-    repo, acct, ids = _build()
-    # minimal open statement + a tick on the pending row
+def _open_statement(repo, acct, txn_ids=()):
     sid = repo._conn.execute(
         "INSERT INTO statement (iri, account_id, start_date, end_date, "
         " starting_balance_pence, ending_balance_pence, status) "
         "VALUES ('s:1', ?, '2026-06-01', '2026-06-30', 0, 0, 'open')",
         (acct,),
     ).lastrowid
-    repo._conn.execute(
-        "INSERT INTO statement_txn (statement_id, txn_id) VALUES (?, ?)",
-        (sid, ids["pending"]),
+    for tid in txn_ids:
+        repo._conn.execute(
+            "INSERT INTO statement_txn (statement_id, txn_id) VALUES (?, ?)",
+            (sid, tid),
+        )
+    return sid
+
+
+# ── listing is unconditional ────────────────────────────────────────────────
+
+
+def test_every_unreconciled_row_is_a_candidate():
+    """The headline of ADR-189, and the bug that prompted it: with no flags at
+    all, pending and cleared rows are still listed. Under ADR-130 this returned
+    the matched row alone, which is how a hand-kept account got an empty
+    reconcile screen."""
+    repo, acct, ids = _build()
+    cand = _cand(repo, acct)
+    assert ids["pending"] in cand
+    assert ids["cleared"] in cand
+    assert ids["matched"] in cand
+
+
+def test_pending_is_listed_at_any_date():
+    """Pending used to be visible only inside the statement dates. Nothing is
+    date-bounded now — the period governs pre-selection, not listing — so a
+    row dated well outside any plausible statement is still tickable."""
+    repo, acct, ids = _build()
+    far = repo.insert_transaction(
+        account_id=acct, posted_date="2027-11-30", amount=Decimal("-5.00"),
+        payee_id=None, category_id=1, status="pending", memo="",
+        import_hash=None, import_batch_id=None,
     )
+    assert far in _cand(repo, acct)
+
+
+def test_reconciled_rows_are_excluded():
+    """The one exclusion left: a row already tied to another statement is
+    settled and must not be re-tickable onto this one."""
+    repo, acct, ids = _build()
+    assert ids["reconciled"] not in _cand(repo, acct)
+
+
+def test_this_statements_rows_are_included_even_though_reconciled():
+    """Resuming or viewing a statement must show its own ticks, or closing it
+    again would silently drop them."""
+    repo, acct, ids = _build()
+    sid = _open_statement(repo, acct, [ids["reconciled"]])
     cand = _cand(repo, acct, include_statement_id=sid)
-    assert ids["pending"] in cand              # resumed tick preserved
-    assert ids["matched"] in cand              # still eligible on its own
+    assert ids["reconciled"] in cand
 
 
-# ── cleared-in-period count (the warning) ───────────────────────────────────
-
-
-def test_count_cleared_in_period():
+def test_other_statements_rows_stay_excluded():
+    """Scoping check: including *this* statement's rows must not drag in rows
+    reconciled onto a different one."""
     repo, acct, ids = _build()
-    # the cleared row is dated 2026-06-11 (index 1 in STATUSES)
-    assert repo.count_cleared_in_period(acct, "2026-06-01", "2026-06-30") == 1
-    assert repo.count_cleared_in_period(acct, "2026-07-01", "2026-07-31") == 0
+    other = _open_statement(repo, acct, [ids["reconciled"]])
+    mine = repo._conn.execute(
+        "INSERT INTO statement (iri, account_id, start_date, end_date, "
+        " starting_balance_pence, ending_balance_pence, status) "
+        "VALUES ('s:2', ?, '2026-07-01', '2026-07-31', 0, 0, 'open')",
+        (acct,),
+    ).lastrowid
+    assert other != mine
+    assert ids["reconciled"] not in _cand(repo, acct, include_statement_id=mine)
 
 
-def test_count_pending_reconcilable_mirrors_the_gate():
-    """The warning must name exactly the rows ticking the box would surface, so
-    it counts on or before the end date — stragglers included (ADR-187)."""
+def test_other_accounts_rows_are_excluded():
     repo, acct, ids = _build()
-    # the pending row is dated 2026-06-10 (index 0 in STATUSES)
-    assert repo.count_pending_reconcilable(acct, "2026-06-30") == 1
-    assert repo.count_pending_reconcilable(acct, "2026-07-31") == 1   # straggler
-    assert repo.count_pending_reconcilable(acct, "2026-05-31") == 0   # future
+    other_acct = repo.create_account(
+        name="Savings", type_key="savings", currency="GBP",
+    ).id
+    stray = repo.insert_transaction(
+        account_id=other_acct, posted_date="2026-06-15", amount=Decimal("-1.00"),
+        payee_id=None, category_id=1, status="pending", memo="",
+        import_hash=None, import_batch_id=None,
+    )
+    assert stray not in _cand(repo, acct)
+
+
+def test_the_gating_kwargs_are_gone():
+    """ADR-189 removed ``include_cleared`` / ``include_pending`` / ``period``
+    rather than leaving them as no-ops — a parameter that still accepts the old
+    argument but ignores it is worse than one that is gone, because calling
+    code keeps claiming a filter that no longer happens."""
+    repo, acct, ids = _build()
+    for kwargs in (
+        {"include_cleared": True},
+        {"include_pending": True},
+        {"period": ("2026-06-01", "2026-06-30")},
+    ):
+        try:
+            repo.list_reconcilable_txns(acct, **kwargs)
+        except TypeError:
+            continue
+        raise AssertionError(f"{kwargs} should no longer be accepted")
 
 
 def _run_all() -> int:
