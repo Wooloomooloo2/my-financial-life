@@ -2,20 +2,29 @@
 """Generate a realistic, fictional 12-month demo file for marketing/website/
 store screenshots — so we never screenshot the owner's real data.
 
-Builds ``mfl_public.mfl`` from scratch for a made-up UK persona ("Jordan
-Avery", GBP base) with a full financial picture: current + savings accounts,
-a rewards credit card paid off monthly, a Stocks & Shares ISA and a USD
-brokerage (multi-currency) and a workplace pension all with price history and
-dividends, a home and a car, twelve months of categorised income and spending
-with believable payees, regular transfers, and a populated budget.
+Builds a file from scratch for a made-up UK persona ("Jordan Avery", GBP base)
+with a full financial picture: current + savings accounts, a rewards credit
+card paid off monthly, a Stocks & Shares ISA and a USD brokerage
+(multi-currency) and a workplace pension all with price history, trading
+(buys *and* sells, so realized gains and losses show), dividends, a bond and an
+option, a home and a car and two loans, twelve months of categorised income and
+spending with believable payees, splits, rules, transfers, reconciled
+statements, scheduled bills, goals, saved reports and a populated budget.
 
 Deterministic (fixed RNG seed) so re-running produces the same file. Safe to
-re-run: it removes any existing mfl_public.mfl first. Run from the repo root:
+re-run: it removes any existing output file first. Run from the repo root:
 
-    python tools/make_public_demo.py
+    python tools/make_public_demo.py                      # → mfl_public.mfl
+    python tools/make_public_demo.py --out "docs/demo data.mfl" \
+        --today 2026-08-13                                # → a dated demo file
+
+``--today`` is the fixed "now" the whole file is generated around: the twelve
+months end in that month, statuses age off it, and the current month is left
+mid-stream so the app looks live rather than tidily complete.
 """
 from __future__ import annotations
 
+import argparse
 import calendar
 import random
 import sys
@@ -26,20 +35,47 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mfl_desktop.db.repository import Repository  # noqa: E402
+from mfl_desktop.reports.filters import (  # noqa: E402
+    default_filters, filters_to_json,
+)
 
-OUT = Path("mfl_public.mfl")
-TODAY = date(2026, 6, 21)            # fixed "now" so the file is reproducible
+DEFAULT_OUT = Path("mfl_public.mfl")
+DEFAULT_TODAY = date(2026, 6, 21)    # fixed "now" so the file is reproducible
+
+# Set by _configure() before anything else runs; module-level so the small
+# date/status helpers below can stay parameterless at every call site.
+OUT = DEFAULT_OUT
+TODAY = DEFAULT_TODAY
 RNG = random.Random(20260621)
-
-# 12 whole months ending in the current month: 2025-07 .. 2026-06
 MONTHS: list[tuple[int, int]] = []
-y, m = 2025, 7
-for _ in range(12):
-    MONTHS.append((y, m))
-    m += 1
-    if m > 12:
-        m = 1
-        y += 1
+
+
+def _configure(out: Path, today: date, count: int = 12) -> None:
+    """Pin the output path, the fixed 'now', the RNG seed and the month window
+    (``count`` whole months ending in ``today``'s month)."""
+    global OUT, TODAY, RNG, MONTHS
+    OUT, TODAY = out, today
+    RNG = random.Random(int(today.strftime("%Y%m%d")))
+    MONTHS = []
+    y, m = today.year, today.month
+    for _ in range(count - 1):        # walk back to the window's first month
+        m -= 1
+        if m < 1:
+            m = 12
+            y -= 1
+    for _ in range(count):
+        MONTHS.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+
+
+def nth_month(offset: int) -> tuple[int, int]:
+    """The (year, month) ``offset`` months into the window — negative indexes
+    from the end, so the seasonal one-offs below place themselves relative to
+    the window rather than to hard-coded 2025/2026 dates."""
+    return MONTHS[offset]
 
 
 def D(x) -> Decimal:
@@ -49,11 +85,28 @@ def D(x) -> Decimal:
 def day(yr: int, mo: int, dom: int) -> str:
     """A safe ISO date string clamped to the month's length, never in the
     future relative to TODAY (so 'this month' looks mid-stream, not complete)."""
-    dom = min(dom, calendar.monthrange(yr, mo)[1])
-    d = date(yr, mo, dom)
+    d = date.fromisoformat(fixed_day(yr, mo, dom))
     if d > TODAY:
         d = TODAY
     return d.isoformat()
+
+
+def fixed_day(yr: int, mo: int, dom: int) -> str:
+    """Like ``day()`` but NOT clamped to TODAY — for genuinely future dates
+    (a bond's maturity, an option's expiry) that must stay in the future."""
+    return date(yr, mo, min(dom, calendar.monthrange(yr, mo)[1])).isoformat()
+
+
+def mday(offset: int, dom: int) -> str:
+    """``day()`` for the month at ``offset`` in the twelve-month window."""
+    yr, mo = MONTHS[offset]
+    return day(yr, mo, dom)
+
+
+def floor4(x: float) -> float:
+    """Units truncated to 4dp — a contribution buys whole-ish units it can
+    actually afford, so the account's cash never dips a penny negative."""
+    return int(x * 10_000) / 10_000
 
 
 def jitter(base: float, pct: float = 0.12) -> Decimal:
@@ -63,15 +116,23 @@ def jitter(base: float, pct: float = 0.12) -> Decimal:
 
 
 def status_for(iso: str) -> str:
+    """Age a row up the confidence ladder (ADR-130 — stored lowercase), so all
+    four statuses are represented and the register's swatches have something to
+    show: recent rows are still pending, older ones climb to reconciled."""
     age = (TODAY - date.fromisoformat(iso)).days
     if age > 45:
-        return "Reconciled"
+        return "reconciled"
+    if age > 20:
+        return "matched"
     if age <= 4:
-        return "Pending"
-    return "Cleared"
+        return "pending"
+    return "cleared"
 
 
 def main() -> int:
+    if not MONTHS:                        # imported / called without the CLI
+        _configure(DEFAULT_OUT, DEFAULT_TODAY)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     for suffix in ("", "-wal", "-shm"):
         p = Path(str(OUT) + suffix)
         if p.exists():
@@ -91,11 +152,14 @@ def main() -> int:
     # Accounts --------------------------------------------------------------
     current = repo.create_account(
         name="Everyday Current", type_key="cash", currency="GBP",
-        opening_balance=D("7000.00"),
+        opening_balance=D("6000.00"),
     )
+    # The savings account is the persona's cash reserve *and* the source of the
+    # lump sums that get deployed into the ISA and the brokerage below — so the
+    # current account never has to carry a five-figure balance to fund them.
     emergency = repo.create_account(
         name="Emergency Fund", type_key="savings", currency="GBP",
-        opening_balance=D("15000.00"),
+        opening_balance=D("29000.00"),
     )
     holiday = repo.create_account(
         name="Holiday Pot", type_key="savings", currency="GBP",
@@ -117,13 +181,21 @@ def main() -> int:
         name="Workplace Pension", type_key="investment", currency="GBP",
         opening_balance=D("0.00"),
     )
-    repo.create_account(
+    home = repo.create_account(
         name="Home", type_key="property", currency="GBP",
         opening_balance=D("315000.00"),
     )
-    repo.create_account(
+    car = repo.create_account(
         name="Car", type_key="vehicle", currency="GBP",
         opening_balance=D("15500.00"),
+    )
+    # A closed account, so the sidebar's Closed group has something in it and
+    # the "show closed" toggles have an effect. Emptied into the current
+    # account at the start of the window, then closed (below, once its one
+    # transaction exists).
+    old_student = repo.create_account(
+        name="Old Student Account", type_key="cash", currency="GBP",
+        opening_balance=D("482.35"),
     )
 
     transfer_cat = repo.get_default_transfer_category_id()
@@ -151,9 +223,11 @@ def main() -> int:
 
     add_subs("Housing", ["Rent / Mortgage", "Council Tax", "Home insurance"])
     add_subs("Utilities", ["Energy", "Water", "Broadband & Mobile"])
-    add_subs("Transport", ["Fuel", "Public transport", "Car insurance"])
+    add_subs("Transport", ["Fuel", "Public transport", "Car insurance",
+                           "Car servicing"])
     add_subs("Dining out", ["Restaurants", "Coffee", "Takeaway"])
     add_subs("Subscriptions", ["Streaming", "Music", "Gym"])
+    add_subs("Shopping", ["Household", "Clothing", "Electronics"])
 
     def cat(name: str) -> int:
         return subs.get(name) or top(name)
@@ -168,7 +242,7 @@ def main() -> int:
         original_amount=D("230000.00"), principal_paid=D("23000.00"),  # owed 207k
         interest_rate=4.49, compounding="monthly", term_months=300,    # 25 yr
         payment=D("1150.00"),                                          # = old rent
-        start_date=day(2025, 7, 1), payment_day=1,
+        start_date=mday(0, 1), payment_day=1,
         track_mode="split", interest_source="payment",
         payment_account_id=current.id,
         interest_category_id=cat("Rent / Mortgage"),
@@ -177,7 +251,7 @@ def main() -> int:
         name="Car Finance", currency="GBP",
         original_amount=D("14000.00"), principal_paid=D("5200.00"),    # owed 8.8k
         interest_rate=6.9, compounding="monthly", term_months=60,
-        start_date=day(2025, 7, 15), payment_day=15,
+        start_date=mday(0, 15), payment_day=15,
         track_mode="split", interest_source="payment",
         payment_account_id=current.id,
         # interest_category left default → 'Interest ▸ Loan interest'
@@ -292,30 +366,61 @@ def main() -> int:
                   "Healthcare", "Boots Pharmacy")
 
         # Regular savings + investing transfers (just after payday)
-        move(current, emergency, day(yr, mo, 26), 300)
+        move(current, emergency, day(yr, mo, 26), 1000)  # regular saving + surplus sweep
         move(current, holiday, day(yr, mo, 26), 75)
         move(current, isa, day(yr, mo, 26), 300)
         move(current, pension, day(yr, mo, 25), 250)
 
-    # Seasonal one-offs ------------------------------------------------------
-    spend(card, day(2025, 8, 14), 720, "Holidays and travel",
+    # Emptying the old student account into the current one, month 0 — the one
+    # transaction it has before it is closed.
+    move(old_student, current, mday(0, 4), 482.35)
+
+    # Seasonal one-offs — placed by offset into the window, not by absolute
+    # date, so they stay inside the twelve months whatever --today is.
+    spend(card, mday(1, 14), 720, "Holidays and travel",
           "British Airways", "Summer flights")
-    spend(card, day(2025, 8, 16), 980, "Holidays and travel",
+    spend(card, mday(1, 16), 980, "Holidays and travel",
           "Booking.com", "Summer hotel")
-    spend(card, day(2025, 11, 21), 899, "Shopping", "Apple Store",
+    spend(card, mday(4, 21), 899, "Electronics", "Apple Store",
           "New iPhone")
-    spend(card, day(2025, 12, 18), 540, "Charity and gifts", "Amazon",
+    spend(card, mday(5, 18), 540, "Charity and gifts", "Amazon",
           "Christmas gifts")
-    spend(card, day(2026, 2, 13), 260, "Restaurants", "The Ivy",
+    spend(card, mday(7, 13), 260, "Restaurants", "The Ivy",
           "Anniversary dinner")
-    spend(current, day(2026, 4, 9), 1450, "Housing", "Handy Builders",
+    spend(current, mday(9, 9), 1450, "Housing", "Handy Builders",
           "Bathroom repair")
+
+    # ── Split transactions (ADR-051) ────────────────────────────────────────
+    # A shop that is genuinely two things, entered as one transaction with
+    # category lines — so the register shows "—Split—" rows and the reports
+    # attribute each line separately.
+    def split(acct, iso, payee, memo, lines):
+        total = sum((-abs(D(a)) for _, a in lines), D(0))
+        repo.insert_split_transaction(
+            account_id=acct.id, posted_date=iso, payee_id=pay(payee),
+            status=status_for(iso), memo=memo, total_amount=total,
+            lines=[(cat(c), c, -abs(D(a))) for c, a in lines],
+            import_hash=None, import_batch_id=None,
+        )
+
+    split(card, mday(2, 11), "Tesco", "Big shop + homeware",
+          [("Groceries", 96.40), ("Household", 38.75)])
+    split(card, mday(6, 7), "John Lewis", "Winter sale",
+          [("Clothing", 128.00), ("Household", 74.50)])
+    split(current, mday(8, 22), "Kwik Fit", "Annual service + MOT",
+          [("Car servicing", 245.00), ("Transport", 54.85)])
+    split(card, mday(10, 16), "Amazon", "Household + a gift",
+          [("Household", 42.30), ("Charity and gifts", 29.99),
+           ("Electronics", 61.00)])
+    repo.commit()
 
     # Pay the card off monthly (final pass, now that ALL charges — recurring +
     # seasonal — exist): on the 18th clear everything owed up to the 17th.
     # Charges dated later in the month roll to the next payment, and the latest
     # (current) month is left carrying a small live balance — realistic.
     for (yr, mo) in MONTHS:
+        if date(yr, mo, min(18, calendar.monthrange(yr, mo)[1])) > TODAY:
+            break            # the payment hasn't come round yet this month
         owed = -repo.balance_as_of(card.id, day(yr, mo, 17))   # negative = owed
         if owed > 0:
             move(current, card, day(yr, mo, 18), owed)
@@ -327,16 +432,40 @@ def main() -> int:
         "Vanguard S&P 500 UCITS ETF", "VUSA", "ETF")
     aapl = repo.get_or_create_security("Apple Inc", "AAPL", "Stock")
     msft = repo.get_or_create_security("Microsoft Corp", "MSFT", "Stock")
+    nvda = repo.get_or_create_security("NVIDIA Corp", "NVDA", "Stock")
+    tsla = repo.get_or_create_security("Tesla Inc", "TSLA", "Stock")
+    amzn = repo.get_or_create_security("Amazon.com Inc", "AMZN", "Stock")
+    smt = repo.get_or_create_security(
+        "Scottish Mortgage Investment Trust", "SMT", "Stock")
     glbl = repo.get_or_create_security(
         "L&G Global Equity Index Fund", "", "Fund")
 
-    def buy(acct, iso, sec, qty, price, ccy=None):
+    def buy(acct, iso, sec, qty, price, commission=None, memo=""):
         amt = (D(qty) * D(price)).quantize(D("0.01"))
+        fee = D(commission) if commission is not None else None
         repo.insert_transaction(
-            account_id=acct.id, posted_date=iso, amount=-amt,
+            account_id=acct.id, posted_date=iso,
+            amount=-(amt + (fee or D(0))),
             payee_id=None, category_id=top("Savings and investments"),
-            status=status_for(iso), memo="", action="Buy",
+            status=status_for(iso), memo=memo, action="Buy",
             security_id=sec, quantity=D(qty), price=D(price),
+            commission=fee,
+            import_hash=None, import_batch_id=None,
+        )
+
+    def sell(acct, iso, sec, qty, price, commission=None, memo=""):
+        # A disposal: cash in is qty × price MINUS the dealing fee. The holdings
+        # engine pops FIFO lots and books the realized gain/loss, so the
+        # Investment Returns report shows realized as well as unrealized.
+        amt = (D(qty) * D(price)).quantize(D("0.01"))
+        fee = D(commission) if commission is not None else None
+        repo.insert_transaction(
+            account_id=acct.id, posted_date=iso,
+            amount=amt - (fee or D(0)),
+            payee_id=None, category_id=top("Savings and investments"),
+            status=status_for(iso), memo=memo, action="Sell",
+            security_id=sec, quantity=D(qty), price=D(price),
+            commission=fee,
             import_hash=None, import_batch_id=None,
         )
 
@@ -345,7 +474,7 @@ def main() -> int:
         repo.insert_transaction(
             account_id=acct.id, posted_date=iso, amount=D("0.00"),
             payee_id=None, category_id=top("Savings and investments"),
-            status="Reconciled", memo="Opening holding", action="ShrsIn",
+            status="reconciled", memo="Opening holding", action="ShrsIn",
             security_id=sec, quantity=D(qty), price=D(price),
             import_hash=None, import_batch_id=None,
         )
@@ -384,16 +513,16 @@ def main() -> int:
             import_hash=None, import_batch_id=None,
         )
 
-    start = day(2025, 7, 1)
+    start = mday(0, 1)
     # Pre-existing holdings (the picture didn't start from zero)
     shares_in(isa, start, vwrl, 230, 96.50)
     shares_in(isa, start, vusa, 60, 78.20)
     shares_in(pension, start, glbl, 405, 178.00)   # ~£72k starting pot
 
     # Fund + stock up the USD brokerage at the start (cross-currency)
-    move(current, brokerage, start, 6000, to_amount=7680)   # ~1.28 GBP→USD
-    buy(brokerage, day(2025, 7, 2), aapl, 20, 191.00)
-    buy(brokerage, day(2025, 7, 2), msft, 8, 441.00)
+    move(emergency, brokerage, start, 6000, to_amount=7680)  # ~1.28 GBP→USD
+    buy(brokerage, mday(0, 2), aapl, 20, 191.00, commission=4.95)
+    buy(brokerage, mday(0, 2), msft, 8, 441.00, commission=4.95)
 
     # Monthly ISA + pension buying with the transferred cash; quarterly divs
     vwrl_px = 96.5
@@ -401,10 +530,11 @@ def main() -> int:
     for i, (yr, mo) in enumerate(MONTHS):
         vwrl_px = round(vwrl_px * (1 + RNG.uniform(0.002, 0.018)), 2)
         glbl_px = round(glbl_px * (1 + RNG.uniform(0.001, 0.016)), 2)
-        # ISA: the monthly £300 contribution buys VWRL
-        buy(isa, day(yr, mo, 27), vwrl, round(300 / vwrl_px, 4), vwrl_px)
+        # ISA: the monthly £300 contribution buys VWRL. Units are rounded DOWN
+        # so the trade never costs a penny more than the cash that funded it.
+        buy(isa, day(yr, mo, 27), vwrl, floor4(300 / vwrl_px), vwrl_px)
         # Pension: monthly £250 contribution buys the global fund
-        buy(pension, day(yr, mo, 26), glbl, round(250 / glbl_px, 4), glbl_px)
+        buy(pension, day(yr, mo, 26), glbl, floor4(250 / glbl_px), glbl_px)
         # Quarterly dividends
         if mo in (3, 6, 9, 12):
             dividend(isa, day(yr, mo, 20), vwrl, jitter(190, 0.1))
@@ -419,45 +549,81 @@ def main() -> int:
             )
 
     # A mid-year brokerage top-up
-    move(current, brokerage, day(2026, 1, 12), 1500, to_amount=1905)
-    buy(brokerage, day(2026, 1, 13), aapl, 4, 205.00)
-    buy(brokerage, day(2026, 1, 13), msft, 2, 462.00)
+    move(emergency, brokerage, mday(6, 12), 1500, to_amount=1905)
+    buy(brokerage, mday(6, 13), aapl, 4, 205.00, commission=4.95)
+    buy(brokerage, mday(6, 13), msft, 2, 462.00, commission=4.95)
+
+    # ── Trading: buys AND sells, so realized gains and losses have somewhere
+    # to come from. Six securities are round-tripped — three trimmed, one sold
+    # out at a profit, one sold out at a loss, one held to the end.
+    move(emergency, brokerage, mday(2, 4), 2400, to_amount=3070)
+    buy(brokerage, mday(2, 8), nvda, 20, 122.00, commission=4.95,
+        memo="Opening position")
+    move(emergency, brokerage, mday(3, 2), 2200, to_amount=2810)
+    buy(brokerage, mday(3, 6), tsla, 10, 248.00, commission=4.95)
+    move(emergency, brokerage, mday(4, 6), 600, to_amount=765)
+    buy(brokerage, mday(4, 10), amzn, 8, 182.00, commission=4.95)
+
+    # ISA: a UK investment trust, bought then sold out completely, plus a
+    # top-up of VUSA that is later trimmed back. Both funded by a lump sum out
+    # of savings, on top of the £300/month standing order.
+    move(emergency, isa, mday(1, 15), 4000)
+    buy(isa, mday(1, 19), smt, 400, 9.12, commission=5.95)
+    move(emergency, isa, mday(3, 10), 2200)
+    buy(isa, mday(3, 14), vusa, 25, 82.10, commission=5.95)
+
+    # Disposals
+    sell(brokerage, mday(7, 24), tsla, 10, 202.50, commission=4.95,
+         memo="Closed at a loss")                     # −£/$ realized loss
+    sell(isa, mday(8, 17), vusa, 20, 88.40, commission=5.95, memo="Trim")
+    sell(brokerage, mday(9, 14), aapl, 10, 214.50, commission=4.95,
+         memo="Top-slice")
+    sell(brokerage, mday(10, 12), msft, 3, 478.00, commission=4.95)
+    sell(brokerage, mday(10, 20), nvda, 12, 168.00, commission=4.95,
+         memo="Take some profit")
+    sell(isa, mday(11, 9), smt, 400, 10.85, commission=5.95,
+         memo="Sold out")
+    # Repatriate some of the proceeds — a cross-currency transfer the other way
+    move(brokerage, current, mday(10, 28), 3000, to_amount=2340)
 
     # ── A bond + an option in the brokerage (ADR-093) ───────────────────────
     aapl_bond = repo.get_or_create_security(
         "Apple Inc 4.2% 2032", "", "Bond",
         instrument_type="bond", price_multiplier=10.0, face_value=1000.0,
-        coupon_rate=4.2, maturity_date=day(2032, 9, 1), cusip="037833ET3",
+        coupon_rate=4.2, maturity_date=fixed_day(TODAY.year + 6, 9, 1),
+        cusip="037833ET3",
     )
+    call_expiry = fixed_day(TODAY.year + 1, 6, 18)
     aapl_call = repo.get_or_create_security(
-        "AAPL 18-Jun-2027 220 Call", "", "Option",
+        f"AAPL {date.fromisoformat(call_expiry).strftime('%d-%b-%Y')} 220 Call",
+        "", "Option",
         instrument_type="option", price_multiplier=100.0, contract_size=100.0,
-        underlying_symbol="AAPL", strike=220.0, expiry_date=day(2027, 6, 18),
+        underlying_symbol="AAPL", strike=220.0, expiry_date=call_expiry,
         option_type="call",
     )
     # Fund the positions, then buy: 5 bonds @ 99.50 (% of par) + £accrued, and
     # 2 call contracts @ 3.40 (premium/share, ×100 multiplier).
-    move(current, brokerage, day(2025, 8, 1), 4600, to_amount=5870)
+    move(emergency, brokerage, mday(1, 1), 4600, to_amount=5870)
     bond_principal = (D("5") * D("1000") * D("99.50") / D("100"))  # 4975.00
     bond_accrued = D("58.30")
     repo.insert_transaction(
-        account_id=brokerage.id, posted_date=day(2025, 8, 4),
+        account_id=brokerage.id, posted_date=mday(1, 4),
         amount=-(bond_principal + bond_accrued), payee_id=None,
-        category_id=top("Savings and investments"), status="Cleared", memo="",
+        category_id=top("Savings and investments"), status="cleared", memo="",
         action="Buy", security_id=aapl_bond, quantity=D("5"), price=D("99.50"),
         accrued_interest=bond_accrued, import_hash=None, import_batch_id=None,
     )
     repo.insert_transaction(
-        account_id=brokerage.id, posted_date=day(2025, 8, 4),
+        account_id=brokerage.id, posted_date=mday(1, 4),
         amount=-(D("2") * D("3.40") * D("100")), payee_id=None,
-        category_id=top("Savings and investments"), status="Cleared", memo="",
+        category_id=top("Savings and investments"), status="cleared", memo="",
         action="Buy", security_id=aapl_call, quantity=D("2"), price=D("3.40"),
         import_hash=None, import_batch_id=None,
     )
-    # Semi-annual coupons (4.2% on 5 × $1,000 face = $105 each), paid Mar 1 /
-    # Sep 1 — the accrued interest paid at purchase covered the stub period.
-    coupon(brokerage, day(2025, 9, 1), aapl_bond, 105)
-    coupon(brokerage, day(2026, 3, 1), aapl_bond, 105)
+    # Semi-annual coupons (4.2% on 5 × $1,000 face = $105 each) — the accrued
+    # interest paid at purchase covered the stub period before the first one.
+    coupon(brokerage, mday(2, 1), aapl_bond, 105)
+    coupon(brokerage, mday(8, 1), aapl_bond, 105)
     repo.commit()
 
     # ── Price history (monthly close per security) + FX ─────────────────────
@@ -476,6 +642,10 @@ def main() -> int:
     price_series(glbl, 178.0, 208.0, "GBP")
     price_series(aapl, 191.0, 219.0, "USD")
     price_series(msft, 441.0, 489.0, "USD")
+    price_series(nvda, 118.0, 176.0, "USD")
+    price_series(tsla, 252.0, 196.0, "USD")     # the one that went the wrong way
+    price_series(amzn, 178.0, 214.0, "USD")
+    price_series(smt, 9.05, 11.20, "GBP")
     # Bond quotes as a % of par; option as a premium/share. A couple of recent
     # marks so they carry a market value (×price_multiplier) in Net Worth.
     price_series(aapl_bond, 99.5, 101.1, "USD")
@@ -490,13 +660,16 @@ def main() -> int:
             rate=D(usdgbp), source="manual",
         )
 
-    # ── Budget (Jan–Dec 2026), populated so the Budget screen shows well ─────
+    # ── Budget (the current calendar year), populated so the Budget screen
+    # shows well — TODAY sits mid-budget, so past months have actuals and
+    # future months are still plan.
+    year = TODAY.year
     budget = repo.create_budget(
-        name="2026 Household Budget", start_month="2026-01",
+        name=f"{year} Household Budget", start_month=f"{year}-01",
         length_months=12, currency="GBP",
     )
     repo.set_budget_accounts(budget.id, [
-        (current.id, "balance"), (card.id, "available_credit"),
+        (current.id, "balance"), (card.id, "balance"),   # ADR-138
     ])
     plan = {
         "Salary": 3950, "Rent / Mortgage": 800, "Groceries": 360,
@@ -506,30 +679,121 @@ def main() -> int:
         "Streaming": 34, "Music": 11, "Gym": 42, "Car insurance": 58,
         "Home insurance": 21, "Shopping": 140, "Healthcare": 25,
         "Holidays and travel": 200, "Charity and gifts": 40,
+        "Household": 60, "Clothing": 55, "Electronics": 40,
+        "Car servicing": 30,
     }
     for name, amt in plan.items():
         cid = cat(name)
-        kind = "income" if name == "Salary" else "expense"
         line_id = repo.add_budget_line(budget_id=budget.id, category_id=cid)
-        repo.set_line_allocation(line_id, "2026-01", D(amt), scope="all")
+        repo.set_line_allocation(line_id, f"{year}-01", D(amt), scope="all")
 
     # Track the mortgage pay-off in the budget (ADR-095 → ADR-058 R4b goal).
     repo.create_loan_paydown_goal(mortgage_id, budget.id)
+
+    # A savings goal across two accounts (ADR-058 R4c) — the holiday pot pulls
+    # its weight alongside the emergency fund.
+    repo.add_budget_goal(
+        budget_id=budget.id, name="House deposit top-up", kind="savings",
+        currency="GBP", target_amount=D("25000.00"),
+        target_date=fixed_day(year + 2, 6, 30),
+        accounts=[(emergency.id, 7500), (holiday.id, 2500)],
+        today=TODAY.isoformat(),
+    )
 
     # Pull a couple of bills in (ADR-094) so the stepped burn-down shows
     # scheduled bills — these link the existing envelopes to a schedule.
     council_sched = repo.create_scheduled_txn(
         account_id=current.id, payee_name="City Council",
         category_id=cat("Council Tax"), estimated_amount=D("-168.00"),
-        cadence="monthly", anchor_date="2026-01-05",
+        cadence="monthly", anchor_date=f"{year}-01-05",
     )
     repo.add_bill_line_from_schedule(budget_id=budget.id, schedule_id=council_sched)
     gym_sched = repo.create_scheduled_txn(
         account_id=current.id, payee_name="PureGym",
         category_id=cat("Gym"), estimated_amount=D("-42.00"),
-        cadence="monthly", anchor_date="2026-01-05",
+        cadence="monthly", anchor_date=f"{year}-01-05",
     )
     repo.add_bill_line_from_schedule(budget_id=budget.id, schedule_id=gym_sched)
+
+    # …plus unlinked schedules on perimeter accounts, which ADR-173 projects
+    # into the burn-down purely by account membership.
+    for payee, category, amount, dom in (
+        ("Octopus Energy", "Energy", "-95.00", 8),
+        ("Netflix", "Streaming", "-15.99", 12),
+        ("Spotify", "Music", "-10.99", 12),
+        ("Thames Water", "Water", "-41.00", 8),
+    ):
+        repo.create_scheduled_txn(
+            account_id=current.id, payee_name=payee,
+            category_id=cat(category), estimated_amount=D(amount),
+            cadence="monthly", anchor_date=f"{year}-01-{dom:02d}",
+        )
+
+    # ── Auto-categorisation rules (ADR-065) ─────────────────────────────────
+    for pattern, kind, category in (
+        ("OCTOPUS ENERGY", "starts_with", "Energy"),
+        ("TFL TRAVEL", "contains", "Public transport"),
+        ("DELIVEROO", "contains", "Takeaway"),
+        ("PUREGYM", "contains", "Gym"),
+        ("TRAINLINE", "contains", "Public transport"),
+    ):
+        repo.create_rule(
+            pattern=pattern, pattern_kind=kind, match_field="payee_raw",
+            set_payee_id=None, set_category_id=cat(category), priority=100,
+        )
+
+    # ── Saved reports (ADR-039), in a folder so the sidebar has structure ────
+    folder = repo.create_report_folder("Monthly Review")
+    for name, type_key, fid in (
+        ("Where the money goes", "spending_over_time", folder.id),
+        ("Income over time", "income_over_time", folder.id),
+        ("Income vs expense", "income_expense", folder.id),
+        ("Cash flow", "sankey", folder.id),
+        ("Top payees", "payee", folder.id),
+        ("Who I spend it with", "category_payee", folder.id),
+        ("Portfolio returns", "investment_returns", None),
+        ("Investment income", "investment_income", None),
+    ):  # (net_worth has no saveable filter blob — it is a static report)
+        repo.create_report(
+            name=name, type_key=type_key, folder_id=fid,
+            filters_json=filters_to_json(default_filters(type_key)),
+        )
+
+    # ── Reconciliation history (ADR-040) ────────────────────────────────────
+    # Two closed statements on the current account, so the reconcile screen has
+    # a history and the register shows locked, reconciled rows.
+    for offset in (8, 9):
+        yr, mo = MONTHS[offset]
+        s_start, s_end = day(yr, mo, 1), day(yr, mo, 28)
+        rows = [
+            r for r in repo.list_transactions_for_account(current.id)
+            if s_start <= r.posted_date <= s_end
+        ]
+        if not rows:
+            continue
+        opening = repo.balance_as_of(current.id, s_start) - rows[0].amount
+        stmt = repo.create_statement(
+            account_id=current.id, start_date=s_start, end_date=s_end,
+            starting_balance=opening,
+            ending_balance=repo.balance_as_of(current.id, s_end),
+        )
+        repo.close_statement(
+            stmt.id, ticked_ids=[r.id for r in rows],
+            notes="Reconciled from the paper statement.",
+        )
+
+    # ── Sidebar folders, and the closed account ─────────────────────────────
+    groups = {
+        "Everyday": [current.id, card.id],
+        "Savings & Goals": [emergency.id, holiday.id],
+        "Investments": [isa.id, brokerage.id, pension.id],
+        "Property & Debt": [home.id, car.id, mortgage_id, car_loan_id],
+    }
+    for folder_name, account_ids in groups.items():
+        f = repo.create_folder(folder_name)
+        for aid in account_ids:
+            repo.set_account_folder(aid, f.id)
+    repo.close_account(old_student.id)
 
     # ── Summary ─────────────────────────────────────────────────────────────
     repo.checkpoint()
@@ -548,11 +812,37 @@ def main() -> int:
         print(f"  {a.name:<22} {a.currency} "
               f"{(conv if conv is not None else native):>12,.2f} GBP{tag}")
     ntxn = conn.execute("SELECT COUNT(*) c FROM txn").fetchone()["c"]
+    nsec = conn.execute("SELECT COUNT(*) c FROM security").fetchone()["c"]
+    nsell = conn.execute(
+        "SELECT COUNT(DISTINCT security_id) c FROM txn WHERE action = 'Sell'"
+    ).fetchone()["c"]
     print(f"\n  Net worth: £{nw:,.2f}   |   {ntxn} transactions   |   "
-          f"{len(MONTHS)} months")
+          f"{len(MONTHS)} months ({MONTHS[0][0]}-{MONTHS[0][1]:02d} → "
+          f"{MONTHS[-1][0]}-{MONTHS[-1][1]:02d})")
+    print(f"  {nsec} securities, {nsell} of them bought and sold")
     repo.close()
     return 0
 
 
+def cli(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT,
+        help=f"output .mfl path (default: {DEFAULT_OUT})",
+    )
+    ap.add_argument(
+        "--today", type=date.fromisoformat, default=DEFAULT_TODAY,
+        help="the fixed 'now' the twelve months end in "
+             f"(YYYY-MM-DD, default: {DEFAULT_TODAY.isoformat()})",
+    )
+    ap.add_argument(
+        "--months", type=int, default=12,
+        help="how many whole months of history to generate (default: 12)",
+    )
+    args = ap.parse_args(argv)
+    _configure(args.out, args.today, args.months)
+    return main()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())
