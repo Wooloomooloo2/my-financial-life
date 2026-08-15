@@ -199,6 +199,21 @@ def is_ancestor_or_self(
     return False
 
 
+def transfer_is_off_budget(kind: str, bucket: Optional[int]) -> bool:
+    """True for a transfer-kind txn with no budgeted ancestor — such a transfer
+    is excluded from the budget entirely (ADR-186).
+
+    A transfer counts toward the budget only when it is explicitly categorised
+    into a category that is in the budget setup (i.e. `bucket` — the result of
+    :func:`nearest_budgeted_ancestor` — is not None). An uncategorised or
+    off-plan transfer is an internal money movement, not budget activity, so it
+    never lands in a synthetic Unbudgeted row. This is the single source of
+    truth for the rule; the matrix and the drill-down both consult it so the
+    Transfers subtotal and its drill agree. Reverses the ADR-024 default that
+    every cross-perimeter transfer had to appear in the budget."""
+    return kind == "transfer" and bucket is None
+
+
 def _round2(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
@@ -509,13 +524,19 @@ def compute_matrix(
         mi = month_index.get(txn.posted_date[:7])
         if mi is None:
             continue
-        if nearest_budgeted_ancestor(
+        bucket = nearest_budgeted_ancestor(
             txn.category_id, parent_map, budgeted_ids,
-        ) is not None:
+        )
+        if bucket is not None:
             continue
         section_kind = kind_map.get(txn.category_id, "expense")
         if section_kind not in unbudg:
             section_kind = "expense"
+        # ADR-186: an off-budget transfer isn't budget activity — it never
+        # forms an Unbudgeted Transfers row (only explicitly-budgeted transfer
+        # categories appear in the Transfers section).
+        if transfer_is_off_budget(section_kind, bucket):
+            continue
         unbudg[section_kind][mi] += txn.amount
 
     for kind in _SECTION_ORDER:

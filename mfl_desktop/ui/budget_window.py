@@ -1440,9 +1440,21 @@ class BudgetWindow(QMainWindow):
                     target_cat, bucket, parent_map,
                 )
             elif mode == "unbudgeted":
-                keep = bucket is None and kind_map.get(t.category_id) == section_kind
+                tkind = kind_map.get(t.category_id)
+                keep = (
+                    bucket is None and tkind == section_kind
+                    # ADR-186: an off-budget transfer never forms an Unbudgeted
+                    # row, so it must not appear in that row's drill either.
+                    and not bc.transfer_is_off_budget(tkind, bucket)
+                )
             else:  # section — everything in this kind, this month
-                keep = kind_map.get(t.category_id) == section_kind
+                tkind = kind_map.get(t.category_id)
+                keep = (
+                    tkind == section_kind
+                    # ADR-186: the Transfers subtotal excludes off-budget
+                    # transfers, so its drill must too (keeps them reconciled).
+                    and not bc.transfer_is_off_budget(tkind, bucket)
+                )
             if keep:
                 ids.add(t.id)
                 net += t.amount
