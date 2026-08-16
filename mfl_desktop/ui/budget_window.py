@@ -1277,6 +1277,12 @@ class BudgetWindow(QMainWindow):
     def _on_edit_allocation(
         self, line_id: int, month: str, amount: Decimal,
     ) -> bool:
+        # ADR-191: the matrix is editable, so a cell editor left open at quit
+        # commits into a closed Repository during teardown. Decline before the
+        # scope prompt — putting a modal question on screen while the app is
+        # shutting down would be worse than losing the half-typed figure.
+        if not self._repo.is_open():
+            return False
         # parent=None on the prompt too — same cascade-close avoidance (ADR-058).
         scope = _ask_copy_forward_scope(None, _fmt_month(month))
         if scope is None:

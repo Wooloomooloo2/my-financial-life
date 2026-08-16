@@ -270,6 +270,19 @@ class TransactionTableModel(QAbstractTableModel):
     def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
         if not index.isValid() or role != Qt.EditRole:
             return False
+        # ADR-191: an edit can arrive AFTER the Repository has been closed.
+        # Quitting with a cell editor open tears the view down, and Qt commits
+        # the open editor on the way out — delegate.setModelData → setData →
+        # here, with a dead connection. Same shape as the ADR-109 follow-up's
+        # shutdown-time activate-refresh, same guard: decline the write rather
+        # than raise out of a Qt virtual, where the exception surfaces as
+        # "Error calling Python override of QAbstractTableModel::setData".
+        # RegisterWindow commits open editors before closing, so a genuine
+        # in-flight edit lands; this is the backstop for every other teardown
+        # order (a queued event, a secondary window, a delegate that commits
+        # late).
+        if not self._repo.is_open():
+            return False
         col_name = self.COLUMNS[index.column()][1]
         if not self.COLUMNS[index.column()][2]:
             return False

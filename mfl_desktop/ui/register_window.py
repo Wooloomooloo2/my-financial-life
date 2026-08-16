@@ -586,11 +586,32 @@ class RegisterWindow(QMainWindow):
         self._snapshot_timer.stop()
         self._flush_and_close()
 
+    def _commit_open_editors(self) -> None:
+        """Commit any cell editor that is still open, while the Repository is
+        still usable (ADR-191).
+
+        Quitting mid-edit tears the view down, and Qt commits the open editor
+        during teardown — after ``_flush_and_close`` has closed the connection,
+        which raised ``Cannot operate on a closed database`` out of
+        ``setModelData``. Clearing focus makes the delegate's own event filter
+        commit the editor *now*, in the ordinary way, so the edit is saved
+        rather than dropped and the crash never has a chance to happen.
+
+        Best-effort: the models also refuse writes on a closed Repository, so
+        anything that commits later than this is declined rather than fatal."""
+        try:
+            focused = QApplication.focusWidget()
+            if focused is not None:
+                focused.clearFocus()
+        except Exception:      # noqa: BLE001 — never block a quit
+            logger.debug("Could not commit open editors on close", exc_info=True)
+
     def _flush_and_close(self) -> None:
         """Final backup → WAL checkpoint → close, guarded so it runs at most
         once. Best-effort throughout."""
         if not self._repo.is_open():
             return
+        self._commit_open_editors()
         snapshots.maybe_snapshot(self._repo)
         self._repo.checkpoint()
         self._repo.close()
