@@ -2559,6 +2559,8 @@ class RegisterWindow(QMainWindow):
         sec_ids: set[int] = set()
         a_sec_row = None
         split_parent_ids: list[int] = []        # ADR-051
+        paired_ids: list[int] = []              # ADR-190: already a transfer
+        paired_accounts: dict[int, int] = {}    # txn id → its own account
         for proxy_idx in self._table.selectionModel().selectedRows():
             src = self._proxy.mapToSource(proxy_idx)
             if not src.isValid():
@@ -2569,6 +2571,9 @@ class RegisterWindow(QMainWindow):
                 a_sec_row = r
             if r.split_count:
                 split_parent_ids.append(r.id)
+            if r.transfer_id is not None:
+                paired_ids.append(r.id)
+                paired_accounts[r.id] = r.account_id
         if len(sec_ids) == 1 and a_sec_row is not None:
             security_context = (
                 a_sec_row.security_id,
@@ -2649,20 +2654,61 @@ class RegisterWindow(QMainWindow):
             new_category_id is not None
             and self._category_kind(new_category_id) == "transfer"
         ):
+            # ADR-190: a row that is ALREADY one half of a transfer keeps the
+            # pairing it has. Moving it from one transfer category to another
+            # is a recategorisation, not a re-pairing, so there is no second
+            # side to ask about — which is exactly what the inline single-row
+            # category edit has always done (it returns early on transfer_id).
+            # Only rows with no partner yet go through the destination flow.
+            paired_set = set(paired_ids)
+            unpaired_ids = [t for t in ids if t not in paired_set]
+
+            if not unpaired_ids:
+                # Every selected row is already paired: no question to ask.
+                try:
+                    self._repo.bulk_update_transactions(ids, **changes)
+                except Exception as e:
+                    QMessageBox.critical(
+                        self, "Bulk edit failed",
+                        f"The change was not applied:\n\n{e}",
+                    )
+                    return
+                # No amounts moved — only the category (and any ticked
+                # payee/status/memo) — so the sidebar totals are still valid,
+                # exactly as on the plain bulk-edit path below.
+                self._model.reload()
+                self.statusBar().showMessage(
+                    f"Updated {len(ids)} transactions · existing transfer "
+                    f"pairing{'s' if len(ids) != 1 else ''} kept", 4000,
+                )
+                return
+
             # Collect the source accounts to exclude from the destination
-            # picker — a transfer to itself is invalid.
+            # picker — a transfer to itself is invalid. Only the rows actually
+            # being paired constrain this: an already-paired row's own account
+            # is a legitimate destination for the others.
             source_accounts: set[int] = set()
             for proxy_idx in self._table.selectionModel().selectedRows():
                 source_idx = self._proxy.mapToSource(proxy_idx)
                 if not source_idx.isValid():
                     continue
-                source_accounts.add(self._model.row_at(source_idx.row()).account_id)
+                row = self._model.row_at(source_idx.row())
+                if row.id in paired_set:
+                    continue
+                source_accounts.add(row.account_id)
+            kept = len(paired_ids)
             other_id = self._prompt_destination_account(
                 exclude_account_ids=source_accounts,
                 title="Bulk transfer",
                 message=(
                     "You picked a transfer category. Which account is the "
-                    "other side for these transactions?"
+                    f"other side for these {len(unpaired_ids)} transactions?"
+                    + (
+                        f"\n\n{kept} of the selected transactions are already "
+                        "transfers — they keep the pairing they have and only "
+                        "change category."
+                        if kept else ""
+                    )
                 ),
             )
             if other_id is None:
@@ -2700,7 +2746,7 @@ class RegisterWindow(QMainWindow):
                 other_currency = other_acct.currency
             analyses: list[BulkRowAnalysis] = []
             matcher_errors: list[str] = []
-            for tid in ids:
+            for tid in unpaired_ids:          # ADR-190: paired rows sit this out
                 row = row_lookup.get(tid)
                 if row is None:
                     continue
@@ -2782,7 +2828,8 @@ class RegisterWindow(QMainWindow):
             self._refresh_sidebar_balances()
             self.statusBar().showMessage(
                 f"Linked {result.linked} · created {result.created} "
-                f"transfer{'s' if result.linked + result.created != 1 else ''}",
+                f"transfer{'s' if result.linked + result.created != 1 else ''}"
+                + (f" · {kept} already paired, kept" if kept else ""),
                 4000,
             )
             return
