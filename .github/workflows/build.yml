@@ -1,10 +1,11 @@
 name: build
 
-# Build the desktop app on macOS + Windows (ADR-104). Runs the offscreen
-# smoke tests, then produces an UNSIGNED packaged artifact per OS. Signing +
-# notarization need the owner's certs/accounts and are done by the per-OS
-# build scripts when the signing env vars are set (ADR-078 K1/K2); CI leaves
-# them unset, so artifacts are unsigned but verify the build is reproducible.
+# Build the desktop app on macOS + Windows + Linux (ADR-104, ADR-192). Runs the
+# offscreen smoke tests, then produces an UNSIGNED packaged artifact per OS.
+# Signing + notarization need the owner's certs/accounts and are done by the
+# per-OS build scripts when the signing env vars are set (ADR-078 K1/K2); CI
+# leaves them unset, so artifacts are unsigned but verify the build is
+# reproducible. Linux needs no signing at all.
 
 on:
   push:
@@ -20,13 +21,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        # ubuntu-22.04, not -latest: the .deb's dependencies are resolved from
+        # the build machine, so building on the oldest supported release keeps
+        # the package installable on newer ones too (ADR-192).
+        os: [macos-latest, windows-latest, ubuntu-22.04]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install Linux build + Qt runtime deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev desktop-file-utils libegl1 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+            libxcb-shape0
 
       - name: Install dependencies
         run: |
@@ -56,6 +68,10 @@ jobs:
         if: runner.os == 'Windows'
         run: pwsh -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 
+      - name: Build Linux packages
+        if: runner.os == 'Linux'
+        run: bash packaging/build_linux.sh
+
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -70,4 +86,15 @@ jobs:
         with:
           name: mfl-windows
           path: dist/*-setup.exe
+          if-no-files-found: error
+
+      - name: Upload Linux artifacts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mfl-linux
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+            dist/*.AppImage
           if-no-files-found: error

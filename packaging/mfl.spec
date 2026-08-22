@@ -1,9 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for My Financial Life (ADR-104).
 
-One spec, both desktop targets (PyInstaller can't cross-compile, so it is
-*run* on each OS — macOS produces a .app, Windows a folder+exe). Build via
-the per-OS scripts, which stamp build metadata first:
+One spec, all three desktop targets (PyInstaller can't cross-compile, so it is
+*run* on each OS — macOS produces a .app, Windows a folder+exe, Linux a folder
++ ELF that the .deb / AppImage / tarball wrap around, ADR-192). Build via the
+per-OS scripts, which stamp build metadata first:
 
     python packaging/stamp_build_info.py
     pyinstaller --noconfirm --clean packaging/mfl.spec
@@ -37,6 +38,9 @@ datas += collect_data_files("ofxtools")
 datas += collect_data_files("certifi")
 
 # ── per-OS bundle icon ──────────────────────────────────────────────────────
+# Linux has no in-binary icon: the desktop environment reads the icon from the
+# hicolor theme by the name in the .desktop file, which the ADR-192 build script
+# installs from assets/icons/mfl_icon_<size>.png.
 _icns = str(ROOT / "assets" / "icons" / "mfl.icns")
 _ico = str(ROOT / "assets" / "icons" / "mfl.ico")
 if sys.platform == "darwin":
@@ -45,6 +49,15 @@ elif sys.platform.startswith("win"):
     bundle_icon = _ico
 else:
     bundle_icon = None
+
+# ── output name ─────────────────────────────────────────────────────────────
+# macOS/Windows ship the display name ("My Financial Life.app" / .exe). On Linux
+# the binary is a command on $PATH and every packaging path (/opt, /usr/bin, the
+# AppDir) reads better without spaces, so the frozen output is the slug —
+# dist/my-financial-life/my-financial-life (ADR-192). The user-visible name comes
+# from the .desktop file's Name=, not the filename.
+LINUX_SLUG = "my-financial-life"
+output_name = LINUX_SLUG if sys.platform.startswith("linux") else APP_NAME
 
 block_cipher = None
 
@@ -74,7 +87,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=APP_NAME,
+    name=output_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -97,7 +110,7 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name=APP_NAME,
+    name=output_name,
 )
 
 if sys.platform == "darwin":

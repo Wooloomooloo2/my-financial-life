@@ -2,7 +2,7 @@
 
 > **Track your money with confidence — private, local, and powerful.**
 
-My Financial Life (MFL) is a free, open-source, locally-run personal finance application for **Windows and macOS** (Linux works too). It gives you a complete, real-time picture of your financial life — transactions, balances, spending trends, budgets, investments, and net worth — without your data ever leaving your machine.
+My Financial Life (MFL) is a free, open-source, locally-run personal finance application for **Windows, macOS and Linux**. It gives you a complete, real-time picture of your financial life — transactions, balances, spending trends, budgets, investments, and net worth — without your data ever leaving your machine.
 
 It is a sister application to **My Retirement Life**, and is designed to exchange data so that financial events recorded here — a salary change, a large purchase, a property sale — can feed retirement projections.
 
@@ -30,7 +30,8 @@ It is a sister application to **My Retirement Life**, and is designed to exchang
 | Persistence — live auto-saving `.mfl` file, rotating snapshots (GFS retention), Data Library | ✅ |
 | Theming / visual polish | 🔧 In progress |
 | Automatic bank downloads (bank feeds) | 🔧 In progress — pluggable providers, GoCardless (UK Open Banking) foundation (ADR-077) |
-| Packaging — single-file installers (PyInstaller) | 📋 Planned |
+| Packaging — Linux `.deb` / AppImage / tarball (ADR-192) | ✅ |
+| Packaging — macOS `.dmg` / Windows installer (unsigned; signing needs the owner's certs) | 🔧 In progress |
 
 ---
 
@@ -51,7 +52,7 @@ The **live application** is the native desktop app under `mfl_desktop/`:
 | Import | `ofxtools` (OFX/QFX); built-in CSV/QIF parsers |
 | FX rates | openexchangerates.org (optional, user-supplied key) |
 | Security prices | Tiingo (optional, user-supplied key) + manual entry |
-| Packaging (planned) | PyInstaller (Windows, macOS) |
+| Packaging | PyInstaller — Linux (`.deb` / AppImage / tarball), macOS (`.dmg`), Windows (Inno Setup) |
 
 Only two third-party runtime dependencies (`PySide6`, `ofxtools`) — SQLite is in the standard library. See [`docs/adr/`](docs/adr/) for the full architecture decision records.
 
@@ -59,7 +60,35 @@ Only two third-party runtime dependencies (`PySide6`, `ofxtools`) — SQLite is 
 
 ---
 
-## Running locally
+## Installing (Linux)
+
+No Python, no virtualenv, no terminal — the app is packaged with Python and Qt inside
+it (ADR-192). Build the artifacts with:
+
+```bash
+./packaging/build_linux.sh          # → dist/*.deb, *.tar.gz, *.AppImage
+```
+
+Then pick whichever suits the machine:
+
+| Artifact | Install | Notes |
+|---|---|---|
+| `my-financial-life_<ver>_amd64.deb` | `sudo apt install ./dist/my-financial-life_*.deb` | Debian/Ubuntu. Appears in the applications menu; `sudo apt remove my-financial-life` uninstalls |
+| `My_Financial_Life-<ver>-x86_64.AppImage` | `chmod +x` then double-click | One portable file, no install, no root. Needs FUSE — on a distro without `libfuse2`, run it with `--appimage-extract-and-run` |
+| `my-financial-life-<ver>-x86_64.tar.gz` | extract, then run `./my-financial-life` | Any distro. `./install.sh` adds a menu entry under `~/.local` (no root); `./install.sh --uninstall` removes it |
+
+Your data is not part of any of them: the `.mfl` file lives in
+`~/Documents/My Financial Life/`, with logs, snapshots and settings under
+`~/.local/share/MFL` and `~/.config/MFL`. Installing, upgrading or removing the
+app never touches it.
+
+macOS and Windows have their own scripts (`packaging/build_macos.sh`,
+`packaging/build_windows.ps1`) — both produce working *unsigned* builds, and sign
+when the owner's certificates are configured (ADR-078/104).
+
+---
+
+## Running from source
 
 The live application is the native desktop app under `mfl_desktop/` (PySide6 + SQLite).
 
@@ -184,8 +213,9 @@ my-financial-life/
 │   ├── snapshots.py / data_library.py  # backups + dataset management
 │   └── account_types.py / currencies.py / transfer_reconcile.py
 ├── docs/
-│   ├── adr/                         # 75 architecture decision records + README index
+│   ├── adr/                         # 193 architecture decision records + README index
 │   └── ontology/                    # MRL/MFL RDF ontologies (shared with My Retirement Life)
+├── packaging/                       # PyInstaller spec + per-OS build scripts (ADR-104/192)
 ├── main.py + app/                   # legacy v0.1 web app (reference only)
 └── prototype_register/              # original PySide6 data-grid prototype (reference)
 ```
@@ -199,7 +229,7 @@ computation factored into dependency-free, offscreen-testable pure modules
 ## Documentation
 
 Architecture and design rationale live as **Architecture Decision Records** in
-[`docs/adr/`](docs/adr/) — 156 and counting, each recording the decision, the
+[`docs/adr/`](docs/adr/) — 193 and counting, each recording the decision, the
 alternatives rejected, and the consequences. Start with the index:
 
 - [`docs/adr/README.md`](docs/adr/README.md) — full ADR index with summaries
@@ -211,4 +241,5 @@ alternatives rejected, and the consequences. Start with the index:
 
 ## Licence
 
-MIT — free to use, modify, and distribute.
+MIT — free to use, modify, and distribute. The app itself is free and fully
+unlocked: there is no licence key, no trial period and no purchase (ADR-193).

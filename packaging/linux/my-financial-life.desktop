@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=My Financial Life
+GenericName=Personal Finance Manager
+Comment=Track your money with confidence — private, local, and powerful
+Exec=my-financial-life
+Icon=my-financial-life
+Terminal=false
+Categories=Office;Finance;
+Keywords=finance;budget;money;accounts;banking;investments;net worth;
+StartupNotify=true
+StartupWMClass=my-financial-life

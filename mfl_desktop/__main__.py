@@ -231,7 +231,12 @@ def main(argv: list[str] | None = None) -> int:
     # are what a no-arg QSettings() keys off for app-level state (ADR-092).
     app.setOrganizationName(APP_NAME)
     app.setApplicationName(APP_NAME)
-    app.setApplicationVersion(__version__)  # ADR-079: surfaced in About + diagnostics
+    app.setApplicationVersion(__version__)  # surfaced in About + diagnostics
+    # ADR-192: the freedesktop application id, matching the .desktop file the
+    # Linux packages install (my-financial-life.desktop). It is what Wayland and
+    # X11 match a window to its launcher by, so without it GNOME shows a generic
+    # icon for the running app instead of ours. No-op on macOS/Windows.
+    app.setDesktopFileName("my-financial-life")
 
     # ADR-101: the brand app icon (window / taskbar / dock). The packaged
     # bundle icon (.icns/.ico) is set by the build step; this is the runtime

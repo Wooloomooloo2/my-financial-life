@@ -32,11 +32,6 @@ _LAST_DB_KEY = "session/last_db_path"
 # only adds the sandbox the access a path alone can't give (see
 # ``begin_main_file_access``).
 _LAST_DB_BOOKMARK_KEY = "session/last_db_bookmark"
-# Licensing is app-level, not per-file (ADR-079): one purchased key + one trial
-# clock cover every `.mfl` the user opens, so they live here, not in the
-# per-file `setting` table.
-_LICENSE_KEY = "license/key"
-_TRIAL_START_KEY = "license/trial_start"
 # Where the rotating snapshot backups live (ADR-109). This is the *parent* of
 # the ``MFL Snapshots/`` folder. It is app-level, not per-file: a filesystem
 # path is a per-machine storage decision, and storing it inside the `.mfl`
@@ -178,45 +173,3 @@ def library_root() -> Path:
     if raw:
         return Path(str(raw))
     return Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
-
-
-# ── Licensing (ADR-079) ────────────────────────────────────────────────────
-
-def get_license_key() -> Optional[str]:
-    """The installed license key string, or ``None`` if unlicensed."""
-    try:
-        raw = QSettings().value(_LICENSE_KEY)
-    except Exception:
-        return None
-    return str(raw) if raw else None
-
-
-def set_license_key(key: Optional[str]) -> None:
-    """Persist (or clear, with ``None``) the installed license key."""
-    try:
-        s = QSettings()
-        if key:
-            s.setValue(_LICENSE_KEY, key)
-        else:
-            s.remove(_LICENSE_KEY)
-    except Exception:
-        pass
-
-
-def get_trial_start() -> Optional[str]:
-    """The recorded ISO date the free trial began, or ``None`` if not yet
-    started on this machine."""
-    try:
-        raw = QSettings().value(_TRIAL_START_KEY)
-    except Exception:
-        return None
-    return str(raw) if raw else None
-
-
-def set_trial_start(iso_date: str) -> None:
-    """Record the trial start date (ISO). Best-effort; first-write-wins is the
-    caller's responsibility."""
-    try:
-        QSettings().setValue(_TRIAL_START_KEY, iso_date)
-    except Exception:
-        pass

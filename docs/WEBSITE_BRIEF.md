@@ -104,6 +104,11 @@ App Store / Microsoft Store versions are a later channel (1.1+); 1.0 is **direct
 
 ## 7. Pricing & licensing (exact model — keep precise)
 
+> ⚠️ **Out of date since ADR-193 (2026-08-19): the app is free** — no licence key, no trial, no
+> purchase, and none of that machinery is in the app any more. **The site must not advertise a
+> 30-day trial, a Buy flow or key delivery until this section is rewritten.** What follows is the
+> June 2026 model, kept for reference.
+
 - **One-time perpetual purchase**, target **~£25–45 / $30–50** (owner sets the final number). **Everything is included** — all reports, investments, multi-currency, and (when live) all feed providers. No subscription, no feature tiers, no add-ons.
 - **Major versions (2.0) are a separate paid upgrade**; a 1.x licence keeps working on every 1.x release forever.
 - **Free trial:** a **30-day, full-feature** trial — the whole app is unlocked during it; buying a key removes the gentle expiry nag. (The trial is enforced in-app; the site just needs to say "try free for 30 days.")

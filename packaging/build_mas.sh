@@ -11,8 +11,8 @@
 #
 # --adhoc: ad-hoc-signs the app (codesign --sign -) WITH the sandbox entitlements,
 #   so macOS enforces the App Sandbox on THIS Mac — enough to test bookmarks, the
-#   container data library, store-build licensing, and the first-run folder picker
-#   without any Apple Developer account. No .pkg, no upload; not notarized and not
+#   container data library, and the first-run folder picker without any Apple
+#   Developer account. No .pkg, no upload; not notarized and not
 #   distributable. The signed app is placed in ~/Applications (right-click > Open
 #   the first time to clear Gatekeeper).
 #
@@ -44,8 +44,8 @@ SRC_APP="dist/${APP_NAME}.app"
 PKG="dist/${APP_NAME}.pkg"
 ENTITLEMENTS="$PWD/packaging/MyFinancialLife.entitlements"
 
-echo "==> Stamping build metadata (store build — licensing dormant, ADR-125)"
-python packaging/stamp_build_info.py --store
+echo "==> Stamping build metadata"
+python packaging/stamp_build_info.py
 
 echo "==> Running PyInstaller (packaging/mfl.spec)"
 pyinstaller --noconfirm --clean packaging/mfl.spec
