@@ -26,7 +26,7 @@ What these lock down:
 
 The calc half is Qt-free; the view half drives the real window offscreen.
 
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_budget_burndown.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_budget_burndown.py
 """
 from __future__ import annotations
 

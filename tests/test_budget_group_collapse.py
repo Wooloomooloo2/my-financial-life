@@ -14,7 +14,7 @@ the *window* half:
 
 Needs PySide6; run offscreen:
 
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_budget_group_collapse.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_budget_group_collapse.py
 """
 from __future__ import annotations
 

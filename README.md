@@ -64,7 +64,7 @@ Only two third-party runtime dependencies (`PySide6`, `ofxtools`) — SQLite is 
 The live application is the native desktop app under `mfl_desktop/` (PySide6 + SQLite).
 
 ### Prerequisites
-- Python 3.13+
+- Python 3.11+
 - Git
 
 ### Setup
@@ -72,28 +72,28 @@ The live application is the native desktop app under `mfl_desktop/` (PySide6 + S
 ```bash
 git clone https://github.com/Wooloomooloo2/my-financial-life.git
 cd my-financial-life
-python -m venv .venv
+python -m venv venv
 ```
 
 Activate the virtual environment:
 
 ```powershell
 # Windows — PowerShell
-.\.venv\Scripts\Activate.ps1
+.\venv\Scripts\Activate.ps1
 ```
 
 ```bat
 :: Windows — cmd.exe
-.venv\Scripts\activate.bat
+venv\Scripts\activate.bat
 ```
 
 ```bash
 # macOS / Linux
-source .venv/bin/activate
+source venv/bin/activate
 ```
 
-> **PowerShell note:** use `.\.venv\Scripts\Activate.ps1` (with the `.\` prefix
-> and the `.ps1` extension). The bare `.venv\Scripts\activate` form only works
+> **PowerShell note:** use `.\venv\Scripts\Activate.ps1` (with the `.\` prefix
+> and the `.ps1` extension). The bare `venv\Scripts\activate` form only works
 > in cmd.exe. If activation is blocked by execution policy, run
 > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry.
 

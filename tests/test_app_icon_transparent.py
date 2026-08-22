@@ -17,7 +17,7 @@ Qt, not Pillow: Pillow is a *tool* dependency (``tools/make_transparent_logos``
 needs it) and is not installed in the app's venv, so a test that imported it
 would simply not run. Qt reads png/icns/ico natively.
 
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_app_icon_transparent.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_app_icon_transparent.py
 """
 from __future__ import annotations
 

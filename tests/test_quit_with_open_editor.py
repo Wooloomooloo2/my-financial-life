@@ -19,7 +19,7 @@ activate-refresh (``tests/test_shutdown_refresh_guard.py``), and it takes the
 same guard — plus an ordering fix, so a genuine in-flight edit is committed
 while the connection is still open instead of being silently dropped.
 
-Run: ``.venv/bin/pytest tests/test_quit_with_open_editor.py``
+Run: ``venv/bin/pytest tests/test_quit_with_open_editor.py``
 """
 from __future__ import annotations
 

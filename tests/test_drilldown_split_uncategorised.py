@@ -21,7 +21,7 @@ Both the base proxy (``TransactionFilterProxy.set_category_id``, kept capable
 for non-UI callers) and the drill proxy (``set_category_descendant_ids``, what
 the Uncategorised list actually uses) are covered.
 
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_drilldown_split_uncategorised.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_drilldown_split_uncategorised.py
 """
 from __future__ import annotations
 

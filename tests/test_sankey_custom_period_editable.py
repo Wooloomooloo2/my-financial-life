@@ -25,7 +25,7 @@ What these lock down:
   no-op `activated` emits where `currentIndexChanged` used to stay silent.
 - Switching to a different preset still works.
 
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_sankey_custom_period_editable.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_sankey_custom_period_editable.py
 """
 from __future__ import annotations
 

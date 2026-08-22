@@ -24,7 +24,7 @@ What these lock down:
 - A **group** scope sees its children's bills (an ADR-170 straggler: the scope
   filter was an exact `==`).
 
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_budget_scheduled_bills.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_budget_scheduled_bills.py
 """
 from __future__ import annotations
 

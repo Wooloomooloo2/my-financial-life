@@ -22,7 +22,7 @@ What these lock down:
 
 Needs PySide6; run offscreen:
 
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_budget_monthly_row.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_budget_monthly_row.py
 """
 from __future__ import annotations
 

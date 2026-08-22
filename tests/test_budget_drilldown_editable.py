@@ -10,7 +10,7 @@ with no double-click → dialog they could only be viewed, and their splits were
 invisible.
 
 Offscreen (PySide6):
-    QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_budget_drilldown_editable.py
+    QT_QPA_PLATFORM=offscreen venv/bin/python tests/test_budget_drilldown_editable.py
 """
 from __future__ import annotations
 

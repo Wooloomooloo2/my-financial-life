@@ -15,7 +15,7 @@ shows every unreconciled row.
 These drive the real ``ReconcileWizard`` offscreen — the empty-table symptom
 was invisible to the repository-level tests, which asserted the gate worked.
 
-Run: ``.venv/bin/pytest tests/test_reconcile_preselection.py``
+Run: ``venv/bin/pytest tests/test_reconcile_preselection.py``
 """
 from __future__ import annotations
 

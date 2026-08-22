@@ -25,7 +25,7 @@ These tests cover both halves: the repository's refusal (the reason this was
 never data corruption) and the register's partition (the reason it no longer
 asks).
 
-Run: ``.venv/bin/pytest tests/test_bulk_edit_keeps_existing_transfer.py``
+Run: ``venv/bin/pytest tests/test_bulk_edit_keeps_existing_transfer.py``
 """
 from __future__ import annotations
 
