@@ -7,9 +7,18 @@ They assert on strings and stylesheets, not pixels, so they can't go flaky.
 """
 from __future__ import annotations
 
+import os
+import sys
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from mfl_desktop.ui import theme, tokens
 from mfl_desktop.ui.budget_window import _fmt_month, _fmt_month_long, _money

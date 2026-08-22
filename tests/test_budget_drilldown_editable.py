@@ -70,6 +70,23 @@ def _win(repo, ids):
     )
 
 
+def _close(win):
+    """Destroy the window the way the app does, not the way Python would.
+
+    budget_window builds this window with ``parent=self`` + ``WA_DeleteOnClose``
+    (ADR-147), so Qt owns it and tears it down deterministically on close. The
+    tests build it parentless, which leaves the C++ object to Python's GC —
+    and ``TransactionTableModel``/``_TxnIdFilterProxy`` are themselves
+    unparented, so a collection that ran between the table and its model took
+    the interpreter down with a segfault at an arbitrary later moment. Handing
+    the window to Qt's delete queue and draining it restores the app's
+    ordering.
+    """
+    win.close()
+    win.deleteLater()
+    QApplication.instance().processEvents()
+
+
 def _row_for(proxy, model, pred):
     return [
         r for r in range(proxy.rowCount())
@@ -87,7 +104,7 @@ def test_edit_triggers_are_set():
         assert trig & QAbstractItemView.DoubleClicked
         assert trig & QAbstractItemView.EditKeyPressed
     finally:
-        win.close()
+        _close(win)
 
 
 def test_split_row_double_click_opens_split_dialog():
@@ -104,7 +121,7 @@ def test_split_row_double_click_opens_split_dialog():
         win._on_table_double_clicked(proxy.index(split_rows[0], 0))
         assert seen.get("id") == split_id
     finally:
-        win.close()
+        _close(win)
 
 
 def test_plain_row_double_click_stays_inline():
@@ -125,7 +142,7 @@ def test_plain_row_double_click_stays_inline():
         win._on_table_double_clicked(proxy.index(plain_rows[0], 0))
         assert opened == {"split": False, "inv": False}
     finally:
-        win.close()
+        _close(win)
 
 
 # ── bare-script runner ──────────────────────────────────────────────────────
